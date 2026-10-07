@@ -22,7 +22,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
 
 from .agent import AgentSpec, ConfigError, missing_agent_env
-from .call_start import CallStart
+from .call_start import PRIMING_TIMEOUT_ENV, PRIMING_TIMEOUT_S, CallStart
 from .context import AGENT_CONTEXT_ENV, AgentContext, CallClock
 from .providers import load_provider
 from .providers.base import (
@@ -63,7 +63,12 @@ class _Pod:
     busy: bool = False
 
 
-def create_app(agent: AgentSpec, provider: VoiceProvider, turn_taking: TurnTaking | None = None) -> FastAPI:
+def create_app(
+    agent: AgentSpec,
+    provider: VoiceProvider,
+    turn_taking: TurnTaking | None = None,
+    priming_timeout_s: float = PRIMING_TIMEOUT_S,
+) -> FastAPI:
     """The app for one candidate pod."""
     pod = _Pod()
     turns = turn_taking or TurnTaking()
@@ -94,20 +99,24 @@ def create_app(agent: AgentSpec, provider: VoiceProvider, turn_taking: TurnTakin
             return
         pod.busy = True
         await websocket.accept()
-        await run_call(agent, provider, turns, websocket)
+        await run_call(agent, provider, turns, websocket, priming_timeout_s)
 
     return app
 
 
 async def run_call(
-    agent: AgentSpec, provider: VoiceProvider, turns: TurnTaking, websocket: WebSocket
+    agent: AgentSpec,
+    provider: VoiceProvider,
+    turns: TurnTaking,
+    websocket: WebSocket,
+    priming_timeout_s: float = PRIMING_TIMEOUT_S,
 ) -> None:
     """One call, start to finish."""
     clock = CallClock(agent.call_time())
     clock.start()
     session = CallSession(agent.open_call(clock), agent.tools, agent.gates, agent.call_start.connect_reads)
     line = CallerLine(websocket)
-    start = CallStart(agent.call_start)
+    start = CallStart(agent.call_start, priming_timeout_s)
     runtime = CallRuntime(
         line,
         session,
@@ -148,4 +157,18 @@ def build_app_from_env(env: Mapping[str, str]) -> FastAPI:
         provider = provider_cls.from_env(env)
     except (ValueError, LookupError) as err:  # ContextError, ConfigError, Unknown{Agent,Vendor}
         raise ConfigError(str(err)) from err
-    return create_app(agent, provider)
+    return create_app(agent, provider, priming_timeout_s=priming_timeout_from_env(env))
+
+
+def priming_timeout_from_env(env: Mapping[str, str]) -> float:
+    """``VAMOS_PRIMING_TIMEOUT_S`` (seconds, > 0), or the framework default."""
+    raw = env.get(PRIMING_TIMEOUT_ENV)
+    if not raw:
+        return PRIMING_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not 0 < value < float("inf"):
+        raise ConfigError(f"{PRIMING_TIMEOUT_ENV} must be a positive number of seconds, got {raw!r}")
+    return value

@@ -93,9 +93,9 @@ def _gemini_schema(node: Any) -> Any:
 class GeminiLiveProvider(VoiceProvider):
     name = "gemini_live"
     trace_adapter = "gemini-live"
-    # GEMINI_* is reserved by Veris Bench candidate-env; GOOGLE_API_KEY is the name
-    # Google's own genai SDK reads, so it works on the bench and anywhere else.
-    required_env = ("GOOGLE_API_KEY",)
+    # The standard name, as on the other VAmoS benches; Veris Bench allows this exact
+    # candidate-env key (other GEMINI_* names stay reserved for its harnesses).
+    required_env = ("GEMINI_API_KEY",)
     tool_format = GeminiToolFormat()
     connect: Connect = staticmethod(connect_websocket)
 
@@ -106,7 +106,7 @@ class GeminiLiveProvider(VoiceProvider):
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Self:
         return cls(
-            api_key=env["GOOGLE_API_KEY"],
+            api_key=env["GEMINI_API_KEY"],
             model=env.get("VAMOS_GEMINI_MODEL") or DEFAULT_MODEL,
             voice=env.get("VAMOS_GEMINI_VOICE") or DEFAULT_VOICE,
         )
@@ -189,7 +189,11 @@ class _GeminiCall:
             await self.send(_prime_turn(call.setup.start_policy.prime_note))
         else:
             await self.finish_priming()
-        await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
+        await run_until_first_done(
+            call.start.priming_deadline(lambda: call.session.missing_reads, self.finish_priming),
+            caller_to_vendor=call.inbound.run(),
+            vendor_to_caller=self.events(),
+        )
 
     async def events(self) -> None:
         while (message := await self.recv()) is not None:
@@ -232,8 +236,7 @@ class _GeminiCall:
         if self.priming:
             missing = call.session.missing_reads
             if missing:
-                note = call.setup.start_policy.prime_note
-                await self.send(_prime_turn(f"{note} Still missing: {', '.join(missing)}."))
+                await self.send(_prime_turn(call.setup.start_policy.reprime_note(missing)))
                 return False
             await self.finish_priming()
             return False
@@ -243,7 +246,10 @@ class _GeminiCall:
         return False
 
     async def finish_priming(self) -> None:
-        """The reads are done (or there were none): release the caller, and open if the agent speaks first."""
+        """The reads are done (or there were none, or the deadline passed): release the caller,
+        and open if the agent speaks first. Runs once."""
+        if not self.priming:
+            return
         call = self.call
         self.priming = False
         call.start.mark_primed()

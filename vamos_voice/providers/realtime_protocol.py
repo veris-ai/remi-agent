@@ -2,9 +2,18 @@
 
 OpenAI Realtime speaks it natively; xAI's Grok Voice Agent API speaks a close
 dialect. ``RealtimeProtocolProvider`` implements the protocol once; a vendor
-subclasses it and supplies only ``url``, ``headers`` and ``session_config``
-(see ``vamos_voice/providers/openai_realtime``; a Grok provider would be another ~40-line
-subclass, not a copy of this file).
+subclasses it and supplies ``url``, ``headers`` and ``session_config``, plus
+the two capabilities dialects differ on, each declared rather than branched
+on inside the loop:
+
+- ``priming_frames``: how the connect reads are forced. The default is
+  ``response.create`` with ``tool_choice`` (OpenAI); a dialect without forced
+  tool choice (Grok) sends a labelled note instead.
+- ``truncates_on_barge_in``: whether ``conversation.item.truncate`` is sent
+  when the caller talks over the agent (OpenAI yes; Grok documents it as
+  unsupported).
+
+See ``vamos_voice/providers/openai_realtime`` and ``grok_voice``.
 
 The traffic goes through the ``websockets`` asyncio client, sending text JSON
 frames and reading them with ``recv()``, because the bench's
@@ -13,9 +22,9 @@ exactly that client's ``send``/``recv``. Input transcription is enabled so
 the caller's words appear in that trace.
 
 Call start (``CALLEE_FIRST``): the session opens with the caller's audio held;
-a ``response.create`` with ``tool_choice: "required"`` makes the model run the
-connect reads, and any read it skipped is forced by name. Only then is the
-held audio released, so server VAD hears "Hello?" after the reads are done and
+the vendor's ``priming_frames`` make the model run the connect reads (OpenAI:
+``response.create`` with ``tool_choice: "required"``, then any skipped read
+forced by name). Only then is the held audio released, so server VAD hears "Hello?" after the reads are done and
 answers it with full knowledge of the account.
 
 Call start (``AGENT_FIRST``): any connect reads are primed the same way, then
@@ -29,13 +38,13 @@ import abc
 import base64
 import json
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 import websockets
 
 from ..tools import ToolSpec
 from .base import CallRuntime, SessionSetup, VoiceProvider
-from .wire import Connect, connect_websocket, run_until_first_done
+from .wire import Connect, connect_websocket, dispatch_json_call, run_until_first_done
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +65,8 @@ class RealtimeProtocolProvider(VoiceProvider, abc.ABC):
     """A vendor speaking the Realtime protocol. Subclasses give the endpoint and session."""
 
     tool_format = RealtimeToolFormat()
+    #: Send ``conversation.item.truncate`` on barge-in, so the model's context holds only what was heard.
+    truncates_on_barge_in: ClassVar[bool] = True
     #: Overridable in tests to capture the outbound frames without a network.
     connect: Connect = staticmethod(connect_websocket)
 
@@ -74,10 +85,14 @@ class RealtimeProtocolProvider(VoiceProvider, abc.ABC):
         instructions = f"{setup.instructions}\n\n{setup.start_policy.opening_instruction}"
         return {"type": "response.create", "response": {"instructions": instructions}}
 
-    def priming_response(self, forced_tool: str | None) -> dict[str, Any]:
-        """The ``response.create`` that runs the connect reads before the callee is heard."""
-        choice: Any = {"type": "function", "name": forced_tool} if forced_tool else "required"
-        return {"type": "response.create", "response": {"tool_choice": choice}}
+    def priming_frames(self, setup: SessionSetup, missing: list[str], first: bool) -> list[dict[str, Any]]:
+        """What makes the model run the connect reads before the callee is heard.
+
+        ``first`` is the opening request; later ones name the reads still ``missing``.
+        Default: ``response.create`` forcing a tool call (any, then the missing one by name).
+        """
+        choice: Any = "required" if first else {"type": "function", "name": missing[0]}
+        return [{"type": "response.create", "response": {"tool_choice": choice}}]
 
     async def run_call(self, call: CallRuntime) -> None:
         async with self.connect(self.url(), self.headers()) as ws:
@@ -96,6 +111,10 @@ class _RealtimeCall:
     async def send(self, event: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(event))
 
+    async def send_all(self, events: list[dict[str, Any]]) -> None:
+        for event in events:
+            await self.send(event)
+
     async def run(self) -> None:
         call = self.call
         await self.send({"type": "session.update", "session": self.provider.session_config(call.setup)})
@@ -104,11 +123,15 @@ class _RealtimeCall:
             await self.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()})
 
         call.inbound.bind(forward)
-        if call.session.missing_reads:
-            await self.send(self.provider.priming_response(None))
+        if missing := call.session.missing_reads:
+            await self.send_all(self.provider.priming_frames(call.setup, missing, first=True))
         else:
             await self.finish_priming()
-        await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
+        await run_until_first_done(
+            call.start.priming_deadline(lambda: call.session.missing_reads, self.finish_priming),
+            caller_to_vendor=call.inbound.run(),
+            vendor_to_caller=self.events(),
+        )
 
     async def events(self) -> None:
         while True:
@@ -130,7 +153,7 @@ class _RealtimeCall:
             self.audio_item = item
             await call.outbound.send(base64.b64decode(event.get("delta", "")), item)
         elif kind == "input_audio_buffer.speech_started":
-            await self.truncate_playing_item()
+            await self.barge_in()
         elif kind == "input_audio_buffer.committed":
             call.start.mark_callee_spoke()
         elif kind == "response.function_call_arguments.done":
@@ -149,22 +172,13 @@ class _RealtimeCall:
         return False
 
     async def run_tool(self, event: dict[str, Any]) -> None:
-        name, call_id = event["name"], event["call_id"]
-        try:
-            args = json.loads(event.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            # A response cancelled mid-generation leaves its arguments cut off: never run a half call.
-            logger.warning("realtime: %s arguments truncated; not dispatched", name)
+        output = await dispatch_json_call(self.call.session, event["name"], event.get("arguments"))
+        if output is None:
             return
-        result = await self.call.session.dispatch(name, args)
         await self.send(
             {
                 "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": json.dumps(result, default=str),
-                },
+                "item": {"type": "function_call_output", "call_id": event["call_id"], "output": output},
             }
         )
         self.tool_answered = True
@@ -175,7 +189,7 @@ class _RealtimeCall:
         if self.priming:
             missing = call.session.missing_reads
             if missing:
-                await self.send(self.provider.priming_response(missing[0]))
+                await self.send_all(self.provider.priming_frames(call.setup, missing, first=False))
                 return False
             await self.finish_priming()
             return False
@@ -187,7 +201,10 @@ class _RealtimeCall:
         return False
 
     async def finish_priming(self) -> None:
-        """The reads are done (or there were none): release the caller, and open if the agent speaks first."""
+        """The reads are done (or there were none, or the deadline passed): release the caller,
+        and open if the agent speaks first. Runs once."""
+        if not self.priming:
+            return
         call = self.call
         self.priming = False
         call.start.mark_primed()
@@ -195,13 +212,17 @@ class _RealtimeCall:
         if call.setup.start_policy.agent_opens:
             await self.send(self.provider.opening_response(call.setup))
 
-    async def truncate_playing_item(self) -> None:
-        """Barge-in: tell the vendor how much of the reply the caller actually heard, so the
-        model's context does not contain words that never played."""
+    async def barge_in(self) -> None:
+        """The caller talks over the agent. Where the vendor supports it, tell it how much of the
+        reply the caller actually heard, so the model's context does not contain words that never
+        played; either way, what is still queued will not be heard."""
         item, outbound = self.audio_item, self.call.outbound
         self.audio_item = None
         if not item or outbound.played_ms(item) >= outbound.sent_ms(item):
             return  # nothing of it is still unplayed
+        if not self.provider.truncates_on_barge_in:
+            outbound.interrupted()
+            return
         await self.send(
             {
                 "type": "conversation.item.truncate",

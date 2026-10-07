@@ -170,7 +170,15 @@ class PipecatProvider(VoiceProvider):
             if not missing:
                 return
             forced = {"type": "function", "function": {"name": missing[0]}}
-        raise RuntimeError(f"priming never ran {call.session.missing_reads}")
+        call.start.warn_priming_abandoned(call.session.missing_reads)
+
+    async def prime_within_deadline(self, call: CallRuntime, context: LLMContext) -> None:
+        """Prime, but never past the call's priming deadline; then the caller is heard either way."""
+        try:
+            await asyncio.wait_for(self.prime(call, context), call.start.priming_timeout_s)
+        except TimeoutError:
+            call.start.warn_priming_abandoned(call.session.missing_reads)
+        call.start.mark_primed()
 
     def opening_frames(self, setup: SessionSetup) -> list[Frame]:
         """What the pipeline does as soon as the caller is connected: open the call if the agent speaks first."""
@@ -183,8 +191,7 @@ class PipecatProvider(VoiceProvider):
 
     async def run_call(self, call: CallRuntime) -> None:
         context = self.build_context(call.setup)
-        await self.prime(call, context)
-        call.start.mark_primed()
+        await self.prime_within_deadline(call, context)
         worker = self.build_worker(call, context)
         await PipelineRunner(handle_sigint=False).run(worker)
 

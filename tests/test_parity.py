@@ -5,14 +5,20 @@ what it actually SENT (the vendor's session/setup frame, its priming request,
 its audio toward the caller), not on module attributes:
 
 - byte-identical instructions, and exactly the registry's tools and schemas;
-- the same turn-taking numbers mapped into each vendor's VAD;
+- the same turn-taking numbers mapped into each vendor's VAD, as far as the
+  vendor exposes one (each script declares what its vendor maps: Grok has no
+  prefix padding, GPT-Live has no VAD at all);
 - CALLEE_FIRST: the connect reads run first, the caller's "Hello?" is held
   until they finish, no greeting is triggered, and no agent audio reaches the
   caller before the callee has spoken;
 - AGENT_FIRST (the test-only inbound agent): the opening turn is the first
   request after setup, caller audio is never held, and agent audio reaches
   the caller before they speak;
-- end_call hangs up the line.
+- end_call hangs up the line;
+- the priming deadline: a model that never runs the connect reads does not
+  hold the caller forever; their audio is released at the deadline, nothing
+  is run on the model's behalf, and the agent's gates refuse a debt tool with
+  the missing reads named.
 """
 
 from __future__ import annotations
@@ -28,7 +34,16 @@ import pytest
 
 from vamos_voice.providers import load_provider, vendor_names
 
-from .fakes import AGENT_CASES, HELLO, AgentCase, FakeLine, FakeVendorSocket, ScriptedSession, runtime
+from .fakes import (
+    AGENT_CASES,
+    HELLO,
+    AgentCase,
+    FakeLine,
+    FakeVendorSocket,
+    ScriptedSession,
+    remi_gated_session,
+    runtime,
+)
 
 CASES = {case.name: case for case in AGENT_CASES}
 
@@ -42,7 +57,7 @@ def installed(name: str) -> bool:
 
 
 def test_every_vendor_folder_is_covered_here() -> None:
-    assert set(vendor_names()) == {"openai_realtime", "gemini_live", "pipecat"}
+    assert set(vendor_names()) == {"openai_realtime", "gemini_live", "grok_voice", "gpt_live", "pipecat"}
 
 
 def test_every_agent_pack_is_covered_here() -> None:
@@ -51,13 +66,29 @@ def test_every_agent_pack_is_covered_here() -> None:
     assert set(agent_names()) <= set(CASES), "add the new agent to tests/fakes.AGENT_CASES"
 
 
+#: Vendor keys use their standard names (bench candidate-env secrets, as on the other VAmoS benches).
+STANDARD_KEYS = {
+    "openai_realtime": ("OPENAI_API_KEY",),
+    "gpt_live": ("OPENAI_API_KEY",),
+    "gemini_live": ("GEMINI_API_KEY",),
+    "grok_voice": ("XAI_API_KEY",),
+}
+
+
+@pytest.mark.parametrize("name", sorted(STANDARD_KEYS))
+def test_speech_to_speech_vendors_read_the_standard_key_names(name: str) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    assert load_provider(name).required_env == STANDARD_KEYS[name]
+
+
 @pytest.mark.parametrize("name", vendor_names())
 def test_provider_metadata(name: str) -> None:
     if not installed(name):
         pytest.skip(f"{name} extra not installed")
     provider = load_provider(name)
     assert provider.name == name
-    assert provider.trace_adapter in {None, "openai-realtime", "gemini-live"}
+    assert provider.trace_adapter in {None, "openai-realtime", "gemini-live", "gpt-live"}
 
 
 # --- realtime-protocol vendors: a scripted vendor socket --------------------------------------
@@ -105,6 +136,9 @@ class OpenAIScript:
     def callee_spoke(self) -> None:
         self.sock.push({"type": "input_audio_buffer.committed", "item_id": "u1"})
 
+    #: (silence_ms, prefix_padding_ms) the vendor is sent; None where it has no such setting.
+    expected_vad = (800, 300)
+
     @staticmethod
     def setup(frame: dict[str, Any]) -> dict[str, Any]:
         session = frame["session"]
@@ -140,8 +174,137 @@ class OpenAIScript:
         pass
 
 
+class GrokScript(OpenAIScript):
+    """Grok's Realtime dialect: top-level VAD, grok-transcribe, priming by a labelled note."""
+
+    expected_vad = (800, None)
+
+    @staticmethod
+    def setup(frame: dict[str, Any]) -> dict[str, Any]:
+        session = frame["session"]
+        vad = session["turn_detection"]
+        return {
+            "instructions": session["instructions"],
+            "tools": {
+                t["name"]: (set(t["parameters"]["properties"]), set(t["parameters"]["required"]))
+                for t in session["tools"]
+            },
+            "silence_ms": vad["silence_duration_ms"],
+            "prefix_ms": vad.get("prefix_padding_ms"),
+            "transcribes_caller": session["audio"]["input"]["transcription"] == {"model": "grok-transcribe"},
+        }
+
+    # Grok cannot force a tool call: priming is a user-role note item, then response.create.
+    is_prime = staticmethod(
+        lambda f: (
+            (f.get("type") == "conversation.item.create" and f["item"]["type"] == "message")
+            or (f.get("type") == "response.create" and "instructions" in f.get("response", {}))
+        )
+    )
+
+    @staticmethod
+    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame["item"]["role"] == "user"
+        assert frame["item"]["content"] == [{"type": "input_text", "text": case.policy.prime_note}]
+
+
+def grok_call(sock: FakeVendorSocket) -> dict[str, Any]:
+    from vamos_voice.providers.grok_voice import GrokVoiceProvider
+
+    provider = GrokVoiceProvider("xai-test", "grok-voice-think-fast-2.0", "eve")
+    provider.connect = sock.connector()
+    return {"provider": provider}
+
+
+class GptLiveScript:
+    """Server events in the GPT-Live protocol: tool calls arrive from the delegated backend."""
+
+    expected_vad = (None, None)  # full duplex: GPT-Live exposes no VAD settings
+
+    def __init__(self, sock: FakeVendorSocket) -> None:
+        self.sock, self.n = sock, 0
+
+    def ready(self) -> None:
+        self.sock.push({"type": "session.started", "session": {"id": "sess_1", "model": "gpt-live-1"}})
+
+    def tool_calls(self, *names: str) -> None:
+        self.n += 1
+        delegation = f"item_d{self.n}"
+        self.sock.push(
+            {"type": "session.delegation.created", "delegation": {"id": delegation, "target": "responses"}}
+        )
+        for i, name in enumerate(names):
+            item = {"type": "function_call", "call_id": f"call_{self.n}_{i}", "name": name, "arguments": "{}"}
+            self.sock.push(
+                {
+                    "type": "response.event",
+                    "delegation_id": delegation,
+                    "event": {"type": "response.output_item.done", "item": item},
+                }
+            )
+        self.sock.push(
+            {"type": "response.event", "delegation_id": delegation, "event": {"type": "response.completed"}}
+        )
+
+    def audio(self) -> None:
+        self.sock.push(
+            {"type": "session.output_audio.delta", "delta": base64.b64encode(b"\x00\x01" * 240).decode()}
+        )
+
+    def callee_spoke(self) -> None:
+        self.sock.push(
+            {"type": "session.input_transcript.delta", "delta": "Hello?", "start_ms": 0, "end_ms": 400}
+        )
+
+    @staticmethod
+    def setup(frame: dict[str, Any]) -> dict[str, Any]:
+        session = frame["session"]
+        backend = session["delegation"]["responses"]
+        assert backend["instructions"].endswith(session["instructions"])
+        return {
+            "instructions": session["instructions"],
+            "tools": {
+                t["name"]: (set(t["parameters"]["properties"]), set(t["parameters"]["required"]))
+                for t in backend["tools"]
+            },
+            "silence_ms": None,
+            "prefix_ms": None,
+            "transcribes_caller": True,  # the session always streams the caller's transcript
+        }
+
+    is_setup = staticmethod(lambda f: f.get("type") == "session.start")
+    is_prime = staticmethod(lambda f: f.get("type") == "session.instructions.append")
+    is_caller_audio = staticmethod(lambda f: f.get("type") == "session.input_audio.append")
+
+    @staticmethod
+    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame == {
+            "type": "session.instructions.append",
+            "delegation_id": None,
+            "content": case.policy.prime_instruction,
+        }
+
+    @staticmethod
+    def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame == {
+            "type": "session.instructions.append",
+            "delegation_id": None,
+            "content": case.policy.opening_instruction,
+        }
+
+
+def gpt_live_call(sock: FakeVendorSocket) -> dict[str, Any]:
+    from vamos_voice.providers.gpt_live import GptLiveProvider
+
+    provider = GptLiveProvider("sk-test", "gpt-live-1", "gpt-5.6-terra", "marin")
+    provider.connect = sock.connector()
+    return {"provider": provider}
+
+
 class GeminiScript:
     """Server messages in the Gemini Live protocol."""
+
+    expected_vad = (800, 300)
 
     def __init__(self, sock: FakeVendorSocket) -> None:
         self.sock, self.n = sock, 0
@@ -214,7 +377,12 @@ def gemini_call(sock: FakeVendorSocket) -> dict[str, Any]:
     return {"provider": provider}
 
 
-SOCKET_VENDORS = {"openai_realtime": (openai_call, OpenAIScript), "gemini_live": (gemini_call, GeminiScript)}
+SOCKET_VENDORS = {
+    "openai_realtime": (openai_call, OpenAIScript),
+    "gemini_live": (gemini_call, GeminiScript),
+    "grok_voice": (grok_call, GrokScript),
+    "gpt_live": (gpt_live_call, GptLiveScript),
+}
 
 
 CALLEE_FIRST_CASES = sorted(n for n, c in CASES.items() if not c.policy.agent_opens)
@@ -243,7 +411,7 @@ async def test_socket_vendor_primes_and_waits_for_the_callee(name: str, agent: s
     sent_setup = script.setup(await sock.wait_for(script.is_setup))
     assert sent_setup["instructions"] == case.setup().instructions
     assert sent_setup["tools"] == case.expected_tools()
-    assert (sent_setup["silence_ms"], sent_setup["prefix_ms"]) == (800, 300)
+    assert (sent_setup["silence_ms"], sent_setup["prefix_ms"]) == script.expected_vad
     assert sent_setup["transcribes_caller"]
     assert "x-goog-api-key" in sock.headers or "Authorization" in sock.headers
     assert "key=" not in sock.url
@@ -278,6 +446,49 @@ async def test_socket_vendor_primes_and_waits_for_the_callee(name: str, agent: s
     )
 
 
+MISSING_READS_REFUSAL = {
+    "error": "Run the connect-time reads first: get_account, get_dialed_phone, get_contact_history."
+}
+
+
+@pytest.mark.parametrize("name", sorted(SOCKET_VENDORS))
+async def test_socket_vendor_releases_the_caller_at_the_priming_deadline(
+    name: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    case = CASES["remi"]
+    build, script_cls = SOCKET_VENDORS[name]
+    sock = FakeVendorSocket()
+    script = script_cls(sock)
+    provider = build(sock)["provider"]
+    line, session = FakeLine(), remi_gated_session()
+    call = runtime(case, line, session, priming_timeout_s=0.2)
+    task = asyncio.create_task(provider.run_call(call))
+
+    await sock.wait_for(script.is_setup)
+    script.ready()
+    await line.incoming.put(HELLO)
+    await sock.wait_for(script.is_prime)  # priming asked; the model never runs the reads
+    await asyncio.sleep(0.05)
+    assert not any(script.is_caller_audio(f) for f in sock.sent)
+
+    await sock.wait_for(script.is_caller_audio, within=2)  # released at the deadline
+    assert call.start.primed
+    assert "not done after 0.2s" in caplog.text and "get_account" in caplog.text
+    assert session.results == [], "no read was run on the model's behalf"
+
+    script.callee_spoke()  # the call proceeds
+    script.audio()
+    await asyncio.sleep(0.05)
+    assert line.sent, "agent audio reaches the caller once they have spoken"
+    script.tool_calls("take_payment")  # a debt tool, before the reads
+    await asyncio.sleep(0.05)
+    assert session.results == [("take_payment", MISSING_READS_REFUSAL)]
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 @pytest.mark.parametrize("agent", AGENT_FIRST_CASES)
 @pytest.mark.parametrize("name", sorted(SOCKET_VENDORS))
 async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent: str) -> None:
@@ -296,7 +507,7 @@ async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent:
     sent_setup = script.setup(await sock.wait_for(script.is_setup))
     assert sent_setup["instructions"] == case.setup().instructions
     assert sent_setup["tools"] == case.expected_tools()
-    assert (sent_setup["silence_ms"], sent_setup["prefix_ms"]) == (800, 300)
+    assert (sent_setup["silence_ms"], sent_setup["prefix_ms"]) == script.expected_vad
 
     script.ready()
     script.check_opening(await sock.wait_for(script.is_prime), case)  # the opening turn is requested
@@ -406,6 +617,34 @@ async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context(a
     assert vad_params(turns).stop_secs + user_speech_timeout_s(turns) == pytest.approx(
         turns.silence_ms / 1000
     )
+
+
+@pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
+@pytest.mark.parametrize("model", ["never_calls_the_reads", "never_answers"])
+async def test_pipecat_gives_up_priming_at_the_deadline(model: str, caplog: pytest.LogCaptureFixture) -> None:
+    from openai import AsyncOpenAI
+
+    from vamos_voice.providers.pipecat import PipecatProvider
+    from vamos_voice.providers.pipecat.services import ServiceConfig
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if model == "never_answers":
+            await asyncio.sleep(10)
+        return httpx.Response(200, json=_completion([]))  # a reply with no tool calls
+
+    provider = PipecatProvider(
+        ServiceConfig(openai_api_key="sk-test", stt="deepgram", tts="openai"), "gpt-test"
+    )
+    provider.openai_client = lambda: AsyncOpenAI(
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    session = remi_gated_session()
+    call = runtime(CASES["remi"], session=session, priming_timeout_s=0.2)
+    await asyncio.wait_for(provider.prime_within_deadline(call, provider.build_context(call.setup)), 2)
+    assert call.start.primed, "the caller is heard either way"
+    assert "get_account" in caplog.text and "releasing the caller" in caplog.text
+    assert session.results == []
+    assert await session.dispatch("take_payment", {}) == MISSING_READS_REFUSAL
 
 
 @pytest.mark.parametrize("agent", AGENT_FIRST_CASES)

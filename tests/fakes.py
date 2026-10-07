@@ -15,10 +15,11 @@ from datetime import datetime
 from typing import Any
 
 from vamos_voice.agent import AgentSpec
-from vamos_voice.call_start import CallStart, CallStartPolicy
+from vamos_voice.call_start import PRIMING_TIMEOUT_S, CallStart, CallStartPolicy
 from vamos_voice.context import AgentContext, CallClock
 from vamos_voice.providers.base import CallRuntime, InboundAudio, OutboundAudio, SessionSetup, TurnTaking
 from vamos_voice.server import session_setup
+from vamos_voice.session import CallSession
 
 HELLO = b"\x01\x00" * 4800  # 200 ms of PCM16 at 24 kHz: stands in for "Hello?"
 
@@ -120,12 +121,37 @@ class ScriptedSession:
         return {"ok": name}
 
 
+class RecordingSession(CallSession):
+    """A real ``CallSession`` (real gates) that also records each call and its result."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.results: list[tuple[str, dict[str, Any]]] = []
+
+    async def dispatch(self, name: str, raw_args: dict[str, Any] | None) -> dict[str, Any]:
+        result = await super().dispatch(name, raw_args)
+        self.results.append((name, result))
+        return result
+
+
+def remi_gated_session() -> RecordingSession:
+    """Remi's real per-call state and gates, with no world behind them (only gate refusals can run)."""
+    from vamos_agents.remi.call import RemiCall
+
+    agent = REMI.agent()
+    state = RemiCall(agent.context, CallClock(agent.call_time()), None, None)  # type: ignore[arg-type]
+    return RecordingSession(state, agent.tools, agent.gates, agent.call_start.connect_reads)
+
+
 def runtime(
-    case: AgentCase, line: FakeLine | None = None, session: ScriptedSession | None = None
+    case: AgentCase,
+    line: FakeLine | None = None,
+    session: ScriptedSession | CallSession | None = None,
+    priming_timeout_s: float = PRIMING_TIMEOUT_S,
 ) -> CallRuntime:
     line = line or FakeLine()
     setup = case.setup()
-    start = CallStart(setup.start_policy)
+    start = CallStart(setup.start_policy, priming_timeout_s)
     return CallRuntime(
         line,  # type: ignore[arg-type]
         session or ScriptedSession(setup.start_policy.connect_reads),  # type: ignore[arg-type]

@@ -38,7 +38,8 @@ vamos_voice/                      # the framework: never imports an agent
   session/gates.py                # Gates protocol + GateLadder (ordered state machine)
   providers/                      # the vendor seam and the vendors
     base.py realtime_protocol.py wire.py
-    openai_realtime/  gemini_live/  pipecat/
+    openai_realtime/  grok_voice/     # Realtime protocol: OpenAI natively, Grok as a dialect
+    gemini_live/  gpt_live/  pipecat/
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
     agent.py ... tests/           # world clients (db, payments), and its own tests
@@ -64,7 +65,9 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
       ▼
 ┌──────── VoiceProvider (providers/base.py): the vendor seam ────────┐
 │ openai_realtime → RealtimeProtocolProvider (GA protocol, once)     │
+│ grok_voice      → RealtimeProtocolProvider (xAI dialect)           │
 │ gemini_live     → raw Gemini Live protocol                         │
+│ gpt_live        → GPT-Live live sessions + Responses delegation    │
 │ pipecat         → Pipecat STT → OpenAI LLM → TTS                   │
 └─────────────────────────────────────────────────────────────────────┘
       │ every tool call: session.dispatch(name, args) → dict ({"error": ...} on refusal)
@@ -155,7 +158,25 @@ Discovery: `VAMOS_AGENT=<name>` → `vamos_voice.registry.load_agent` imports
 | First words | the callee's: no agent audio leaves until their first utterance is detected; anything earlier is dropped | the agent's: the provider requests an opening turn carrying `opening_instruction`; audio flows at once |
 | OpenAI Realtime | `response.create` + `tool_choice: "required"`, then each skipped read by name; then release held audio | then `response.create` with `instructions = session instructions + opening_instruction` |
 | Gemini Live (no forced tool choice) | a user-role text turn labelled `[Call system note, not the person on the line]` | then the opening as the same kind of labelled note |
+| Grok Voice (no forced tool choice) | the Gemini fallback in Realtime frames: a labelled user-role `conversation.item.create` + `response.create`; a skipped read is asked for again by name | `response.create` with per-response `instructions`, as OpenAI |
+| GPT-Live (tools live on a delegated Responses backend) | `session.start` with the backend's `tool_choice: "required"`; `session.instructions.append` (`prime_instruction`) makes the live model delegate; each missing read forced by name via `session.update`; then `tool_choice: "auto"` | `session.instructions.append` with `opening_instruction`, after `session.started` |
 | Pipecat | a forced chat completion through the instrumented `openai` SDK; reads land in the pipeline's context | then, when the caller's socket connects, `LLMMessagesAppendFrame(opening, run_llm=True)` |
+
+**Priming deadline.** Priming never holds a caller forever: a model can skip
+the reads, or a vendor can stall. If the connect reads are not all done within
+`VAMOS_PRIMING_TIMEOUT_S` (default 6 s, `call_start.PRIMING_TIMEOUT_S`), every
+priming provider stops priming and releases the held audio, logging a warning
+that names the missing reads. `CallStart.priming_deadline` runs beside the
+call loops for the socket vendors; Pipecat bounds its priming completions the
+same way. GPT-Live also sets the backend's `tool_choice` back to `"auto"`.
+
+The framework does **not** run the reads itself on the model's behalf. The
+judge's trace must show only what the model did, and a read the model never
+asked for would put words in its mouth. The agent's gates take over instead:
+Remi refuses every tool beyond the reads with "Run the connect-time reads
+first: <the missing ones>", so the model runs them on its next turn, before it
+can discuss or take money. A late priming reply after the deadline is handled
+as an ordinary turn.
 
 ## 7. The clock rule
 
@@ -221,6 +242,28 @@ Remi, and document it here.
    it then runs against every agent, callee-first and agent-first.
 9. Rows in sections 11 and 12.
 
+### Vendor capability differences, and how the framework handles them
+
+Vendors do not all support what OpenAI Realtime does. The rule: implement what
+the vendor supports, and where it does not, declare the difference in the
+provider (a class attribute or an overridden hook, never an `if vendor ==`
+branch in shared code), document it in the provider's docstring and here, and
+pin it in a test. Never send a frame the vendor documents as unsupported: an
+`error` event ends the call.
+
+| Capability | openai_realtime | grok_voice | gemini_live | gpt_live | pipecat |
+|---|---|---|---|---|---|
+| Forced tool choice for priming | `response.create` `tool_choice` | **no** (undocumented): labelled note fallback | **no**: labelled note | on the backend only: `session.update` `delegation.responses.tool_choice` | `tool_choice` on the SDK call |
+| Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`) | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
+| Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |
+| `TurnTaking` mapping | silence, prefix padding, threshold | silence only (`threshold`/`prefix_padding_ms` not documented; xAI defaults) | silence, prefix padding | **none**: no VAD settings exist | silence via VAD + turn timeout |
+| Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
+
+`RealtimeProtocolProvider` exposes the two hooks dialects differ on:
+`priming_frames(setup, missing, first)` (default: forced `tool_choice`) and
+`truncates_on_barge_in` (default `True`). `CallStartPolicy.reprime_instruction`
+/ `reprime_note` are the shared "still missing" wording.
+
 ## 11. Config contract (environment)
 
 Framework (every image):
@@ -232,6 +275,7 @@ Framework (every image):
 | `VERIS_AGENT_CONTEXT` | bench, per attempt | JSON object of strings; parsed into `AgentContext`. Absent = empty (inbound agents may not get one). |
 | `PORT` | image | Default `8008`. |
 | `VAMOS_LOG_LEVEL` | optional | Default `INFO`. |
+| `VAMOS_PRIMING_TIMEOUT_S` | optional | Seconds the connect reads may hold the caller before priming is abandoned (section 6). Default `6`; must be a positive number. |
 
 Vendors:
 
@@ -239,7 +283,11 @@ Vendors:
 |---|---|---|
 | `OPENAI_API_KEY` | openai_realtime, pipecat | Required. |
 | `VAMOS_OPENAI_REALTIME_MODEL` / `VAMOS_OPENAI_VOICE` / `VAMOS_OPENAI_TRANSCRIBE_MODEL` | openai_realtime | Defaults `gpt-realtime` / `marin` / `gpt-4o-mini-transcribe`. |
-| `GOOGLE_API_KEY` | gemini_live | Gemini **Developer API** key. Required. (Not `GEMINI_API_KEY`: Veris Bench reserves the `GEMINI_*`, `XAI_*`, `GROK_*` and `VERIS_*` prefixes in candidate-env.) |
+| `XAI_API_KEY` | grok_voice | xAI API key. Required. |
+| `VAMOS_GROK_MODEL` / `VAMOS_GROK_VOICE` | grok_voice | Defaults `grok-voice-think-fast-2.0` / `eve`. Transcription is fixed to `grok-transcribe` (the only model xAI documents). |
+| `OPENAI_API_KEY` | gpt_live | Required; the OpenAI project must have GPT-Live access (otherwise `session.start` fails with "Voice session access denied"). |
+| `VAMOS_GPT_LIVE_MODEL` / `VAMOS_GPT_LIVE_BACKEND_MODEL` / `VAMOS_GPT_LIVE_VOICE` | gpt_live | Defaults `gpt-live-1` / `gpt-5.6-terra` (the Responses model tool use is delegated to, as in the VAmoS Energy GPT-Live candidate) / `marin`. |
+| `GEMINI_API_KEY` | gemini_live | Gemini **Developer API** key. Required. |
 | `VAMOS_GEMINI_MODEL` / `VAMOS_GEMINI_VOICE` | gemini_live | Defaults `gemini-2.5-flash-native-audio-preview-12-2025` / `Puck`. |
 | `VAMOS_PIPECAT_STT` / `VAMOS_PIPECAT_TTS` | pipecat | `deepgram` (default) or `openai` / `openai` (default) or `cartesia`. |
 | `VAMOS_PIPECAT_LLM_MODEL` | pipecat | Default `gpt-4.1`. |
@@ -258,6 +306,17 @@ Agents:
 
 Any missing required variable stops the process at startup (exit 2) with a message naming it.
 
+**Key names.** Vendor keys are bench candidate-env secrets under their
+standard names, `OPENAI_API_KEY`, `GEMINI_API_KEY` and `XAI_API_KEY`, as on
+VAmoS Energy, so one bench-wide secret serves every candidate on that vendor.
+Veris Bench allows these exact names (veris-sandbox
+`benchmark/api/app/services/candidate_env.py`), while every other `GEMINI_*`,
+`XAI_*`, `GROK_*` and `VERIS_*` name stays reserved: those namespaces belong to
+the platform and to the coding-agent harnesses it runs (their CLIs keep their
+own workspace key), and a bench-wide value there would re-route them. That is
+why every other vendor setting here is `VAMOS_*`; a new variable must not use a
+reserved prefix (`tests/test_parity.py` pins the key names).
+
 ## 12. Traces per vendor (what the judge sees)
 
 The judge reads an agent trace built by the bench's OTel bundle; for Remi its
@@ -267,6 +326,8 @@ before anyone is asked for by name. Priming exists to make that true.
 | Vendor | `trace_adapter` | How the trace is built | Requirement |
 |---|---|---|---|
 | `openai_realtime` | `openai-realtime` | The adapter hooks the `websockets` asyncio client's `send`/`recv` and reads GA Realtime events. | Keep traffic on `wire.connect_websocket`, JSON text frames; keep `audio.input.transcription` on so the caller's words are traced. |
+| `grok_voice` | `openai-realtime` | The Realtime adapter, which already reads Grok's dialect (top-level `turn_detection`, no `output_item.added`, no `response.done` for a response cancelled by speech). | `grok-transcribe` on, or the caller is missing from the trace. Priming notes are user-role *items*, not transcriptions, so the adapter does not record them as the caller. |
+| `gpt_live` | `gpt-live` | Same hook: system and model from `session.start`, tools from `session.delegation.responses.tools`, tool calls from nested `response.output_item.done`, results from `response.item.create`, both speakers from timed transcript deltas. | Tools only on the delegation backend; results only via `response.item.create`. Priming instructions are `session.instructions.append` and never appear as the caller. |
 | `gemini_live` | `gemini-live` | Same hook; camelCase setup/toolCall/toolResponse frames. | **Developer API only** (function calls carry `id`s; Vertex omits them). Priming/opening notes appear as labelled `user` turns. |
 | `pipecat` | none (omit) | The LLM runs in-process through the `openai` SDK, which the bundle instruments (OpenInference `OpenAIInstrumentor`): each completion is an LLM span with tool calls; results arrive in the next request. | Keep LLM calls on the `openai` SDK, including priming. |
 
@@ -274,7 +335,8 @@ before anyone is asked for by name. Priming exists to make that true.
 
 Images: `us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e/<agent>-<vendor>`,
 with the vendor's underscores as dashes (the registry's convention, e.g.
-`riley-gemini-live`): `remi-openai-realtime`, `remi-gemini-live`, `remi-pipecat`.
+`riley-gemini-live`): `remi-openai-realtime`, `remi-gemini-live`, `remi-grok-voice`,
+`remi-gpt-live`, `remi-pipecat`.
 
 ```bash
 REPO=us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e
@@ -322,7 +384,9 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | Vendor | `trace_adapter` | Bench candidate-env (secret) | `image.env` (non-secret) |
 |---|---|---|---|
 | `openai_realtime` | `openai-realtime` | `OPENAI_API_KEY` | `VAMOS_OPENAI_REALTIME_MODEL` (e.g. `gpt-realtime-2.1`, as Riley/Rory) |
-| `gemini_live` | `gemini-live` | `GOOGLE_API_KEY` | `VAMOS_GEMINI_MODEL` (e.g. `gemini-3.8-live`, as Riley/Rory) |
+| `gemini_live` | `gemini-live` | `GEMINI_API_KEY` | `VAMOS_GEMINI_MODEL` (e.g. `gemini-3.8-live`, as Riley/Rory) |
+| `grok_voice` | `openai-realtime` | `XAI_API_KEY` | `VAMOS_GROK_MODEL` (e.g. `grok-voice-think-fast-2.0`, as Riley "Grok Voice"), optional `VAMOS_GROK_VOICE` |
+| `gpt_live` | `gpt-live` | `OPENAI_API_KEY` (a project with GPT-Live access) | `VAMOS_GPT_LIVE_MODEL` (`gpt-live-1`), `VAMOS_GPT_LIVE_BACKEND_MODEL` (e.g. `gpt-5.6-terra`, as Rory "OpenAI GPT-Live 1"), optional `VAMOS_GPT_LIVE_VOICE` |
 | `pipecat` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY` (plus `CARTESIA_API_KEY` for Cartesia) | `VAMOS_PIPECAT_TTS`, `VAMOS_CARTESIA_VOICE_ID` when using Cartesia |
 
 Every vendor also needs the non-secret candidate-env `STRIPE_API_KEY` above.
@@ -370,8 +434,8 @@ on paper; it fits without framework changes, and the test-only
 
 Migration path (optional, later): move `rory_tools/` into `vamos_agents/rory/` as the
 pack above; port vendors one at a time into `vamos_voice/providers/` only where
-the framework lacks them (Deepgram Agent, ElevenLabs, Grok as a
-`RealtimeProtocolProvider` subclass...); add `rory` to `AGENT_CASES`; build
+the framework lacks them (Deepgram Agent, ElevenLabs...; Grok Voice and
+GPT-Live already exist here); add `rory` to `AGENT_CASES`; build
 `bench-e2e/rory-<vendor>` and switch candidates over by digest. Riley follows
 the same path with its own world clients. Until then their images keep coming
 from their own repos.
@@ -387,6 +451,9 @@ uv run ruff check . && uv run ruff format --check .
 - `tests/test_framework.py`: the boundary (no `agents` import, no wall clock),
   discovery, `AgentContext`, the gate engine and dispatch (refusals, redaction, never raises).
 - `tests/test_parity.py`: agents x vendors, on the frames each provider sends.
+- `tests/test_grok_voice.py`, `tests/test_gpt_live.py`: each vendor's own
+  frame translation (session shape, priming fallback / backend forcing,
+  barge-in, end of call), pinned where it differs from OpenAI Realtime.
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
 - `vamos_agents/remi/tests/`: Remi's rules, tools against a real Postgres
   (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`), Stripe

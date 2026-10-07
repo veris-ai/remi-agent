@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import importlib
 import logging
@@ -157,3 +158,62 @@ async def test_dispatch_gates_redacts_and_never_raises(caplog: pytest.LogCapture
     assert state.finalized == 1
     assert "1234" not in caplog.text and "9999" not in caplog.text and "[redacted]" in caplog.text
     assert session.tool_log[0] == "balance"
+
+
+# --- the priming deadline ---------------------------------------------------------------
+
+
+def test_priming_timeout_comes_from_the_environment() -> None:
+    from vamos_voice.call_start import PRIMING_TIMEOUT_S
+    from vamos_voice.server import priming_timeout_from_env
+
+    assert priming_timeout_from_env({}) == PRIMING_TIMEOUT_S == 6.0
+    assert priming_timeout_from_env({"VAMOS_PRIMING_TIMEOUT_S": "2.5"}) == 2.5
+    for bad in ("0", "-1", "soon", "nan", "inf"):
+        with pytest.raises(ConfigError, match="VAMOS_PRIMING_TIMEOUT_S"):
+            priming_timeout_from_env({"VAMOS_PRIMING_TIMEOUT_S": bad})
+
+
+async def test_a_finished_background_task_does_not_end_the_call() -> None:
+    from vamos_voice.providers.wire import run_until_first_done
+
+    order: list[str] = []
+
+    async def background() -> None:
+        order.append("background done")
+
+    async def loop() -> None:
+        await asyncio.sleep(0.05)
+        order.append("loop done")
+
+    await run_until_first_done(background(), main=loop())
+    assert order == ["background done", "loop done"]
+
+
+async def test_a_failing_background_task_fails_the_call() -> None:
+    from vamos_voice.providers.wire import run_until_first_done
+
+    async def background() -> None:
+        raise RuntimeError("deadline handler broke")
+
+    with pytest.raises(RuntimeError, match="deadline handler broke"):
+        await run_until_first_done(background(), main=asyncio.sleep(5))
+
+
+async def test_priming_deadline_abandons_only_when_priming_overruns() -> None:
+    from vamos_voice.call_start import CallStart, callee_first
+
+    policy = callee_first(("read",), "run the read")
+    abandoned: list[bool] = []
+
+    async def abandon() -> None:
+        abandoned.append(True)
+
+    on_time = CallStart(policy, priming_timeout_s=0.5)
+    on_time.mark_primed()
+    await on_time.priming_deadline(lambda: [], abandon)
+    assert abandoned == []
+
+    late = CallStart(policy, priming_timeout_s=0.05)
+    await late.priming_deadline(lambda: ["read"], abandon)
+    assert abandoned == [True]

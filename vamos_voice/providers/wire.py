@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
+
+if TYPE_CHECKING:
+    from ..session import CallSession
+
+logger = logging.getLogger(__name__)
 
 OPEN_TIMEOUT_S = 15
 
@@ -25,15 +32,37 @@ def connect_websocket(url: str, headers: Mapping[str, str]) -> AbstractAsyncCont
     )
 
 
-async def run_until_first_done(**coroutines: Coroutine[Any, Any, None]) -> None:
+async def run_until_first_done(
+    *background: Coroutine[Any, Any, None], **loops: Coroutine[Any, Any, None]
+) -> None:
     """Run the call's loops (caller→vendor, vendor→caller) until one ends; cancel the rest,
-    and re-raise the first failure."""
-    tasks = [asyncio.create_task(coro, name=name) for name, coro in coroutines.items()]
+    and re-raise the first failure. ``background`` coroutines (e.g. the priming deadline) run
+    alongside: finishing does not end the call, failing does."""
+    loop_tasks = {asyncio.create_task(coro, name=name) for name, coro in loops.items()}
+    tasks = loop_tasks | {asyncio.create_task(coro) for coro in background}
+    pending = set(tasks)
     try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task.result()
+        while True:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+            if done & loop_tasks:
+                return
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def dispatch_json_call(session: CallSession, name: str, raw_arguments: str | None) -> str | None:
+    """Run a tool call whose arguments arrive as a JSON string; return its result as JSON.
+
+    None when the arguments are cut off (a response cancelled mid-generation): a half call
+    is never run, and the model retries it on its next turn.
+    """
+    try:
+        args = json.loads(raw_arguments or "{}")
+    except json.JSONDecodeError:
+        logger.warning("%s arguments truncated; not dispatched", name)
+        return None
+    return json.dumps(await session.dispatch(name, args), default=str)

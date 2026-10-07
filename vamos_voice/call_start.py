@@ -16,6 +16,15 @@ speaks first; Remi):
 2. **Hold the line.** No audio goes out until the callee's first utterance
    has been heard. Anything the model produces before that is dropped.
 
+**Priming deadline.** Priming never holds the caller forever. If the model
+has not run every connect read within ``priming_timeout_s`` (default
+``PRIMING_TIMEOUT_S``, env ``VAMOS_PRIMING_TIMEOUT_S``), the provider stops
+priming and releases the held audio, with a warning naming the missing reads.
+The reads are NOT run on the model's behalf: the judge's trace must show only
+what the model did. The agent's gates keep every tool that needs them refused,
+with a message naming the missing reads, so the model runs them on its next
+turn.
+
 ``agent_first`` (inbound: the caller rang the agent, the agent greets them;
 Rory, Riley):
 
@@ -33,14 +42,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-#: How a priming or opening turn is labelled where a vendor can only be prompted by a user-role turn (Gemini Live),
+#: How a priming or opening turn is labelled where a vendor can only be prompted by a user-role turn
+#: (Gemini Live; Grok Voice for priming, which has no forced tool choice),
 #: so neither the model nor the judge mistakes it for the person on the line.
 NOTE_LABEL = "[Call system note, not the person on the line]"
+
+#: Longest the connect reads may hold the caller before priming is abandoned (seconds).
+PRIMING_TIMEOUT_S = 6.0
+#: Overrides ``PRIMING_TIMEOUT_S`` for the pod.
+PRIMING_TIMEOUT_ENV = "VAMOS_PRIMING_TIMEOUT_S"
 
 
 @dataclass(frozen=True)
@@ -57,6 +73,14 @@ class CallStartPolicy:
     def prime_note(self) -> str:
         """The priming instruction as a labelled user-role turn."""
         return f"{NOTE_LABEL} {self.prime_instruction}"
+
+    def reprime_instruction(self, missing: list[str]) -> str:
+        """The priming instruction again, naming the connect reads the model has not run yet."""
+        return f"{self.prime_instruction} Still missing: {', '.join(missing)}."
+
+    def reprime_note(self, missing: list[str]) -> str:
+        """``reprime_instruction`` as a labelled user-role turn."""
+        return f"{NOTE_LABEL} {self.reprime_instruction(missing)}"
 
     @property
     def opening_note(self) -> str:
@@ -90,8 +114,9 @@ def agent_first(
 class CallStart:
     """One call's start state: primed? has the callee spoken? may audio go out?"""
 
-    def __init__(self, policy: CallStartPolicy) -> None:
+    def __init__(self, policy: CallStartPolicy, priming_timeout_s: float = PRIMING_TIMEOUT_S) -> None:
         self.policy = policy
+        self.priming_timeout_s = priming_timeout_s
         self._primed = asyncio.Event()
         self._callee_spoke = asyncio.Event()
 
@@ -115,6 +140,25 @@ class CallStart:
 
     async def wait_primed(self) -> None:
         await self._primed.wait()
+
+    def warn_priming_abandoned(self, missing: list[str]) -> None:
+        logger.warning(
+            "call start: connect reads %s not done after %.1fs; releasing the caller without them "
+            "(the agent's gates refuse what needs them)",
+            ", ".join(missing),
+            self.priming_timeout_s,
+        )
+
+    async def priming_deadline(
+        self, missing: Callable[[], list[str]], abandon: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Run beside the call: if priming has not finished in time, warn and ``abandon`` it
+        (the provider's own "priming is over" step: release the caller, restore its settings)."""
+        try:
+            await asyncio.wait_for(self._primed.wait(), self.priming_timeout_s)
+        except TimeoutError:
+            self.warn_priming_abandoned(missing())
+            await abandon()
 
     @property
     def audio_open(self) -> bool:
