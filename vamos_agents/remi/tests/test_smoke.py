@@ -181,4 +181,4 @@ def test_json_framing_callee_end_still_logs_the_contact_attempt(pg_dsn: str) -> 
         assert ws.receive()["type"] == "websocket.close", "no end is echoed back to the callee"
     (change,) = changes(before, snapshot(pg_dsn))
     assert (change["op"], change["table"]) == ("insert", "contact_attempts")
-    assert change["row"]["summary"].startswith("The call ended before Remi finished its notes.")
+    assert change["row"]["summary"].endswith("The call ended before Remi logged it.")

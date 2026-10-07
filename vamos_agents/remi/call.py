@@ -38,6 +38,14 @@ logger = logging.getLogger(__name__)
 AGENT_NAME = "Remi"
 CONNECT_READS = ("get_account", "get_dialed_phone", "get_contact_history")
 MAX_VERIFICATION_ATTEMPTS = 3
+#: How the contact log names who answered (``answered_by`` as stored).
+WHO_ANSWERED = {
+    "consumer": "the verified consumer",
+    "estate_rep": "a verified estate representative",
+    "third_party": "someone other than the consumer (not verified)",
+    "voicemail": "voicemail",
+    "wrong_number": "a wrong number",
+}
 
 
 def new_id(prefix: str) -> str:
@@ -78,6 +86,7 @@ class RemiCall:
     verified_as: str | None = None  # "consumer" | "estate_rep"
     verification_failures: int = 0
     debt_unlocked: bool = False
+    disclosures_attested: tuple[str, ...] = ()  # what get_debt_details was told had been said
 
     # What the call produced.
     collection_stopped_by: str | None = None
@@ -199,13 +208,41 @@ class RemiCall:
             return "failed_verification"
         return policy.disposition(self.outcomes, transferred=self.transferred)
 
+    def recorded_facts(self, answered_by: str | None, disposition: str) -> str:
+        """The factual part of the call's summary, built from what the call recorded rather than
+        from the model's account of it (which can describe what it meant to say, not what it said)."""
+        facts = [f"Disposition: {disposition}."]
+        a = self.assessment
+        if a is not None and not a.proceed:
+            facts.append(
+                f"The call should not have been placed ({', '.join(a.should_not_call_reasons)}): "
+                "no one was verified and the debt was not read."
+            )
+            return " ".join(facts)
+        facts.append(f"Answered by: {WHO_ANSWERED.get(answered_by or '', 'no one verified')}.")
+        if self.debt_unlocked:
+            facts.append(f"Debt read after attesting: {', '.join(self.disclosures_attested)}.")
+        else:
+            facts.append("The debt was not read.")
+        if self.outcomes:
+            facts.append(f"Recorded outcomes: {', '.join(sorted(self.outcomes))}.")
+        if self.transferred:
+            facts.append("Transferred to a person.")
+        return " ".join(facts)
+
     async def write_contact_attempt(
-        self, *, answered_by: str | None, summary: str, number_is_wrong: bool = False
+        self, *, answered_by: str | None, notes: str | None, number_is_wrong: bool = False
     ) -> str:
-        """The call's one contact_attempts row (NYC § 2-193), plus its end-of-call effects."""
+        """The call's one contact_attempts row (NYC § 2-193), plus its end-of-call effects.
+
+        Its summary is the recorded facts, then the model's ``notes`` (None: it never logged the call)."""
         if self.account is None or self.phone is None:
             raise ToolError("Run the connect-time reads first.")
         disposition = self.disposition_for(answered_by)
+        facts = self.recorded_facts(answered_by, disposition)
+        summary = (
+            f"{facts} Remi's notes: {notes}" if notes else f"{facts} The call ended before Remi logged it."
+        )
         async with self.db.transaction() as tx:
             await tx.insert(
                 "contact_attempts",
@@ -239,10 +276,5 @@ class RemiCall:
         if self.contact_logged or self.assessment is None:
             return
         answered_by = self.verified_as if self.assessment.proceed else None
-        summary = "The call ended before Remi finished its notes. " + (
-            f"Recorded outcomes: {', '.join(sorted(self.outcomes))}."
-            if self.outcomes
-            else "No commitment was made."
-        )
-        disposition = await self.write_contact_attempt(answered_by=answered_by, summary=summary)
+        disposition = await self.write_contact_attempt(answered_by=answered_by, notes=None)
         logger.warning("call closed without log_contact_attempt; logged it as %s", disposition)

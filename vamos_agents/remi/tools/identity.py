@@ -179,6 +179,16 @@ async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str
     if missing:
         raise ToolError(f"Give these first: {'; '.join(missing)}.")
     session.debt_unlocked = True
+    session.disclosures_attested = tuple(
+        name
+        for name, given in (
+            ("the recording disclosure", args.recording_disclosure_given),
+            ("the mini-Miranda", args.mini_miranda_given),
+            ("the time-barred disclosure", args.time_barred_disclosure_given),
+            ("the alternative-format statement", args.alternative_format_statement_given),
+        )
+        if given
+    )
     balance = account.current_balance_cents
     result: dict[str, Any] = {
         "creditor": creditor.name,

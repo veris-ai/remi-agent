@@ -122,3 +122,5 @@ abusive caller may be told the call will end).
 
 Say your goodbye first. Then call log_contact_attempt once (who answered and a one- or two-sentence
 plain-language summary of what happened and the outcome), then end_call. Say nothing after end_call.
+The summary describes only what was actually said and done on this call. Never write what you meant
+to say or what these instructions tell you to say: if you did not say it, do not claim it.
