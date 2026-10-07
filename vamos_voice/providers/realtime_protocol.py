@@ -13,10 +13,6 @@ inside the loop:
 - ``truncates_on_barge_in``: whether ``conversation.item.truncate`` is sent
   when the caller talks over the agent (OpenAI yes; Grok documents it as
   unsupported).
-- ``manages_turns``: whether this provider, not the vendor's server VAD,
-  decides when a caller turn gets a reply and when it interrupts the agent
-  (OpenAI yes, with ``create_response``/``interrupt_response`` off; Grok
-  documents neither switch nor ``response.cancel``, so its VAD keeps both).
 
 See ``vamos_voice/providers/openai_realtime`` and ``grok_voice``.
 
@@ -38,29 +34,23 @@ Call start (``AGENT_FIRST``): any connect reads are primed the same way, then
 one ``response.create`` asks for the opening turn (the session instructions
 plus the policy's opening instruction), and its audio goes straight out.
 
-Turns (``manages_turns``). Server VAD cannot tell the caller from a TV behind
-them: in bench attempts with background speech, every broadcast phrase became
-a caller turn whose ``speech_started`` cancelled the agent's reply within a
-second, so the agent never finished a sentence. Here a VAD turn counts as the
-caller only when ``CallerSpeech`` heard the caller's own voice in it: only then
-does it interrupt the agent (``response.cancel`` + truncate) and get a reply.
-A background-only turn stays in the conversation (its transcript is traced)
-but is neither answered nor allowed to interrupt.
+Turns are the vendor's own: its server VAD decides when the caller has
+finished (and the vendor replies), and when the caller interrupts the agent
+(the vendor stops its response; this provider only truncates the context to
+what was played). Nothing here filters, gates or second-guesses caller audio:
+these agents are benchmark reference candidates, and background noise is a
+benchmark condition that measures the vendor.
 
-Responses are serialized: a ``response.create`` asked for while another
-response is in flight waits for it and goes out at its ``response.done``
-(several requests coalesce into one), so a reply is never lost to
-``conversation_already_has_active_response`` or to a cancelled response.
-
-Liveness: once the caller has finished a turn, a reply must start within
-``TurnTaking.reply_timeout_s``; otherwise the provider logs a warning and asks
-for one, so a call can never sit silent on a lost or stalled response.
+The provider's own requests are serialized: a ``response.create`` it asks for
+(tool results, the opening turn) while another response is in flight waits
+for it and goes out at its ``response.done`` (several requests coalesce into
+one), and one refused with ``conversation_already_has_active_response`` is
+sent again when the running response ends.
 """
 
 from __future__ import annotations
 
 import abc
-import asyncio
 import base64
 import json
 import logging
@@ -69,7 +59,6 @@ from typing import Any, ClassVar
 
 import websockets
 
-from ..audio import CallerSpeech
 from ..tools import ToolSpec
 from .base import CallRuntime, SessionSetup, VoiceProvider
 from .wire import Connect, connect_websocket, dispatch_json_call, run_until_first_done
@@ -100,9 +89,6 @@ class RealtimeProtocolProvider(VoiceProvider, abc.ABC):
     tool_format = RealtimeToolFormat()
     #: Send ``conversation.item.truncate`` on barge-in, so the model's context holds only what was heard.
     truncates_on_barge_in: ClassVar[bool] = True
-    #: The provider decides which VAD turns get a reply and may interrupt (the session must turn the
-    #: vendor's ``create_response`` and ``interrupt_response`` off); False leaves both to the vendor.
-    manages_turns: ClassVar[bool] = True
     #: Overridable in tests to capture the outbound frames without a network.
     connect: Connect = staticmethod(connect_websocket)
 
@@ -158,19 +144,12 @@ class _RealtimeCall:
         self.priming = True
         self.tool_answered = False  # a function_call_output went out in the current response
         self.audio_item: str | None = None
-        self.speech = CallerSpeech()
-        # The caller turn server VAD has open: where it started on the input timeline, and
-        # whether the caller's own voice (not background) has been heard in it.
-        self.turn_start_ms: int | None = None
-        self.turn_end_ms: int | None = None
-        self.turn_is_caller = False
-        self.last_turn_end_ms = 0
-        # Responses: what each requested one is for (popped at response.created), the one
-        # running, and the request waiting for it to finish.
-        self.requested: deque[str] = deque()
+        # Responses this provider asked for, oldest first (popped at response.created), what
+        # the running one is for ("vendor" when the vendor's VAD started it), and the one
+        # request waiting for it to finish.
+        self.requested: deque[tuple[dict[str, Any], str]] = deque()
         self.active: str | None = None
         self.pending: tuple[dict[str, Any], str] | None = None
-        self.reply_guard: asyncio.Task[None] | None = None
 
     async def send(self, event: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(event))
@@ -183,21 +162,15 @@ class _RealtimeCall:
             await self.send_priming(missing, first=True)
         else:
             await self.finish_priming()
-        try:
-            await run_until_first_done(
-                call.start.priming_deadline(lambda: call.session.missing_reads, self.finish_priming),
-                caller_to_vendor=call.inbound.run(),
-                vendor_to_caller=self.events(),
-            )
-        finally:
-            self.disarm_reply_guard()
+        await run_until_first_done(
+            call.start.priming_deadline(lambda: call.session.missing_reads, self.finish_priming),
+            caller_to_vendor=call.inbound.run(),
+            vendor_to_caller=self.events(),
+        )
 
     async def forward(self, pcm: bytes) -> None:
-        """Caller audio to the vendor, measured on the way so a VAD turn can be attributed."""
-        self.speech.feed(pcm)
+        """Caller audio to the vendor, unchanged: turn detection is the vendor's."""
         await self.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()})
-        if self.turn_start_ms is not None and not self.turn_is_caller:
-            await self.check_caller_in_turn()
 
     async def events(self) -> None:
         while True:
@@ -219,14 +192,11 @@ class _RealtimeCall:
             self.audio_item = item
             await call.outbound.send(base64.b64decode(event.get("delta", "")), item)
         elif kind == "response.created":
-            self.active = self.requested.popleft() if self.requested else "vendor"
-            self.disarm_reply_guard()  # a reply has started
+            self.active = self.requested.popleft()[1] if self.requested else "vendor"
         elif kind == "input_audio_buffer.speech_started":
-            await self.turn_started(event)
-        elif kind == "input_audio_buffer.speech_stopped":
-            self.turn_end_ms = event.get("audio_end_ms")
+            await self.barge_in()  # the vendor's VAD stops its own response
         elif kind == "input_audio_buffer.committed":
-            await self.turn_committed()
+            call.start.mark_callee_spoke()  # the vendor's VAD answers the turn
         elif kind == "response.function_call_arguments.done":
             await self.run_tool(event)
         elif kind == "response.done":
@@ -237,77 +207,8 @@ class _RealtimeCall:
                 raise RuntimeError(f"realtime error: {error}")
             logger.info("realtime: benign error %s", error.get("code"))
             if error.get("code") == "conversation_already_has_active_response" and self.requested:
-                self.pending = self.pending or (RESPONSE_CREATE, self.requested.popleft())
+                self.pending = self.pending or self.requested.popleft()
         return False
-
-    # --- caller turns ------------------------------------------------------------------------
-
-    async def turn_started(self, event: dict[str, Any]) -> None:
-        if not self.provider.manages_turns:
-            await self.barge_in()  # the vendor's VAD interrupts on its own
-            return
-        self.turn_start_ms = event.get("audio_start_ms", self.last_turn_end_ms)
-        self.turn_end_ms, self.turn_is_caller = None, False
-        await self.check_caller_in_turn()
-
-    async def check_caller_in_turn(self) -> None:
-        """The open VAD turn becomes the caller's once their own voice is heard in it: only
-        then may it interrupt the agent."""
-        assert self.turn_start_ms is not None
-        if not self.speech.caller_spoke(self.turn_start_ms):
-            return
-        self.turn_is_caller = True
-        if self.active not in (None, "priming"):
-            await self.send({"type": "response.cancel"})
-        await self.barge_in()
-
-    async def turn_committed(self) -> None:
-        call = self.call
-        if not self.provider.manages_turns:
-            call.start.mark_callee_spoke()
-            if not self.priming:
-                self.arm_reply_guard()
-            return
-        start = self.turn_start_ms if self.turn_start_ms is not None else self.last_turn_end_ms
-        is_caller = self.turn_is_caller or self.speech.caller_spoke(start, self.turn_end_ms)
-        heard_ms = self.speech.foreground_ms(start, self.turn_end_ms)
-        self.last_turn_end_ms = self.turn_end_ms if self.turn_end_ms is not None else self.speech.position_ms
-        self.turn_start_ms, self.turn_end_ms, self.turn_is_caller = None, None, False
-        if not is_caller:
-            logger.info(
-                "caller line: a VAD turn with only background audio (%d ms of the caller's voice); not answered",
-                heard_ms,
-            )
-            return
-        call.start.mark_callee_spoke()
-        if not self.priming:
-            await self.request_response(RESPONSE_CREATE, "reply")
-            self.arm_reply_guard()
-
-    def arm_reply_guard(self) -> None:
-        self.disarm_reply_guard()
-        self.reply_guard = asyncio.create_task(self.reply_deadline())
-
-    def disarm_reply_guard(self) -> None:
-        if self.reply_guard is not None and self.reply_guard is not asyncio.current_task():
-            self.reply_guard.cancel()
-        self.reply_guard = None
-
-    async def reply_deadline(self) -> None:
-        timeout = self.call.setup.turn_taking.reply_timeout_s
-        await asyncio.sleep(timeout)
-        if self.call.session.ended or self.call.hung_up:
-            return
-        logger.warning(
-            "liveness: the caller finished a turn %.1fs ago and no reply has started "
-            "(response in flight: %s); requesting one",
-            timeout,
-            self.active or "none",
-        )
-        self.reply_guard = None
-        if self.active is None:
-            self.requested.clear()  # asked for, never started: lost
-        await self.request_response(RESPONSE_CREATE, "liveness")
 
     # --- responses ---------------------------------------------------------------------------
 
@@ -316,13 +217,13 @@ class _RealtimeCall:
         if self.active is not None or self.requested:
             self.pending = self.pending or (frame, purpose)
             return
-        self.requested.append(purpose)
+        self.requested.append((frame, purpose))
         await self.send(frame)
 
     async def send_priming(self, missing: list[str], first: bool) -> None:
         for frame in self.provider.priming_frames(self.call.setup, missing, first):
             if frame.get("type") == "response.create":
-                self.requested.append("priming")
+                self.requested.append((frame, "priming"))
             await self.send(frame)
 
     async def run_tool(self, event: dict[str, Any]) -> None:
@@ -353,7 +254,7 @@ class _RealtimeCall:
         if call.session.ended:
             await call.hang_up()
             return True
-        # One follow-up covers both: the tool results and any caller turn that waited for this response.
+        # One follow-up covers both: the tool results and any request that waited for this response.
         follow = self.pending or ((RESPONSE_CREATE, "tool results") if answered else None)
         self.pending = None
         if follow is not None:
@@ -363,8 +264,7 @@ class _RealtimeCall:
     async def finish_priming(self) -> None:
         """The reads are done (or there were none, or the deadline passed): release the caller,
         and open if the agent speaks first. Runs once. A priming response still in flight
-        at the deadline is left to finish (its reads count); a caller turn meanwhile is
-        answered right after it."""
+        at the deadline is left to the vendor (its reads count if they arrive)."""
         if not self.priming:
             return
         call = self.call

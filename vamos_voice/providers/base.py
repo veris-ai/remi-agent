@@ -52,9 +52,6 @@ class TurnTaking:
     silence_ms: int = 800
     prefix_padding_ms: int = 300
     vad_threshold: float = 0.5
-    #: Liveness: once the caller has finished a turn, a reply must start within this many
-    #: seconds, or the provider asks for one itself (Realtime-protocol vendors).
-    reply_timeout_s: float = 4.0
 
 
 @dataclass(frozen=True)
