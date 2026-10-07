@@ -21,7 +21,7 @@ docker build --platform linux/amd64 --build-arg AGENT=remi --build-arg VENDOR=op
   -t remi-openai-realtime .
 docker run --rm -p 8008:8008 \
   -e VERIS_AGENT_CONTEXT='{"account_id":"TAS-420101","call_time":"2027-02-10T09:00:00-05:00","phone_id":"ph_420101_1"}' \
-  -e DATABASE_URL=postgresql://... -e STRIPE_API_KEY=sk_test_... -e OPENAI_API_KEY=... \
+  -e DATABASE_URL=postgresql://... -e OPENAI_API_KEY=... \
   remi-openai-realtime
 curl localhost:8008/health
 ```
