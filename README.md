@@ -1,31 +1,35 @@
-# Remi
+# vamos-agents
 
-Remi is the debt-collection voice agent, the candidate under test, for the
-**VAmoS Debt Collection** benchmark on Veris Bench. It places outbound calls
-for Tallmere Account Services, LLC to consumers in New York City, follows the
-benchmark's collections policy (RULES.md), and records what happened in the
-benchmark's world (a Postgres collections database and a Stripe twin).
+Every VAmoS voice agent in one repository: the candidates under test on Veris
+Bench's VAmoS benchmarks. A shared framework, **`vamos_voice`**, owns the
+server, the bench's `voice_ws` audio channel, call-start etiquette, tool
+dispatch and gates, and the voice vendors. Each agent is a small **pack**
+under `agents/` that supplies its prompt, tools, rules and world clients.
 
-One codebase, one Dockerfile, three voice stacks: OpenAI Realtime, Gemini Live,
-and a Pipecat cascade (Deepgram → OpenAI → OpenAI TTS by default).
+| Agent | Benchmark | Calls | Vendors |
+|---|---|---|---|
+| [Remi](agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS) |
 
 ## Quickstart
 
 ```bash
 uv sync --all-extras
-uv run --all-extras pytest -q                      # needs docker for the Postgres tests
+uv run --all-extras pytest -q                      # Remi's tool tests need docker (Postgres 16)
 uv run ruff check . && uv run ruff format --check .
 
-docker build --platform linux/amd64 --build-arg VENDOR=openai_realtime -t remi:openai_realtime .
+docker build --platform linux/amd64 --build-arg AGENT=remi --build-arg VENDOR=openai_realtime \
+  -t remi-openai-realtime .
 docker run --rm -p 8008:8008 \
   -e VERIS_AGENT_CONTEXT='{"account_id":"TAS-420101","call_time":"2027-02-10T09:00:00-05:00","phone_id":"ph_420101_1"}' \
   -e DATABASE_URL=postgresql://... -e STRIPE_API_KEY=sk_test_... -e OPENAI_API_KEY=... \
-  remi:openai_realtime
+  remi-openai-realtime
 curl localhost:8008/health
 ```
 
-`VENDOR` is one of `openai_realtime`, `gemini_live`, `pipecat`. The voice channel
-is `ws://<host>:8008/voice` (PCM16, 24 kHz, mono, binary frames; the caller speaks first).
+`AGENT` is a folder under `agents/`; `VENDOR` is one of `openai_realtime`,
+`gemini_live`, `pipecat`. The voice channel is `ws://<host>:8008/voice`
+(PCM16, 24 kHz, mono, binary frames).
 
-See **AGENTS.md** for the architecture, the config contract and how to register
-Remi as a bench candidate.
+See **[AGENTS.md](AGENTS.md)** for the architecture, the `AgentSpec` contract,
+how to add an agent or a vendor, the config contract and how to register a
+candidate on the bench.

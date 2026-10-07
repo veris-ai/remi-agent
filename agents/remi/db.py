@@ -1,6 +1,6 @@
 """The collections database (WORLD.md's Postgres), reached with psycopg 3.
 
-One ``Database`` per pod (one call per pod), injected into the ``CallSession``.
+One ``Database`` per pod (one call per pod), opened by ``RemiAgent.connect`` and handed to each ``RemiCall``.
 Every connection carries a connect timeout and a statement timeout, so a stuck
 twin turns into a tool error instead of dead air. Calls are serialized with a
 lock: the session's tools share one connection and one account.
