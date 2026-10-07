@@ -162,6 +162,22 @@ Discovery: `VAMOS_AGENT=<name>` → `vamos_voice.registry.load_agent` imports
 | GPT-Live (tools live on a delegated Responses backend) | `session.start` with the backend's `tool_choice: "required"`; `session.instructions.append` (`prime_instruction`) makes the live model delegate; each missing read forced by name via `session.update`; then `tool_choice: "auto"` | `session.instructions.append` with `opening_instruction`, after `session.started` |
 | Pipecat | a forced chat completion through the instrumented `openai` SDK; reads land in the pipeline's context | then, when the caller's socket connects, `LLMMessagesAppendFrame(opening, run_llm=True)` |
 
+**Priming deadline.** Priming never holds a caller forever: a model can skip
+the reads, or a vendor can stall. If the connect reads are not all done within
+`VAMOS_PRIMING_TIMEOUT_S` (default 6 s, `call_start.PRIMING_TIMEOUT_S`), every
+priming provider stops priming and releases the held audio, logging a warning
+that names the missing reads. `CallStart.priming_deadline` runs beside the
+call loops for the socket vendors; Pipecat bounds its priming completions the
+same way. GPT-Live also sets the backend's `tool_choice` back to `"auto"`.
+
+The framework does **not** run the reads itself on the model's behalf. The
+judge's trace must show only what the model did, and a read the model never
+asked for would put words in its mouth. The agent's gates take over instead:
+Remi refuses every tool beyond the reads with "Run the connect-time reads
+first: <the missing ones>", so the model runs them on its next turn, before it
+can discuss or take money. A late priming reply after the deadline is handled
+as an ordinary turn.
+
 ## 7. The clock rule
 
 A bench World is frozen at a reference instant that is not wall time (the
@@ -259,6 +275,7 @@ Framework (every image):
 | `VERIS_AGENT_CONTEXT` | bench, per attempt | JSON object of strings; parsed into `AgentContext`. Absent = empty (inbound agents may not get one). |
 | `PORT` | image | Default `8008`. |
 | `VAMOS_LOG_LEVEL` | optional | Default `INFO`. |
+| `VAMOS_PRIMING_TIMEOUT_S` | optional | Seconds the connect reads may hold the caller before priming is abandoned (section 6). Default `6`; must be a positive number. |
 
 Vendors:
 

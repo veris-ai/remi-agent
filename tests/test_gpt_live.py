@@ -174,3 +174,20 @@ async def test_cut_off_arguments_are_never_dispatched() -> None:
     assert await dispatch_json_call(session, "make_payment", '{"amount": 12') is None  # type: ignore[arg-type]
     assert session.calls == []
     assert await dispatch_json_call(session, "noop", "") == '{"ok": "noop"}'  # type: ignore[arg-type]
+
+
+async def test_the_priming_deadline_hands_the_backend_back_its_tool_choice() -> None:
+    sock = FakeVendorSocket()
+    script = GptLiveScript(sock)
+    call = runtime(REMI, FakeLine(), ScriptedSession(REMI.policy.connect_reads), priming_timeout_s=0.1)
+    task = asyncio.create_task(provider_on(sock).run_call(call))
+    await sock.wait_for(script.is_setup)
+    script.ready()
+    update = await sock.wait_for(lambda f: f["type"] == "session.update", within=2)
+    assert update == {
+        "type": "session.update",
+        "session": {"delegation": {"type": "responses", "responses": {"tool_choice": "auto"}}},
+    }
+    assert call.start.primed
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)

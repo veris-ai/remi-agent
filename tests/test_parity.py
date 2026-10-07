@@ -14,7 +14,11 @@ its audio toward the caller), not on module attributes:
 - AGENT_FIRST (the test-only inbound agent): the opening turn is the first
   request after setup, caller audio is never held, and agent audio reaches
   the caller before they speak;
-- end_call hangs up the line.
+- end_call hangs up the line;
+- the priming deadline: a model that never runs the connect reads does not
+  hold the caller forever; their audio is released at the deadline, nothing
+  is run on the model's behalf, and the agent's gates refuse a debt tool with
+  the missing reads named.
 """
 
 from __future__ import annotations
@@ -30,7 +34,16 @@ import pytest
 
 from vamos_voice.providers import load_provider, vendor_names
 
-from .fakes import AGENT_CASES, HELLO, AgentCase, FakeLine, FakeVendorSocket, ScriptedSession, runtime
+from .fakes import (
+    AGENT_CASES,
+    HELLO,
+    AgentCase,
+    FakeLine,
+    FakeVendorSocket,
+    ScriptedSession,
+    remi_gated_session,
+    runtime,
+)
 
 CASES = {case.name: case for case in AGENT_CASES}
 
@@ -433,6 +446,49 @@ async def test_socket_vendor_primes_and_waits_for_the_callee(name: str, agent: s
     )
 
 
+MISSING_READS_REFUSAL = {
+    "error": "Run the connect-time reads first: get_account, get_dialed_phone, get_contact_history."
+}
+
+
+@pytest.mark.parametrize("name", sorted(SOCKET_VENDORS))
+async def test_socket_vendor_releases_the_caller_at_the_priming_deadline(
+    name: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    case = CASES["remi"]
+    build, script_cls = SOCKET_VENDORS[name]
+    sock = FakeVendorSocket()
+    script = script_cls(sock)
+    provider = build(sock)["provider"]
+    line, session = FakeLine(), remi_gated_session()
+    call = runtime(case, line, session, priming_timeout_s=0.2)
+    task = asyncio.create_task(provider.run_call(call))
+
+    await sock.wait_for(script.is_setup)
+    script.ready()
+    await line.incoming.put(HELLO)
+    await sock.wait_for(script.is_prime)  # priming asked; the model never runs the reads
+    await asyncio.sleep(0.05)
+    assert not any(script.is_caller_audio(f) for f in sock.sent)
+
+    await sock.wait_for(script.is_caller_audio, within=2)  # released at the deadline
+    assert call.start.primed
+    assert "not done after 0.2s" in caplog.text and "get_account" in caplog.text
+    assert session.results == [], "no read was run on the model's behalf"
+
+    script.callee_spoke()  # the call proceeds
+    script.audio()
+    await asyncio.sleep(0.05)
+    assert line.sent, "agent audio reaches the caller once they have spoken"
+    script.tool_calls("take_payment")  # a debt tool, before the reads
+    await asyncio.sleep(0.05)
+    assert session.results == [("take_payment", MISSING_READS_REFUSAL)]
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 @pytest.mark.parametrize("agent", AGENT_FIRST_CASES)
 @pytest.mark.parametrize("name", sorted(SOCKET_VENDORS))
 async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent: str) -> None:
@@ -561,6 +617,34 @@ async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context(a
     assert vad_params(turns).stop_secs + user_speech_timeout_s(turns) == pytest.approx(
         turns.silence_ms / 1000
     )
+
+
+@pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
+@pytest.mark.parametrize("model", ["never_calls_the_reads", "never_answers"])
+async def test_pipecat_gives_up_priming_at_the_deadline(model: str, caplog: pytest.LogCaptureFixture) -> None:
+    from openai import AsyncOpenAI
+
+    from vamos_voice.providers.pipecat import PipecatProvider
+    from vamos_voice.providers.pipecat.services import ServiceConfig
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if model == "never_answers":
+            await asyncio.sleep(10)
+        return httpx.Response(200, json=_completion([]))  # a reply with no tool calls
+
+    provider = PipecatProvider(
+        ServiceConfig(openai_api_key="sk-test", stt="deepgram", tts="openai"), "gpt-test"
+    )
+    provider.openai_client = lambda: AsyncOpenAI(
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    session = remi_gated_session()
+    call = runtime(CASES["remi"], session=session, priming_timeout_s=0.2)
+    await asyncio.wait_for(provider.prime_within_deadline(call, provider.build_context(call.setup)), 2)
+    assert call.start.primed, "the caller is heard either way"
+    assert "get_account" in caplog.text and "releasing the caller" in caplog.text
+    assert session.results == []
+    assert await session.dispatch("take_payment", {}) == MISSING_READS_REFUSAL
 
 
 @pytest.mark.parametrize("agent", AGENT_FIRST_CASES)

@@ -171,7 +171,11 @@ class _LiveCall:
             await self.send(instruction(call.setup.start_policy.prime_instruction))
         else:
             await self.finish_priming()
-        await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
+        await run_until_first_done(
+            call.start.priming_deadline(lambda: call.session.missing_reads, self.abandon_priming),
+            caller_to_vendor=call.inbound.run(),
+            vendor_to_caller=self.events(),
+        )
 
     async def events(self) -> None:
         while (event := await self.recv()) is not None:
@@ -245,8 +249,19 @@ class _LiveCall:
             await self.send({"type": "response.create"})
         return False
 
+    async def abandon_priming(self) -> None:
+        """The deadline passed with reads missing: hand the backend back its own tool choice, then
+        release the caller as if priming had finished (the agent's gates refuse what needs the reads)."""
+        if not self.priming:
+            return
+        await self.send(tool_choice_update("auto"))
+        await self.finish_priming()
+
     async def finish_priming(self) -> None:
-        """The reads are done (or there were none): release the caller, and open if the agent speaks first."""
+        """The reads are done (or there were none, or the deadline passed): release the caller,
+        and open if the agent speaks first. Runs once."""
+        if not self.priming:
+            return
         call = self.call
         self.priming = False
         call.start.mark_primed()

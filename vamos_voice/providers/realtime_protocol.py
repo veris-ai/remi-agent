@@ -127,7 +127,11 @@ class _RealtimeCall:
             await self.send_all(self.provider.priming_frames(call.setup, missing, first=True))
         else:
             await self.finish_priming()
-        await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
+        await run_until_first_done(
+            call.start.priming_deadline(lambda: call.session.missing_reads, self.finish_priming),
+            caller_to_vendor=call.inbound.run(),
+            vendor_to_caller=self.events(),
+        )
 
     async def events(self) -> None:
         while True:
@@ -197,7 +201,10 @@ class _RealtimeCall:
         return False
 
     async def finish_priming(self) -> None:
-        """The reads are done (or there were none): release the caller, and open if the agent speaks first."""
+        """The reads are done (or there were none, or the deadline passed): release the caller,
+        and open if the agent speaks first. Runs once."""
+        if not self.priming:
+            return
         call = self.call
         self.priming = False
         call.start.mark_primed()
