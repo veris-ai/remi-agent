@@ -66,7 +66,7 @@ early with a message saying what must happen first:
 | `queue_letter` | verified | Idempotent per call. |
 | `transfer_to_human` | proceeding | Disposition `transferred`. |
 | `log_contact_attempt` | assessed | The call's one row; time, duration and disposition come from the session and the clock. |
-| `end_call` | assessed | Requires the log; the line closes after the last words play. |
+| `end_call` | assessed | Requires the log; the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
 
 ## Payments
 

@@ -17,6 +17,7 @@ from typing import Any
 from vamos_voice.agent import AgentSpec
 from vamos_voice.call_start import PRIMING_TIMEOUT_S, CallStart, CallStartPolicy
 from vamos_voice.context import AgentContext, CallClock
+from vamos_voice.framing import Framing
 from vamos_voice.providers.base import CallRuntime, InboundAudio, OutboundAudio, SessionSetup, TurnTaking
 from vamos_voice.server import session_setup
 from vamos_voice.session import CallSession
@@ -84,6 +85,7 @@ class FakeLine:
         self.sent: list[bytes] = []
         self.closed = False
         self.websocket = None
+        self.framing = Framing.BINARY
 
     async def receive(self) -> bytes | None:
         frame = await self.incoming.get()

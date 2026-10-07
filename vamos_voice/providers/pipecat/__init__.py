@@ -55,7 +55,7 @@ from vamos_voice.providers.base import CallRuntime, SessionSetup, TurnTaking, Vo
 from vamos_voice.session import CallSession
 from vamos_voice.tools import ToolSpec
 
-from .serializer import RawPCM16Serializer
+from .serializer import LineSerializer
 from .services import STT_FACTORIES, TTS_FACTORIES, ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -204,7 +204,7 @@ class PipecatProvider(VoiceProvider):
                 audio_out_enabled=True,
                 audio_in_sample_rate=CHANNEL_RATE_HZ,
                 audio_out_sample_rate=CHANNEL_RATE_HZ,
-                serializer=RawPCM16Serializer(),
+                serializer=LineSerializer(call.line.framing),
             ),
         )
         llm = self.build_llm(call.setup)

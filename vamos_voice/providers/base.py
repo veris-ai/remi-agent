@@ -33,6 +33,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from ..audio import pcm_ms
 from ..call_start import CallStart, CallStartPolicy
+from ..framing import NORMAL_CLOSURE, Framing
 from ..session import CallSession
 from ..tools import ToolSpec
 
@@ -70,11 +71,21 @@ class ToolFormat(Protocol):
 
 
 class CallerLine:
-    """The bench's ``voice_ws`` socket: PCM16 24 kHz mono binary frames both ways."""
+    """The bench's ``voice_ws`` socket: PCM16 24 kHz mono both ways, in the candidate's ``Framing``.
 
-    def __init__(self, websocket: WebSocket) -> None:
+    ``close()`` is the one hang-up path: whoever ends the call from this side
+    (the agent's hang-up tool via ``CallRuntime.hang_up``, a failed provider,
+    the server once the call is over) ends it here, so every vendor hangs up
+    the same way.
+    """
+
+    def __init__(self, websocket: WebSocket, framing: Framing = Framing.BINARY) -> None:
         self.websocket = websocket  # for providers whose framework owns the transport (Pipecat)
+        self.framing = framing
         self.closed = False
+        #: The caller hung up in-band (``{"type": "end"}``), as opposed to dropping the socket.
+        self.caller_ended = False
+        self._hung_up = False
 
     async def receive(self) -> bytes | None:
         """The next audio frame, or None once the caller hangs up."""
@@ -85,25 +96,48 @@ class CallerLine:
                 break
             if message["type"] == "websocket.disconnect":
                 break
-            if message.get("bytes"):
-                return message["bytes"]
-            if message.get("text") is not None:
-                logger.warning("caller sent a text frame on a binary audio channel; ignored")
+            data = message.get("bytes")
+            decoded = self.framing.decode(data if data is not None else message.get("text") or "")
+            if decoded is None:
+                continue
+            if decoded.end:
+                logger.info("caller hung up (end message)")
+                self.caller_ended = True
+                break
+            return decoded.audio
         self.closed = True
         return None
 
+    def _connected(self) -> bool:
+        return (
+            self.websocket.client_state == WebSocketState.CONNECTED
+            and self.websocket.application_state == WebSocketState.CONNECTED
+        )
+
     async def send(self, pcm: bytes) -> None:
-        if self.closed or self.websocket.client_state != WebSocketState.CONNECTED:
+        if self.closed or not self._connected():
             return
+        payload = self.framing.encode_audio(pcm)
         try:
-            await self.websocket.send_bytes(pcm)
+            if isinstance(payload, bytes):
+                await self.websocket.send_bytes(payload)
+            else:
+                await self.websocket.send_text(payload)
         except (WebSocketDisconnect, RuntimeError):
             self.closed = True
 
     async def close(self) -> None:
-        if not self.closed and self.websocket.client_state == WebSocketState.CONNECTED:
-            self.closed = True
-            await self.websocket.close()
+        """Hang up: the framing's end message (json; not echoed to a caller who sent ``end``),
+        then a normal (1000) close."""
+        if self._hung_up or not self._connected():
+            return
+        self._hung_up = self.closed = True
+        try:
+            if not self.caller_ended and (end := self.framing.end_message()) is not None:
+                await self.websocket.send_text(end)
+            await self.websocket.close(code=NORMAL_CLOSURE)
+        except (WebSocketDisconnect, RuntimeError):
+            logger.info("caller line was already gone when the agent hung up")
 
 
 class InboundAudio:
