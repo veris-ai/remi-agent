@@ -32,10 +32,7 @@ veris-ai/rory-agent ``grok-voice/README.md``):
   faster than real time). So on barge-in this provider sends nothing and only
   marks the queued playout as interrupted; the context may hold up to a few
   seconds of words the caller never heard.
-- **No turn switches.** ``create_response``/``interrupt_response`` are not
-  documented, so Grok's VAD keeps answering and interrupting on its own
-  (``manages_turns = False``): background speech behind the caller is not
-  filtered the way it is on OpenAI. The liveness guard still applies.
+- **Turn taking** is Grok's own: its server VAD answers and interrupts.
 - **Opening turn** (``agent_first``): ``response.create`` with per-response
   ``instructions``, as for OpenAI; that field is documented.
 """
@@ -62,9 +59,6 @@ class GrokVoiceProvider(RealtimeProtocolProvider):
     trace_adapter = "openai-realtime"
     required_env = (API_KEY_ENV,)
     truncates_on_barge_in = False
-    #: No documented ``create_response``/``interrupt_response`` switch and no ``response.cancel``:
-    #: Grok's VAD keeps answering and interrupting on its own.
-    manages_turns = False
 
     def __init__(self, api_key: str, model: str, voice: str) -> None:
         self._api_key = api_key
