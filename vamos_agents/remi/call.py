@@ -77,7 +77,8 @@ class RemiCall:
     # Opening progress.
     verified_as: str | None = None  # "consumer" | "estate_rep"
     verification_failures: int = 0
-    language_recorded: bool = False
+    language_asked: bool = False  # ask_language ran: the open question was put to the consumer
+    language_recorded: bool = False  # set_language recorded what the consumer said
     debt_unlocked: bool = False
 
     # What the call produced.
@@ -138,8 +139,8 @@ class RemiCall:
             return "Confirm the right party first with verify_right_party. Say nothing about the debt until then."
         return (
             "Give the required disclosures first, then call get_debt_details: the recording disclosure, the "
-            "mini-Miranda, and when due the language question (set_language), the time-barred disclosure and "
-            "the alternative-format statement."
+            "mini-Miranda, and when due the language question (ask_language, wait for the answer, then "
+            "set_language), the time-barred disclosure and the alternative-format statement."
         )
 
     def require_consumer(self) -> None:

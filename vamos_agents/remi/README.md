@@ -44,6 +44,10 @@ early with a message saying what must happen first:
 3. Disclosures: recording, mini-Miranda, and when due the language question,
    the time-barred disclosure and the alternative-format statement, attested
    as `get_debt_details` arguments (so they appear in the trace, in order).
+   The language step is enforced by tools, not attested: with no preference
+   on record, `get_debt_details` waits for `ask_language` and then
+   `set_language` with the consumer's own answer, so Remi can never record a
+   preference the consumer did not state.
 4. Only then the debt, offers and payments. A dispute, cease, attorney,
    bankruptcy, death or SCRA claim stops collection for the rest of the call.
 
@@ -55,7 +59,8 @@ early with a message saying what must happen first:
 | `verify_right_party` | proceeding | Consumer (name + 2 factors) or `estate_rep` (name only, deceased consumer). |
 | `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. |
 | `log_dispute` | verified | dispute or medical financial assistance; collection stops. |
-| `set_language` | verified | Records the language preference. |
+| `ask_language` | verified (consumer only) | Marks the open language question as asked (or, with a preference on record, says to confirm it instead). |
+| `set_language` | verified (consumer only) | Records the language the consumer named, quoting their words in `consumer_said`; refused while none is on record and `ask_language` has not run. |
 | `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits. |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
 | `take_payment` | debt unlocked, `collection` | `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: Remi sets `status` `paid`/`settled` (the gateway already moved the balance). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
