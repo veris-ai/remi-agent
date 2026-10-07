@@ -1,0 +1,65 @@
+[project]
+name = "remi-agent"
+version = "0.1.0"
+description = "Remi: the debt-collection voice agent for the VAmoS Debt Collection benchmark"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.142,<0.143",
+    "uvicorn[standard]>=0.54,<0.55",
+    "pydantic>=2.13,<3",
+    "psycopg[binary]>=3.3,<3.4",
+    "stripe>=16.0,<17",
+    "numpy>=2.3,<2.6",
+    "httpx>=0.28,<0.29",
+    "websockets>=15,<18",
+]
+
+[project.optional-dependencies]
+# One extra per vendor folder under vendors/. The Dockerfile installs exactly one.
+# The two speech-to-speech vendors need nothing beyond the core (raw websockets).
+openai_realtime = []
+gemini_live = []
+pipecat = [
+    "pipecat-ai[deepgram,cartesia,openai,silero,websocket]>=1.12,<1.13",
+    "openai>=3.0,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1,<10",
+    "pytest-asyncio>=1.4,<2",
+    "ruff>=0.16,<0.17",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["remi_core", "vendors"]
+
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "T20", "SIM", "RUF"]
+# Long prose strings (tool descriptions, prompts) are left to the formatter.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["T20"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+filterwarnings = [
+    # stripe's own httpx client passes bytes as data=; not ours to fix.
+    "ignore:Use 'content=<...>' to upload raw bytes:DeprecationWarning",
+]
+markers = [
+    "postgres: needs a real Postgres (docker or REMI_TEST_DATABASE_URL)",
+]
