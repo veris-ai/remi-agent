@@ -17,6 +17,10 @@ a ``response.create`` with ``tool_choice: "required"`` makes the model run the
 connect reads, and any read it skipped is forced by name. Only then is the
 held audio released, so server VAD hears "Hello?" after the reads are done and
 answers it with full knowledge of the account.
+
+Call start (``AGENT_FIRST``): any connect reads are primed the same way, then
+one ``response.create`` asks for the opening turn (the session instructions
+plus the policy's opening instruction), and its audio goes straight out.
 """
 
 from __future__ import annotations
@@ -65,6 +69,11 @@ class RealtimeProtocolProvider(VoiceProvider, abc.ABC):
     def session_config(self, setup: SessionSetup) -> dict[str, Any]:
         """The ``session`` object of the opening ``session.update``."""
 
+    def opening_response(self, setup: SessionSetup) -> dict[str, Any]:
+        """The ``response.create`` that makes the agent speak first (AGENT_FIRST)."""
+        instructions = f"{setup.instructions}\n\n{setup.start_policy.opening_instruction}"
+        return {"type": "response.create", "response": {"instructions": instructions}}
+
     def priming_response(self, forced_tool: str | None) -> dict[str, Any]:
         """The ``response.create`` that runs the connect reads before the callee is heard."""
         choice: Any = {"type": "function", "name": forced_tool} if forced_tool else "required"
@@ -95,7 +104,10 @@ class _RealtimeCall:
             await self.send({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()})
 
         call.inbound.bind(forward)
-        await self.send(self.provider.priming_response(None))
+        if call.session.missing_reads:
+            await self.send(self.provider.priming_response(None))
+        else:
+            await self.finish_priming()
         await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
 
     async def events(self) -> None:
@@ -165,9 +177,7 @@ class _RealtimeCall:
             if missing:
                 await self.send(self.provider.priming_response(missing[0]))
                 return False
-            self.priming = False
-            call.start.mark_primed()
-            await call.inbound.release()
+            await self.finish_priming()
             return False
         if call.session.ended:
             await call.hang_up()
@@ -175,6 +185,15 @@ class _RealtimeCall:
         if answered:
             await self.send({"type": "response.create"})
         return False
+
+    async def finish_priming(self) -> None:
+        """The reads are done (or there were none): release the caller, and open if the agent speaks first."""
+        call = self.call
+        self.priming = False
+        call.start.mark_primed()
+        await call.inbound.release()
+        if call.setup.start_policy.agent_opens:
+            await self.send(self.provider.opening_response(call.setup))
 
     async def truncate_playing_item(self) -> None:
         """Barge-in: tell the vendor how much of the reply the caller actually heard, so the

@@ -9,10 +9,12 @@ Audio: the channel's 24 kHz PCM16 is resampled to Gemini's native 16 kHz on
 the way in; Gemini's output is 24 kHz, forwarded as is.
 
 Call start: the Live API has no forced tool choice, so priming is a text turn
-(the policy's ``prime_note``, labelled as a dialer note so the judge never mistakes it for
+(the policy's ``prime_note``, labelled as a call-system note so the judge never mistakes it for
 the callee) asking the model to run the connect reads silently. Any read it
 skips is asked for again by name. Audio the model produces before the callee
-speaks is dropped by the shared ``OutboundAudio`` gate.
+speaks is dropped by the shared ``OutboundAudio`` gate. For an agent that
+speaks first, the opening is requested the same way: a labelled text turn
+carrying the policy's ``opening_note``.
 """
 
 from __future__ import annotations
@@ -181,7 +183,10 @@ class _GeminiCall:
                 )
 
         call.inbound.bind(forward)
-        await self.send(_prime_turn(call.setup.start_policy.prime_note))
+        if call.session.missing_reads:
+            await self.send(_prime_turn(call.setup.start_policy.prime_note))
+        else:
+            await self.finish_priming()
         await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
 
     async def events(self) -> None:
@@ -228,14 +233,21 @@ class _GeminiCall:
                 note = call.setup.start_policy.prime_note
                 await self.send(_prime_turn(f"{note} Still missing: {', '.join(missing)}."))
                 return False
-            self.priming = False
-            call.start.mark_primed()
-            await call.inbound.release()
+            await self.finish_priming()
             return False
         if call.session.ended:
             await call.hang_up()
             return True
         return False
+
+    async def finish_priming(self) -> None:
+        """The reads are done (or there were none): release the caller, and open if the agent speaks first."""
+        call = self.call
+        self.priming = False
+        call.start.mark_primed()
+        await call.inbound.release()
+        if call.setup.start_policy.agent_opens:
+            await self.send(_prime_turn(call.setup.start_policy.opening_note))
 
 
 PROVIDER = GeminiLiveProvider

@@ -15,7 +15,9 @@ tool results in the next request, becomes an LLM span in the agent trace.
 Call start: priming is a direct chat completion (same SDK, so it is traced)
 with ``tool_choice`` forcing the connect reads, before the pipeline starts.
 The pipeline then begins with those calls and results already in its context,
-and the LLM runs only on a user turn, so the callee speaks first.
+and the LLM runs only on a user turn, so the callee speaks first. For an agent
+that speaks first, the pipeline's first frames (queued when the caller's
+socket connects) append the policy's opening instruction and run the LLM.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.adapters.services.open_ai_adapter import OpenAILLMAdapter
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import EndFrame, FunctionCallResultProperties
+from pipecat.frames.frames import EndFrame, Frame, FunctionCallResultProperties, LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -126,6 +128,8 @@ class PipecatProvider(VoiceProvider):
 
     async def prime(self, call: CallRuntime, context: LLMContext) -> None:
         """Run the connect reads as real, traced model tool calls before the callee speaks."""
+        if not call.setup.start_policy.connect_reads:
+            return
         client = self.openai_client()
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": call.setup.instructions},
@@ -167,6 +171,13 @@ class PipecatProvider(VoiceProvider):
                 return
             forced = {"type": "function", "function": {"name": missing[0]}}
         raise RuntimeError(f"priming never ran {call.session.missing_reads}")
+
+    def opening_frames(self, setup: SessionSetup) -> list[Frame]:
+        """What the pipeline does as soon as the caller is connected: open the call if the agent speaks first."""
+        if not setup.start_policy.agent_opens:
+            return []
+        message = {"role": "system", "content": setup.start_policy.opening_instruction}
+        return [LLMMessagesAppendFrame([message], run_llm=True)]
 
     # --- the call --------------------------------------------------------------------------
 
@@ -220,6 +231,13 @@ class PipecatProvider(VoiceProvider):
         worker = PipelineWorker(
             pipeline, params=PipelineParams(enable_metrics=True), app_resources=call, enable_rtvi=False
         )
+
+        opening = self.opening_frames(call.setup)
+
+        @transport.event_handler("on_client_connected")
+        async def _connected(_transport: Any, _client: Any) -> None:
+            if opening:
+                await worker.queue_frames(opening)
 
         @transport.event_handler("on_client_disconnected")
         async def _disconnected(_transport: Any, _client: Any) -> None:

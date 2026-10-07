@@ -16,7 +16,7 @@ from typing import Any
 
 from vamos_voice.agent import AgentSpec
 from vamos_voice.call_start import CallStart, CallStartPolicy
-from vamos_voice.context import CallClock
+from vamos_voice.context import AgentContext, CallClock
 from vamos_voice.providers.base import CallRuntime, InboundAudio, OutboundAudio, SessionSetup, TurnTaking
 from vamos_voice.server import session_setup
 
@@ -63,8 +63,16 @@ async def _no_db() -> Any:
     raise AssertionError("parity tests never open the world")
 
 
+def _fake_inbound() -> AgentSpec:
+    from .fake_inbound import FakeInboundAgent
+
+    return FakeInboundAgent.from_env({}, AgentContext.from_json(None))
+
+
 REMI = AgentCase("remi", _remi)
-AGENT_CASES = [REMI]
+FAKE_INBOUND = AgentCase("fake_inbound", _fake_inbound)
+#: Every agent the parity matrix covers: each real pack, plus the test-only inbound agent.
+AGENT_CASES = [REMI, FAKE_INBOUND]
 
 
 class FakeLine:

@@ -16,7 +16,17 @@ speaks first; Remi):
 2. **Hold the line.** No audio goes out until the callee's first utterance
    has been heard. Anything the model produces before that is dropped.
 
-The vendor decides only how to force the reads (see each provider).
+``agent_first`` (inbound: the caller rang the agent, the agent greets them;
+Rory, Riley):
+
+1. **Prime** (optional). If the policy names connect-time reads, they run
+   first exactly as above, with the caller's audio held meanwhile.
+2. **Open.** The provider then asks the model for its opening turn with the
+   policy's ``opening_instruction`` (a greeting), and agent audio flows from
+   the first byte: the line is never held.
+
+The vendor decides only how to force the reads and how to request the
+opening turn (see each provider).
 """
 
 from __future__ import annotations
@@ -28,9 +38,9 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-#: How a priming turn is labelled where a vendor can only be prompted by a user-role turn (Gemini Live),
+#: How a priming or opening turn is labelled where a vendor can only be prompted by a user-role turn (Gemini Live),
 #: so neither the model nor the judge mistakes it for the person on the line.
-NOTE_LABEL = "[Dialer note, not the person on the line]"
+NOTE_LABEL = "[Call system note, not the person on the line]"
 
 
 @dataclass(frozen=True)
@@ -39,12 +49,24 @@ class CallStartPolicy:
 
     first_speaker: Literal["callee", "agent"]
     connect_reads: tuple[str, ...]
-    prime_instruction: str
+    prime_instruction: str = ""
+    #: agent_first only: what the model is told to do for its opening turn (greet the caller).
+    opening_instruction: str = ""
 
     @property
     def prime_note(self) -> str:
         """The priming instruction as a labelled user-role turn."""
         return f"{NOTE_LABEL} {self.prime_instruction}"
+
+    @property
+    def opening_note(self) -> str:
+        """The opening instruction as a labelled user-role turn."""
+        return f"{NOTE_LABEL} {self.opening_instruction}"
+
+    @property
+    def agent_opens(self) -> bool:
+        """Does the agent speak first (so the provider must request an opening turn)?"""
+        return self.first_speaker == "agent"
 
 
 def callee_first(connect_reads: tuple[str, ...], prime_instruction: str) -> CallStartPolicy:
@@ -52,6 +74,17 @@ def callee_first(connect_reads: tuple[str, ...], prime_instruction: str) -> Call
     if not connect_reads:
         raise ValueError("callee_first needs at least one connect-time read to prime")
     return CallStartPolicy("callee", connect_reads, prime_instruction)
+
+
+def agent_first(
+    opening_instruction: str, connect_reads: tuple[str, ...] = (), prime_instruction: str = ""
+) -> CallStartPolicy:
+    """Inbound: optionally run ``connect_reads`` silently, then the agent opens the call."""
+    if not opening_instruction:
+        raise ValueError("agent_first needs an opening instruction (what the greeting turn should do)")
+    if connect_reads and not prime_instruction:
+        raise ValueError("connect reads need a prime instruction")
+    return CallStartPolicy("agent", connect_reads, prime_instruction, opening_instruction)
 
 
 class CallStart:
