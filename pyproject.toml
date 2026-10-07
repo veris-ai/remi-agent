@@ -24,9 +24,11 @@ remi = [
     "httpx>=0.28,<0.29",
 ]
 
-# --- vendors (the two speech-to-speech vendors need nothing beyond the core: raw websockets) ---
+# --- vendors (the speech-to-speech vendors need nothing beyond the core: raw websockets) ---
 openai_realtime = []
 gemini_live = []
+grok_voice = []
+gpt_live = []
 pipecat = [
     "pipecat-ai[deepgram,cartesia,openai,silero,websocket]>=1.12,<1.13",
     "openai>=3.0,<4",
