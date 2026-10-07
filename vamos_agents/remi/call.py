@@ -3,8 +3,9 @@
 RULES.md fixes the order of a call's opening: read the account, the dialed
 phone and the contact history; decide whether the call should have been
 placed; confirm the right party; give the recording disclosure and the
-mini-Miranda (and, when due, the language question, the time-barred
-disclosure and the alternative-format statement); only then the debt. The
+mini-Miranda (and, when due, the time-barred disclosure and the
+alternative-format statement); only then the debt. Calls are in English only:
+Remi has no language step and never writes a language preference. The
 prompt asks the model to keep that order. ``RemiCall.gate`` computes how far
 the call has got, and ``vamos_agents.remi.gates`` refuses any tool that arrives
 early with an error that says what must happen first. Nothing reaches the
@@ -50,7 +51,6 @@ class Assessment:
     should_not_call_reasons: tuple[str, ...]
     first_conversation: bool
     time_barred: bool
-    language_needed: bool
 
     @property
     def proceed(self) -> bool:
@@ -77,7 +77,6 @@ class RemiCall:
     # Opening progress.
     verified_as: str | None = None  # "consumer" | "estate_rep"
     verification_failures: int = 0
-    language_recorded: bool = False
     debt_unlocked: bool = False
 
     # What the call produced.
@@ -138,8 +137,7 @@ class RemiCall:
             return "Confirm the right party first with verify_right_party. Say nothing about the debt until then."
         return (
             "Give the required disclosures first, then call get_debt_details: the recording disclosure, the "
-            "mini-Miranda, and when due the language question (set_language), the time-barred disclosure and "
-            "the alternative-format statement."
+            "mini-Miranda, and when due the time-barred disclosure and the alternative-format statement."
         )
 
     def require_consumer(self) -> None:

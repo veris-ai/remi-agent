@@ -1,4 +1,4 @@
-"""Right-party verification, the language preference, and the debt-details gate.
+"""Right-party verification and the debt-details gate.
 
 Verification is decided here, not by the model: the person must give their
 full name and two of date of birth, ZIP and SSN last four, and those are
@@ -119,8 +119,6 @@ async def _verified(session: RemiCall, role: str) -> dict[str, Any]:
     a = session.assessment
     assert a is not None
     owed = ["the recording disclosure", "the mini-Miranda"]
-    if role == "consumer" and a.language_needed:
-        owed.append("ask which language they prefer, then set_language")
     if a.time_barred:
         owed.append("the time-barred disclosure")
     if role == "consumer" and a.first_conversation:
@@ -143,32 +141,6 @@ def _failed(session: RemiCall, message: str) -> dict[str, Any]:
             "with answered_by 'none' and end_call.",
         }
     return {"verified": False, "attempts_left": left, "next": message}
-
-
-class LanguageArgs(BaseModel):
-    language: str = Field(
-        description="ISO 639-1 code of the language the consumer prefers, e.g. 'en' or 'es'."
-    )
-
-
-@REGISTRY.tool(LanguageArgs, requires=Gate.VERIFIED)
-async def set_language(session: RemiCall, args: LanguageArgs) -> dict[str, Any]:
-    """Record the consumer's preferred language after asking them (only when none is on record)."""
-    session.require_consumer()
-    code = args.language.strip().lower()
-    if not re.fullmatch(r"[a-z]{2}", code):
-        raise ToolError("Use a two-letter language code such as 'en' or 'es'.")
-    assert session.consumer is not None
-    async with session.db.transaction() as tx:
-        await tx.update("consumers", session.consumer.consumer_id, {"language_preference": code})
-    session.language_recorded = True
-    if code == "en":
-        return {"recorded": code}
-    return {
-        "recorded": code,
-        "next": "Offer to continue in that language or to arrange it. Never give a partial or inaccurate "
-        "translation of a required disclosure.",
-    }
 
 
 class DebtDetailsArgs(BaseModel):
@@ -200,8 +172,6 @@ async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str
         missing.append("the recording disclosure")
     if not args.mini_miranda_given:
         missing.append("the mini-Miranda")
-    if consumer and a.language_needed and not session.language_recorded:
-        missing.append("the language question (then set_language)")
     if a.time_barred and not args.time_barred_disclosure_given:
         missing.append("the time-barred disclosure")
     if consumer and a.first_conversation and not args.alternative_format_statement_given:

@@ -30,7 +30,7 @@ class NoArgs(BaseModel):
 @REGISTRY.tool(NoArgs, requires=Gate.NONE)
 async def get_account(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """Connect-time read 1 of 3. Reads the account being called (from the dialer's context): the consumer's
-    name, the account status, the recorded language preference and whether the debt is time-barred. Call
+    name, the account status and whether the debt is time-barred. Call
     get_account, get_dialed_phone and get_contact_history before saying anything past a greeting."""
     db, ctx = session.db, session.context
     session.agency = await db.agency()
@@ -43,7 +43,6 @@ async def get_account(session: RemiCall, _: NoArgs) -> dict[str, Any]:
         "account_id": account.account_id,
         "consumer_full_name": consumer.full_name,
         "account_status": account.status,
-        "language_preference": consumer.language_preference,
         "time_barred": policy.time_barred(account, session.clock.today()),
         "medical_debt": session.creditor.kind == "medical",
         "you": {
@@ -113,7 +112,6 @@ def _with_assessment(session: RemiCall, result: dict[str, Any]) -> dict[str, Any
             ),
             first_conversation=policy.first_conversation(session.history),
             time_barred=policy.time_barred(session.account, today),
-            language_needed=session.consumer.language_preference is None,
         )
     a = session.assessment
     result["call_assessment"] = {
@@ -121,7 +119,6 @@ def _with_assessment(session: RemiCall, result: dict[str, Any]) -> dict[str, Any
         "should_not_call_reasons": list(a.should_not_call_reasons),
         "first_conversation": a.first_conversation,
         "time_barred": a.time_barred,
-        "language_question_due": a.language_needed,
         "next": (
             "Wait for the person to speak, then greet and ask for the consumer by full name."
             if a.proceed
