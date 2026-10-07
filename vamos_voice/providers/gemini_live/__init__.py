@@ -232,8 +232,7 @@ class _GeminiCall:
         if self.priming:
             missing = call.session.missing_reads
             if missing:
-                note = call.setup.start_policy.prime_note
-                await self.send(_prime_turn(f"{note} Still missing: {', '.join(missing)}."))
+                await self.send(_prime_turn(call.setup.start_policy.reprime_note(missing)))
                 return False
             await self.finish_priming()
             return False

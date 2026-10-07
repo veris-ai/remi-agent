@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
+
+if TYPE_CHECKING:
+    from ..session import CallSession
+
+logger = logging.getLogger(__name__)
 
 OPEN_TIMEOUT_S = 15
 
@@ -37,3 +44,17 @@ async def run_until_first_done(**coroutines: Coroutine[Any, Any, None]) -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def dispatch_json_call(session: CallSession, name: str, raw_arguments: str | None) -> str | None:
+    """Run a tool call whose arguments arrive as a JSON string; return its result as JSON.
+
+    None when the arguments are cut off (a response cancelled mid-generation): a half call
+    is never run, and the model retries it on its next turn.
+    """
+    try:
+        args = json.loads(raw_arguments or "{}")
+    except json.JSONDecodeError:
+        logger.warning("%s arguments truncated; not dispatched", name)
+        return None
+    return json.dumps(await session.dispatch(name, args), default=str)

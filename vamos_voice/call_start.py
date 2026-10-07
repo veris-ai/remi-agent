@@ -38,7 +38,8 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-#: How a priming or opening turn is labelled where a vendor can only be prompted by a user-role turn (Gemini Live),
+#: How a priming or opening turn is labelled where a vendor can only be prompted by a user-role turn
+#: (Gemini Live; Grok Voice for priming, which has no forced tool choice),
 #: so neither the model nor the judge mistakes it for the person on the line.
 NOTE_LABEL = "[Call system note, not the person on the line]"
 
@@ -57,6 +58,14 @@ class CallStartPolicy:
     def prime_note(self) -> str:
         """The priming instruction as a labelled user-role turn."""
         return f"{NOTE_LABEL} {self.prime_instruction}"
+
+    def reprime_instruction(self, missing: list[str]) -> str:
+        """The priming instruction again, naming the connect reads the model has not run yet."""
+        return f"{self.prime_instruction} Still missing: {', '.join(missing)}."
+
+    def reprime_note(self, missing: list[str]) -> str:
+        """``reprime_instruction`` as a labelled user-role turn."""
+        return f"{NOTE_LABEL} {self.reprime_instruction(missing)}"
 
     @property
     def opening_note(self) -> str:
