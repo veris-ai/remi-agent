@@ -59,8 +59,10 @@ class OpenAIRealtimeProvider(RealtimeProtocolProvider):
                         "threshold": turns.vad_threshold,
                         "prefix_padding_ms": turns.prefix_padding_ms,
                         "silence_duration_ms": turns.silence_ms,
-                        "create_response": True,
-                        "interrupt_response": True,
+                        # manages_turns: the provider answers and interrupts only for turns
+                        # in which the caller's own voice was heard (not a TV behind them).
+                        "create_response": not self.manages_turns,
+                        "interrupt_response": not self.manages_turns,
                     },
                 },
                 "output": {"format": pcm, "voice": self.voice},

@@ -12,7 +12,7 @@ import base64
 
 from vamos_voice.providers.grok_voice import API_KEY_ENV, GrokVoiceProvider
 
-from .fakes import REMI, FakeLine, FakeVendorSocket, ScriptedSession, runtime
+from .fakes import HELLO, REMI, FakeLine, FakeVendorSocket, ScriptedSession, runtime
 from .test_parity import GrokScript, OpenAIScript, openai_call
 
 ONE_SECOND = b"\x00\x01" * 24_000
@@ -82,6 +82,8 @@ async def _barge_in(provider, script_cls) -> list[dict]:
     script = script_cls(sock)
     provider.connect = sock.connector()
     line, task = await _primed_call(sock, provider, script)
+    await line.incoming.put(HELLO)
+    await asyncio.sleep(0.05)
     script.callee_spoke()
     sock.push(
         {
@@ -92,7 +94,9 @@ async def _barge_in(provider, script_cls) -> list[dict]:
     )
     await asyncio.sleep(0.05)
     assert line.sent, "the reply reached the caller"
-    sock.push({"type": "input_audio_buffer.speech_started", "item_id": "u2"})
+    await line.incoming.put(HELLO)  # the caller's own voice, talking over the reply
+    await asyncio.sleep(0.05)
+    sock.push({"type": "input_audio_buffer.speech_started", "item_id": "u2", "audio_start_ms": 200})
     await asyncio.sleep(0.05)
     task.cancel()
     return [f for f in sock.sent if f.get("type") == "conversation.item.truncate"]
