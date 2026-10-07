@@ -8,7 +8,7 @@ under `vamos_agents/` that supplies its prompt, tools, rules and world clients.
 
 | Agent | Benchmark | Calls | Vendors |
 |---|---|---|---|
-| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS) |
+| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Grok Voice, GPT-Live, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS) |
 
 ## Quickstart
 
@@ -27,7 +27,10 @@ curl localhost:8008/health
 ```
 
 `AGENT` is a folder under `vamos_agents/`; `VENDOR` is one of `openai_realtime`,
-`gemini_live`, `pipecat`. The voice channel is `ws://<host>:8008/voice`
+`grok_voice` (xAI, key `XAI_API_KEY`), `gpt_live` (OpenAI GPT-Live),
+`gemini_live`, `pipecat`. Vendors differ in what they support (forced tool
+choice, barge-in truncation, VAD settings); AGENTS.md section 10 lists the
+differences and how each is handled. The voice channel is `ws://<host>:8008/voice`
 (PCM16, 24 kHz, mono, binary frames).
 
 See **[AGENTS.md](AGENTS.md)** for the architecture, the `AgentSpec` contract,
