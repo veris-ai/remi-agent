@@ -53,6 +53,22 @@ def test_every_agent_pack_is_covered_here() -> None:
     assert set(agent_names()) <= set(CASES), "add the new agent to tests/fakes.AGENT_CASES"
 
 
+#: Vendor keys use their standard names (bench candidate-env secrets, as on the other VAmoS benches).
+STANDARD_KEYS = {
+    "openai_realtime": ("OPENAI_API_KEY",),
+    "gpt_live": ("OPENAI_API_KEY",),
+    "gemini_live": ("GEMINI_API_KEY",),
+    "grok_voice": ("XAI_API_KEY",),
+}
+
+
+@pytest.mark.parametrize("name", sorted(STANDARD_KEYS))
+def test_speech_to_speech_vendors_read_the_standard_key_names(name: str) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    assert load_provider(name).required_env == STANDARD_KEYS[name]
+
+
 @pytest.mark.parametrize("name", vendor_names())
 def test_provider_metadata(name: str) -> None:
     if not installed(name):

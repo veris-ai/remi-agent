@@ -93,9 +93,9 @@ def _gemini_schema(node: Any) -> Any:
 class GeminiLiveProvider(VoiceProvider):
     name = "gemini_live"
     trace_adapter = "gemini-live"
-    # GEMINI_* is reserved by Veris Bench candidate-env; GOOGLE_API_KEY is the name
-    # Google's own genai SDK reads, so it works on the bench and anywhere else.
-    required_env = ("GOOGLE_API_KEY",)
+    # The standard name, as on the other VAmoS benches; Veris Bench allows this exact
+    # candidate-env key (other GEMINI_* names stay reserved for its harnesses).
+    required_env = ("GEMINI_API_KEY",)
     tool_format = GeminiToolFormat()
     connect: Connect = staticmethod(connect_websocket)
 
@@ -106,7 +106,7 @@ class GeminiLiveProvider(VoiceProvider):
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Self:
         return cls(
-            api_key=env["GOOGLE_API_KEY"],
+            api_key=env["GEMINI_API_KEY"],
             model=env.get("VAMOS_GEMINI_MODEL") or DEFAULT_MODEL,
             voice=env.get("VAMOS_GEMINI_VOICE") or DEFAULT_VOICE,
         )
