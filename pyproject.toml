@@ -37,7 +37,7 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["remi_core", "vendors"]
+packages = ["vamos_voice", "agents"]
 
 
 [tool.ruff]
@@ -55,7 +55,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests"]
+testpaths = ["tests", "agents"]
 filterwarnings = [
     # stripe's own httpx client passes bytes as data=; not ours to fix.
     "ignore:Use 'content=<...>' to upload raw bytes:DeprecationWarning",

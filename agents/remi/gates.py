@@ -1,0 +1,55 @@
+"""Remi's gates: RULES.md's opening order as a ladder, plus the collection stop.
+
+``Gate`` is the least a tool needs before it may run. ``GATES`` refuses a tool
+whose level the call has not reached (``RemiCall.refusal_for`` says what must
+happen first), and refuses every tool tagged ``COLLECTION`` once something on
+the call (a dispute, cease, attorney, bankruptcy, death, SCRA) stopped
+collection.
+"""
+
+from __future__ import annotations
+
+import enum
+from typing import TYPE_CHECKING
+
+from vamos_voice.session import GateLadder
+from vamos_voice.tools import Tool
+
+if TYPE_CHECKING:
+    from .call import RemiCall
+
+#: Tag on tools that state an amount, make an offer or take money.
+COLLECTION = "collection"
+
+
+class Gate(enum.IntEnum):
+    """RULES.md's opening order, as the least a tool needs before it may run."""
+
+    NONE = 0  # the connect-time reads themselves
+    ASSESSED = 1  # all three reads done; the call may proceed or must close
+    PROCEEDING = 2  # assessed, and the call is not one that should not have been placed
+    VERIFIED = 3  # the right party (consumer or verified estate rep) confirmed
+    DEBT_UNLOCKED = 4  # recording disclosure, mini-Miranda and the rest given; debt details read
+
+
+class RemiGates:
+    """The opening-order ladder, then the collection stop."""
+
+    def __init__(self) -> None:
+        self._ladder: GateLadder[RemiCall] = GateLadder(
+            level=lambda call: call.gate,
+            explain=lambda call, needed: call.refusal_for(Gate(needed)),
+        )
+
+    def refusal(self, call: RemiCall, tool: Tool) -> str | None:
+        if (refused := self._ladder.refusal(call, tool)) is not None:
+            return refused
+        if COLLECTION in tool.tags and call.collection_stopped_by:
+            return (
+                f"Collection stopped on this call ({call.collection_stopped_by.replace('_', ' ')}). "
+                "State no amount, make no offer and ask for no payment."
+            )
+        return None
+
+
+GATES = RemiGates()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from remi_core.audio import Resampler, pcm_ms
+from vamos_voice.audio import Resampler, pcm_ms
 
 
 def test_24k_to_16k_keeps_duration_and_shape_across_chunks() -> None:

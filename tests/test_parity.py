@@ -1,4 +1,4 @@
-"""Parity: every installed vendor sends the same Remi.
+"""Parity: every installed vendor sends the same agent, for every agent.
 
 Each case runs a provider through a whole scripted call offline and asserts on
 what it actually SENT (the vendor's session/setup frame, its priming request,
@@ -23,16 +23,11 @@ from typing import Any
 import httpx
 import pytest
 
-from remi_core.call_start import PRIME_INSTRUCTION, PRIME_NOTE
-from remi_core.providers import load_provider, vendor_names
-from remi_core.session import CONNECT_READS
-from remi_core.tools import REGISTRY
+from vamos_voice.providers import load_provider, vendor_names
 
-from .fakes import HELLO, FakeLine, FakeVendorSocket, ScriptedSession, runtime, setup
+from .fakes import AGENT_CASES, HELLO, AgentCase, FakeLine, FakeVendorSocket, ScriptedSession, runtime
 
-EXPECTED = {
-    s.name: (set(s.parameters["properties"]), set(s.parameters["required"])) for s in REGISTRY.specs()
-}
+CASES = {case.name: case for case in AGENT_CASES}
 
 
 def installed(name: str) -> bool:
@@ -45,6 +40,12 @@ def installed(name: str) -> bool:
 
 def test_every_vendor_folder_is_covered_here() -> None:
     assert set(vendor_names()) == {"openai_realtime", "gemini_live", "pipecat"}
+
+
+def test_every_agent_pack_is_covered_here() -> None:
+    from vamos_voice.registry import agent_names
+
+    assert set(agent_names()) <= set(CASES), "add the new agent to tests/fakes.AGENT_CASES"
 
 
 @pytest.mark.parametrize("name", vendor_names())
@@ -60,7 +61,7 @@ def test_provider_metadata(name: str) -> None:
 
 
 def openai_call(sock: FakeVendorSocket) -> dict[str, Any]:
-    from vendors.openai_realtime import OpenAIRealtimeProvider
+    from vamos_voice.providers.openai_realtime import OpenAIRealtimeProvider
 
     provider = OpenAIRealtimeProvider("sk-test", "gpt-realtime", "marin", "gpt-4o-mini-transcribe")
     provider.connect = sock.connector()
@@ -83,9 +84,7 @@ class OpenAIScript:
                     "item_id": f"fc{self.n}{i}",
                     "call_id": f"call_{self.n}_{i}",
                     "name": name,
-                    "arguments": "{}"
-                    if name != "log_contact_attempt"
-                    else json.dumps({"answered_by": "consumer", "summary": "A short summary of the call."}),
+                    "arguments": "{}",
                 }
             )
         self.sock.push({"type": "response.done", "response": {"id": f"r{self.n}", "status": "completed"}})
@@ -123,7 +122,7 @@ class OpenAIScript:
     is_caller_audio = staticmethod(lambda f: f.get("type") == "input_audio_buffer.append")
 
     @staticmethod
-    def check_prime(frame: dict[str, Any]) -> None:
+    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
         assert frame["response"]["tool_choice"] == "required"
 
     def ready(self) -> None:
@@ -144,9 +143,7 @@ class GeminiScript:
             {
                 "id": f"fc_{self.n}_{i}",
                 "name": n,
-                "args": {}
-                if n != "log_contact_attempt"
-                else {"answered_by": "consumer", "summary": "A short summary of the call."},
+                "args": {},
             }
             for i, n in enumerate(names)
         ]
@@ -190,12 +187,12 @@ class GeminiScript:
     is_caller_audio = staticmethod(lambda f: "realtimeInput" in f)
 
     @staticmethod
-    def check_prime(frame: dict[str, Any]) -> None:
-        assert frame["clientContent"]["turns"][0]["parts"][0]["text"] == PRIME_NOTE
+    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame["clientContent"]["turns"][0]["parts"][0]["text"] == case.policy.prime_note
 
 
 def gemini_call(sock: FakeVendorSocket) -> dict[str, Any]:
-    from vendors.gemini_live import GeminiLiveProvider
+    from vamos_voice.providers.gemini_live import GeminiLiveProvider
 
     provider = GeminiLiveProvider("test-key", "gemini-test", "Puck")
     provider.connect = sock.connector()
@@ -205,21 +202,27 @@ def gemini_call(sock: FakeVendorSocket) -> dict[str, Any]:
 SOCKET_VENDORS = {"openai_realtime": (openai_call, OpenAIScript), "gemini_live": (gemini_call, GeminiScript)}
 
 
+CALLEE_FIRST_CASES = sorted(n for n, c in CASES.items() if c.policy.first_speaker == "callee")
+
+
+@pytest.mark.parametrize("agent", CALLEE_FIRST_CASES)
 @pytest.mark.parametrize("name", sorted(SOCKET_VENDORS))
-async def test_socket_vendor_sends_remi_and_waits_for_the_callee(name: str) -> None:
+async def test_socket_vendor_primes_and_waits_for_the_callee(name: str, agent: str) -> None:
     if not installed(name):
         pytest.skip(f"{name} extra not installed")
+    case = CASES[agent]
+    reads = case.policy.connect_reads
     build, script_cls = SOCKET_VENDORS[name]
     sock = FakeVendorSocket()
     script = script_cls(sock)
     provider = build(sock)["provider"]
-    line, session = FakeLine(), ScriptedSession()
-    call = runtime(line, session)
+    line, session = FakeLine(), ScriptedSession(reads)
+    call = runtime(case, line, session)
     task = asyncio.create_task(provider.run_call(call))
 
     sent_setup = script.setup(await sock.wait_for(script.is_setup))
-    assert sent_setup["instructions"] == setup().instructions
-    assert sent_setup["tools"] == EXPECTED
+    assert sent_setup["instructions"] == case.setup().instructions
+    assert sent_setup["tools"] == case.expected_tools()
     assert (sent_setup["silence_ms"], sent_setup["prefix_ms"]) == (800, 300)
     assert sent_setup["transcribes_caller"]
     assert "x-goog-api-key" in sock.headers or "Authorization" in sock.headers
@@ -227,15 +230,15 @@ async def test_socket_vendor_sends_remi_and_waits_for_the_callee(name: str) -> N
 
     script.ready()
     await line.incoming.put(HELLO)  # the callee answers while priming runs
-    script.check_prime(await sock.wait_for(script.is_prime))
+    script.check_prime(await sock.wait_for(script.is_prime), case)
     await asyncio.sleep(0.05)
     assert not any(script.is_caller_audio(f) for f in sock.sent), (
         "caller audio reached the vendor before priming finished"
     )
 
-    script.tool_calls(*CONNECT_READS)
+    script.tool_calls(*reads)
     await sock.wait_for(script.is_caller_audio)  # the held "Hello?" is released after the reads
-    assert [c for c, _ in session.calls] == list(CONNECT_READS)
+    assert [c for c, _ in session.calls] == list(reads)
     assert call.start.primed
 
     script.audio()  # the model talks before the callee has been heard
@@ -246,7 +249,7 @@ async def test_socket_vendor_sends_remi_and_waits_for_the_callee(name: str) -> N
     await asyncio.sleep(0.05)
     assert line.sent, "agent audio never reached the caller after the callee spoke"
 
-    script.tool_calls("log_contact_attempt", "end_call")
+    script.tool_calls("end_call")
     await asyncio.wait_for(task, 3)
     assert line.closed
     first_after_setup = next(f for f in sock.sent if not script.is_setup(f))
@@ -281,20 +284,24 @@ def _completion(names: list[str]) -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize("agent", CALLEE_FIRST_CASES)
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
-async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context() -> None:
+async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context(agent: str) -> None:
     from openai import AsyncOpenAI
 
-    from remi_core.providers.base import TurnTaking
-    from vendors.pipecat import PipecatProvider, user_speech_timeout_s, vad_params
-    from vendors.pipecat.services import ServiceConfig
+    from vamos_voice.providers.base import TurnTaking
+    from vamos_voice.providers.pipecat import PipecatProvider, user_speech_timeout_s, vad_params
+    from vamos_voice.providers.pipecat.services import ServiceConfig
 
+    case = CASES[agent]
+    reads = case.policy.connect_reads
+    expected = case.expected_tools()
     requests: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         requests.append(body)
-        names = list(CONNECT_READS[:2]) if len(requests) == 1 else [body["tool_choice"]["function"]["name"]]
+        names = list(reads[:-1]) if len(requests) == 1 else [body["tool_choice"]["function"]["name"]]
         return httpx.Response(200, json=_completion(names))
 
     provider = PipecatProvider(
@@ -303,33 +310,34 @@ async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context()
     provider.openai_client = lambda: AsyncOpenAI(
         api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
     )
-    session = ScriptedSession()
-    call = runtime(session=session)
+    session = ScriptedSession(reads)
+    call = runtime(case, session=session)
     context = provider.build_context(call.setup)
     await provider.prime(call, context)
 
     # Priming: forced tool calls through the instrumented SDK, the missing read forced by name.
     assert requests[0]["tool_choice"] == "required"
-    assert requests[1]["tool_choice"] == {"type": "function", "function": {"name": "get_contact_history"}}
-    assert requests[0]["messages"][0]["content"] == setup().instructions
-    assert requests[0]["messages"][1]["content"] == PRIME_INSTRUCTION
+    assert requests[1]["tool_choice"] == {"type": "function", "function": {"name": reads[-1]}}
+    assert requests[0]["messages"][0]["content"] == case.setup().instructions
+    assert requests[0]["messages"][1]["content"] == case.policy.prime_instruction
     assert {
         t["function"]["name"]: (
             set(t["function"]["parameters"]["properties"]),
             set(t["function"]["parameters"]["required"]),
         )
         for t in requests[0]["tools"]
-    } == EXPECTED
-    assert [c for c, _ in session.calls] == list(CONNECT_READS)
+    } == expected
+    assert [c for c, _ in session.calls] == list(reads)
 
     # What the pipeline's first real completion will send: the same instructions and tools, the reads already in context.
     llm = provider.build_llm(call.setup)
     params = llm.get_llm_adapter().get_llm_invocation_params(
         context, system_instruction=llm._settings.system_instruction, convert_developer_to_user=False
     )
-    assert params["messages"][0] == {"role": "system", "content": setup().instructions}
-    assert [m["role"] for m in params["messages"][1:]] == ["assistant", "tool", "tool", "assistant", "tool"]
-    assert {t["function"]["name"] for t in params["tools"]} == set(EXPECTED)
+    assert params["messages"][0] == {"role": "system", "content": case.setup().instructions}
+    roles = [m["role"] for m in params["messages"][1:]]
+    assert roles == ["assistant", *["tool"] * (len(reads) - 1), "assistant", "tool"]
+    assert {t["function"]["name"] for t in params["tools"]} == set(expected)
     assert not any(m["role"] == "assistant" and m.get("content") for m in params["messages"]), (
         "no greeting before the callee"
     )
@@ -340,18 +348,19 @@ async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context()
     )
 
 
+@pytest.mark.parametrize("agent", sorted(CASES))
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
-def test_pipecat_pipeline_assembles_against_the_pinned_pipecat() -> None:
+def test_pipecat_pipeline_assembles_against_the_pinned_pipecat(agent: str) -> None:
     from unittest.mock import MagicMock
 
-    from vendors.pipecat import PipecatProvider
-    from vendors.pipecat.services import ServiceConfig
+    from vamos_voice.providers.pipecat import PipecatProvider
+    from vamos_voice.providers.pipecat.services import ServiceConfig
 
     provider = PipecatProvider(
         ServiceConfig(openai_api_key="sk-test", stt="deepgram", tts="openai", deepgram_api_key="dg"),
         "gpt-test",
     )
-    call = runtime()
+    call = runtime(CASES[agent])
     call.line.websocket = MagicMock()
     worker = provider.build_worker(call, provider.build_context(call.setup))
     assert type(worker).__name__ == "PipelineWorker"

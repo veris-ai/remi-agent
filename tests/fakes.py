@@ -1,34 +1,70 @@
-"""In-memory stand-ins for the caller's line, a vendor socket and the session.
+"""In-memory stand-ins for the caller's line, a vendor socket and the session, plus the agent cases.
 
 They let a provider run a whole call offline, so tests can capture exactly
-what it would send to its vendor and to the caller.
+what it would send to its vendor and to the caller, for every agent.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from remi_core.call_start import CALLEE_FIRST, CallStart
-from remi_core.context import CallContext
-from remi_core.prompt import render_instructions
-from remi_core.providers.base import CallRuntime, InboundAudio, OutboundAudio, SessionSetup, TurnTaking
-from remi_core.session import CONNECT_READS
-from remi_core.tools import REGISTRY
-from remi_core.world import Agency
+from vamos_voice.agent import AgentSpec
+from vamos_voice.call_start import CallStart, CallStartPolicy
+from vamos_voice.context import CallClock
+from vamos_voice.providers.base import CallRuntime, InboundAudio, OutboundAudio, SessionSetup, TurnTaking
+from vamos_voice.server import session_setup
 
-from .support import CALL_TIME
-
-AGENCY = Agency("Tallmere Account Services, LLC", "2091843-DCA", "+12125550100", "Dana Whitlock")
-CONTEXT = CallContext("TAS-420101", "ph_420101_1", datetime.fromisoformat(CALL_TIME))
 HELLO = b"\x01\x00" * 4800  # 200 ms of PCM16 at 24 kHz: stands in for "Hello?"
 
 
-def setup() -> SessionSetup:
-    return SessionSetup(render_instructions(CONTEXT, AGENCY), REGISTRY.specs(), TurnTaking(), CALLEE_FIRST)
+@dataclass(frozen=True)
+class AgentCase:
+    """One agent as the parity tests see it: what the server would hand every provider."""
+
+    name: str
+    build: Callable[[], AgentSpec]
+
+    def agent(self) -> AgentSpec:
+        return self.build()
+
+    def setup(self) -> SessionSetup:
+        agent = self.build()
+        return session_setup(agent, CallClock(agent.call_time()), TurnTaking())
+
+    @property
+    def policy(self) -> CallStartPolicy:
+        return self.build().call_start
+
+    def expected_tools(self) -> dict[str, tuple[set[str], set[str]]]:
+        return {
+            s.name: (set(s.parameters["properties"]), set(s.parameters["required"]))
+            for s in self.build().tools.specs()
+        }
+
+
+def _remi() -> AgentSpec:
+    from agents.remi import RemiAgent
+    from agents.remi.context import CallContext
+    from agents.remi.world import Agency
+
+    context = CallContext("TAS-420101", "ph_420101_1", datetime.fromisoformat("2027-02-10T09:00:00-05:00"))
+    agent = RemiAgent(context, connect_db=_no_db, payments=None)  # type: ignore[arg-type]
+    agent.agency = Agency("Tallmere Account Services, LLC", "2091843-DCA", "+12125550100", "Dana Whitlock")
+    return agent
+
+
+async def _no_db() -> Any:
+    raise AssertionError("parity tests never open the world")
+
+
+REMI = AgentCase("remi", _remi)
+AGENT_CASES = [REMI]
 
 
 class FakeLine:
@@ -57,30 +93,39 @@ class FakeLine:
 class ScriptedSession:
     """Records tool calls; the connect reads and end_call change state like the real session."""
 
-    def __init__(self) -> None:
+    def __init__(self, connect_reads: tuple[str, ...]) -> None:
+        self.connect_reads = connect_reads
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.reads: set[str] = set()
         self.ended = False
 
     @property
     def missing_reads(self) -> list[str]:
-        return [r for r in CONNECT_READS if r not in self.reads]
+        return [r for r in self.connect_reads if r not in self.reads]
 
     async def dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((name, args))
-        if name in CONNECT_READS:
+        if name in self.connect_reads:
             self.reads.add(name)
         if name == "end_call":
             self.ended = True
         return {"ok": name}
 
 
-def runtime(line: FakeLine | None = None, session: ScriptedSession | None = None) -> CallRuntime:
+def runtime(
+    case: AgentCase, line: FakeLine | None = None, session: ScriptedSession | None = None
+) -> CallRuntime:
     line = line or FakeLine()
-    start = CallStart(CALLEE_FIRST)
+    setup = case.setup()
+    start = CallStart(setup.start_policy)
     return CallRuntime(
-        line, session or ScriptedSession(), setup(), start, InboundAudio(line), OutboundAudio(line, start)
-    )  # type: ignore[arg-type]
+        line,  # type: ignore[arg-type]
+        session or ScriptedSession(setup.start_policy.connect_reads),  # type: ignore[arg-type]
+        setup,
+        start,
+        InboundAudio(line),  # type: ignore[arg-type]
+        OutboundAudio(line, start),  # type: ignore[arg-type]
+    )
 
 
 class FakeVendorSocket:
