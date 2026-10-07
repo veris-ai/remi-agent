@@ -1,10 +1,13 @@
-# One image recipe for every vendor. Build one image per vendor:
-#   docker build --platform linux/amd64 --build-arg VENDOR=openai_realtime -f Dockerfile .
-# VENDOR is a folder under vendors/ and an extra in pyproject.toml; only that extra is installed.
+# One image recipe for every agent x vendor. Build one image per pair:
+#   docker build --platform linux/amd64 --build-arg AGENT=remi --build-arg VENDOR=openai_realtime .
+# AGENT is a folder under agents/ and an extra in pyproject.toml; VENDOR is a folder under
+# vamos_voice/providers/ and an extra. Only those two extras and that one agent's code are installed.
 FROM ghcr.io/astral-sh/uv:0.11.26 AS uv
 
 FROM python:3.12.13-slim-bookworm
+ARG AGENT
 ARG VENDOR
+RUN test -n "$AGENT" || (echo "build with --build-arg AGENT=<folder under agents/, e.g. remi>" >&2 && false)
 RUN test -n "$VENDOR" || (echo "build with --build-arg VENDOR=<openai_realtime|gemini_live|pipecat>" >&2 && false)
 
 COPY --from=uv /uv /usr/local/bin/uv
@@ -16,16 +19,18 @@ ENV UV_COMPILE_BYTECODE=1 \
 # The source lives at /agent: the bench's default code_path, where candidate reports read it from.
 WORKDIR /agent
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --locked --no-dev --no-install-project --extra "$VENDOR"
-COPY remi_core ./remi_core
-COPY vendors ./vendors
-RUN uv sync --locked --no-dev --extra "$VENDOR" \
-    && useradd --system --uid 10001 --no-create-home remi
+RUN uv sync --locked --no-dev --no-install-project --extra "$AGENT" --extra "$VENDOR"
+COPY vamos_voice ./vamos_voice
+COPY agents/__init__.py ./agents/__init__.py
+COPY agents/${AGENT} ./agents/${AGENT}
+RUN uv sync --locked --no-dev --extra "$AGENT" --extra "$VENDOR" \
+    && useradd --system --uid 10001 --no-create-home vamos
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
-    REMI_VENDOR=$VENDOR \
+    VAMOS_AGENT=$AGENT \
+    VAMOS_VENDOR=$VENDOR \
     PORT=8008
-USER remi
+USER vamos
 EXPOSE 8008
-CMD ["python", "-m", "remi_core"]
+CMD ["python", "-m", "vamos_voice"]

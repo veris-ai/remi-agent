@@ -1,6 +1,7 @@
 .git
 .venv
 tests
+agents/*/tests
 **/__pycache__
 .pytest_cache
 .ruff_cache

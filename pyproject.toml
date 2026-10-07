@@ -1,23 +1,30 @@
 [project]
-name = "remi-agent"
-version = "0.1.0"
-description = "Remi: the debt-collection voice agent for the VAmoS Debt Collection benchmark"
+name = "vamos-agents"
+version = "0.2.0"
+description = "Every VAmoS voice agent: the vamos_voice framework plus one pack per agent (Remi, debt collection)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+# The framework's own dependencies only. Agents and vendors add theirs as extras.
 dependencies = [
     "fastapi>=0.142,<0.143",
     "uvicorn[standard]>=0.54,<0.55",
     "pydantic>=2.13,<3",
-    "psycopg[binary]>=3.3,<3.4",
-    "stripe>=16.0,<17",
     "numpy>=2.3,<2.6",
-    "httpx>=0.28,<0.29",
     "websockets>=15,<18",
 ]
 
 [project.optional-dependencies]
-# One extra per vendor folder under vendors/. The Dockerfile installs exactly one.
-# The two speech-to-speech vendors need nothing beyond the core (raw websockets).
+# One extra per agent pack under agents/ (named like the folder) and one per vendor under
+# vamos_voice/providers/. An image installs exactly one of each: --extra $AGENT --extra $VENDOR.
+
+# --- agents ---
+remi = [
+    "psycopg[binary]>=3.3,<3.4",
+    "stripe>=16.0,<17",
+    "httpx>=0.28,<0.29",
+]
+
+# --- vendors (the two speech-to-speech vendors need nothing beyond the core: raw websockets) ---
 openai_realtime = []
 gemini_live = []
 pipecat = [
@@ -27,6 +34,7 @@ pipecat = [
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28,<0.29",
     "pytest>=9.1,<10",
     "pytest-asyncio>=1.4,<2",
     "ruff>=0.16,<0.17",
@@ -61,5 +69,5 @@ filterwarnings = [
     "ignore:Use 'content=<...>' to upload raw bytes:DeprecationWarning",
 ]
 markers = [
-    "postgres: needs a real Postgres (docker or REMI_TEST_DATABASE_URL)",
+    "postgres: needs a real Postgres (docker or REMI_TEST_DATABASE_URL); Remi's tests",
 ]
