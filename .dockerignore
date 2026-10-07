@@ -1,0 +1,9 @@
+.git
+.venv
+tests
+vamos_agents/*/tests
+**/__pycache__
+.pytest_cache
+.ruff_cache
+AGENTS.md
+CLAUDE.md
