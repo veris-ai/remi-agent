@@ -31,7 +31,9 @@ curl localhost:8008/health
 `gemini_live`, `pipecat`. Vendors differ in what they support (forced tool
 choice, barge-in truncation, VAD settings); AGENTS.md section 10 lists the
 differences and how each is handled. The voice channel is `ws://<host>:8008/voice`
-(PCM16, 24 kHz, mono, binary frames).
+(PCM16, 24 kHz, mono): raw binary frames by default, or base64 JSON envelopes
+with an in-band `{"type": "end"}` hang-up when `VAMOS_VOICE_FRAMING=json`, which
+bench candidates use (AGENTS.md section 3, "Framing").
 
 See **[AGENTS.md](AGENTS.md)** for the architecture, the `AgentSpec` contract,
 how to add an agent or a vendor, the config contract and how to register a

@@ -52,7 +52,7 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 ## 3. Architecture
 
 ```
-          bench actor (simulated human)          voice_ws: PCM16 24 kHz mono, binary frames
+          bench actor (simulated human)          voice_ws: PCM16 24 kHz mono, binary or json framing
                          │
                          ▼
 ┌──────────────── vamos_voice/server.py (one app, every agent x vendor) ────────────────┐
@@ -79,6 +79,34 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 └─────────────────────────────────────────────────┘      │ from_env / connect / close: world clients   │
                                                          └─────────────────────────────────────────────┘
 ```
+
+### Framing: how audio and the hang-up cross `/voice`
+
+`vamos_voice/framing.py`; `VAMOS_VOICE_FRAMING` picks one per image, and it
+must match the bench candidate's channel `protocol` (the actor's side is
+veris-sandbox `actor-service/app/actor/channels/voice_ws.py`).
+
+| | `binary` (default) | `json` (bench candidates) |
+|---|---|---|
+| Audio, both ways | one raw PCM16 binary message per chunk | text `{"type": "audio", "audio": "<base64 PCM16 24 kHz>"}` |
+| Agent hangs up | close (1000) | `{"type": "end"}`, then close (1000) |
+| Caller hangs up | closes the socket | `{"type": "end"}` (then closes); the call ends and finalizes; no `end` is echoed |
+| Anything else | text frames ignored (warning) | non-JSON or unknown `type` ignored |
+
+**Why json on the bench.** With `binary`, the actor has no way to tell a
+deliberate hang-up from a dropped socket, so *any* close by the callee is
+`voice_ws_disconnect`, a failure end reason: an attempt where Remi correctly
+ended the call (`end_call` on a "should not have been called" account, after a
+cease) was marked failed and never graded. With `json`, the `end` the agent
+sends first makes the actor record `client_end`, a normal end.
+
+**One hang-up path.** `CallerLine.close()` is the hang-up for every socket
+vendor: the agent's hang-up tool (`CallRuntime.hang_up`, after the last words
+play), a provider failure (priming included) and the server's end of call all
+go through it, so a deliberate end in `json` always sends `end` before the
+close. Pipecat owns its transport, so its `LineSerializer` applies the same
+`Framing`: the pipeline's `EndFrame`/`CancelFrame` is written as `end` before
+Pipecat closes with 1000, and a caller's `end` cancels the pipeline.
 
 ## 4. The boundary: framework vs pack, and why
 
@@ -275,6 +303,7 @@ Framework (every image):
 | `VERIS_AGENT_CONTEXT` | bench, per attempt | JSON object of strings; parsed into `AgentContext`. Absent = empty (inbound agents may not get one). |
 | `PORT` | image | Default `8008`. |
 | `VAMOS_LOG_LEVEL` | optional | Default `INFO`. |
+| `VAMOS_VOICE_FRAMING` | candidate `image.env` | `/voice` framing, `binary` (default) or `json` (section 3, "Framing"); must match the channel's `protocol`. Bench candidates use `json`. Anything else stops startup. |
 | `VAMOS_PRIMING_TIMEOUT_S` | optional | Seconds the connect reads may hold the caller before priming is abandoned (section 6). Default `6`; must be a positive number. |
 
 Vendors:
@@ -353,7 +382,7 @@ config, not in `image.env`, and `image.env` wins over candidate-env, so
 `"OPENAI_API_KEY": "${env:OPENAI_API_KEY}"` would hand the agent the literal
 string instead of the key (veris-sandbox
 `benchmark/api/app/services/engine_runner.py`, `_image_candidate_spec`).
-`image.env` holds only per-candidate, non-secret config (model and voice names).
+`image.env` holds only per-candidate, non-secret config (the framing, model and voice names).
 
 The bench injects `DATABASE_URL` (the collections twin's DSN) and
 `VERIS_AGENT_CONTEXT`. That is Remi's whole world: the debt-collection World has
@@ -369,14 +398,14 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
   "name": "Remi (OpenAI Realtime)",
   "channel_config": {
     "init": null,
-    "channel": {"type": "voice_ws", "url": null, "protocol": "binary", "language": "en-US",
+    "channel": {"type": "voice_ws", "url": null, "protocol": "json", "language": "en-US",
                 "wait_for_callee_first": false}
   },
   "image": {
     "ref": "us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e/remi-openai-realtime@sha256:<digest>",
     "port": 8008, "path": "/voice", "health_path": "/health",
     "trace_adapter": "openai-realtime",
-    "env": {"VAMOS_OPENAI_REALTIME_MODEL": "gpt-realtime-2.1"}
+    "env": {"VAMOS_VOICE_FRAMING": "json", "VAMOS_OPENAI_REALTIME_MODEL": "gpt-realtime-2.1"}
   }
 }
 ```
@@ -388,6 +417,12 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | `grok_voice` | `openai-realtime` | `XAI_API_KEY` | `VAMOS_GROK_MODEL` (e.g. `grok-voice-think-fast-2.0`, as Riley "Grok Voice"), optional `VAMOS_GROK_VOICE` |
 | `gpt_live` | `gpt-live` | `OPENAI_API_KEY` (a project with GPT-Live access) | `VAMOS_GPT_LIVE_MODEL` (`gpt-live-1`), `VAMOS_GPT_LIVE_BACKEND_MODEL` (e.g. `gpt-5.6-terra`, as Rory "OpenAI GPT-Live 1"), optional `VAMOS_GPT_LIVE_VOICE` |
 | `pipecat` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY` (plus `CARTESIA_API_KEY` for Cartesia) | `VAMOS_PIPECAT_TTS`, `VAMOS_CARTESIA_VOICE_ID` when using Cartesia |
+
+Every candidate (every row above) sets `"protocol": "json"` in its channel and
+`VAMOS_VOICE_FRAMING=json` in its `image.env`, together (both, or neither): with `binary` an agent that ends the call is
+recorded as `voice_ws_disconnect` and the attempt fails ungraded (section 3,
+"Framing"). A mismatch breaks the call outright: each side ignores the other's
+frames.
 
 `wait_for_callee_first` is about the bench actor: `false` for an outbound
 agent (the actor, as callee, speaks first). An inbound agent's candidate is
@@ -453,6 +488,9 @@ uv run ruff check . && uv run ruff format --check .
   frame translation (session shape, priming fallback / backend forcing,
   barge-in, end of call), pinned where it differs from OpenAI Realtime.
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
+- `tests/test_framing.py`: both framings, alone and through the real server (agent hang-up
+  sends `end` before the 1000 close, a caller's `end` finalizes the call, binary unchanged),
+  and Pipecat's serializer.
 - `vamos_agents/remi/tests/`: Remi's rules, tools against a real Postgres
   (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`) loaded with
   the World's own SQL (schema, payment gateway, rows; vendored in

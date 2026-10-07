@@ -9,6 +9,7 @@ agent's world clients are connected and the provider has warmed up.
 ``/voice`` takes exactly one call per pod (the bench's contract): it builds
 the call's ``CallSession`` and ``CallRuntime`` from the agent and hands them to
 the provider. Whatever happens, the agent's ``finalize()`` runs at the end.
+``VAMOS_VOICE_FRAMING`` picks the socket's framing (``vamos_voice.framing``).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from fastapi.responses import JSONResponse
 from .agent import AgentSpec, ConfigError, missing_agent_env
 from .call_start import PRIMING_TIMEOUT_ENV, PRIMING_TIMEOUT_S, CallStart
 from .context import AGENT_CONTEXT_ENV, AgentContext, CallClock
+from .framing import Framing, framing_from_env
 from .providers import load_provider
 from .providers.base import (
     CallerLine,
@@ -68,6 +70,7 @@ def create_app(
     provider: VoiceProvider,
     turn_taking: TurnTaking | None = None,
     priming_timeout_s: float = PRIMING_TIMEOUT_S,
+    framing: Framing = Framing.BINARY,
 ) -> FastAPI:
     """The app for one candidate pod."""
     pod = _Pod()
@@ -78,7 +81,7 @@ def create_app(
         await agent.connect()
         await provider.warm_up()
         pod.ready = True
-        logger.info("ready: agent=%s vendor=%s", agent.describe(), provider.name)
+        logger.info("ready: agent=%s vendor=%s framing=%s", agent.describe(), provider.name, framing)
         try:
             yield
         finally:
@@ -99,7 +102,7 @@ def create_app(
             return
         pod.busy = True
         await websocket.accept()
-        await run_call(agent, provider, turns, websocket, priming_timeout_s)
+        await run_call(agent, provider, turns, websocket, priming_timeout_s, framing)
 
     return app
 
@@ -110,12 +113,14 @@ async def run_call(
     turns: TurnTaking,
     websocket: WebSocket,
     priming_timeout_s: float = PRIMING_TIMEOUT_S,
+    framing: Framing = Framing.BINARY,
 ) -> None:
-    """One call, start to finish."""
+    """One call, start to finish. However it ends, the agent finalizes and the line hangs up
+    through ``CallerLine.close`` (in ``json`` framing: ``{"type": "end"}``, then close 1000)."""
     clock = CallClock(agent.call_time())
     clock.start()
     session = CallSession(agent.open_call(clock), agent.tools, agent.gates, agent.call_start.connect_reads)
-    line = CallerLine(websocket)
+    line = CallerLine(websocket, framing)
     start = CallStart(agent.call_start, priming_timeout_s)
     runtime = CallRuntime(
         line,
@@ -157,7 +162,9 @@ def build_app_from_env(env: Mapping[str, str]) -> FastAPI:
         provider = provider_cls.from_env(env)
     except (ValueError, LookupError) as err:  # ContextError, ConfigError, Unknown{Agent,Vendor}
         raise ConfigError(str(err)) from err
-    return create_app(agent, provider, priming_timeout_s=priming_timeout_from_env(env))
+    return create_app(
+        agent, provider, priming_timeout_s=priming_timeout_from_env(env), framing=framing_from_env(env)
+    )
 
 
 def priming_timeout_from_env(env: Mapping[str, str]) -> float:

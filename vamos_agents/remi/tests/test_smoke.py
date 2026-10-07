@@ -8,6 +8,8 @@ logs the call and hangs up. The test is the caller on the /voice socket.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from collections.abc import Mapping
 from typing import Self
 
@@ -18,6 +20,7 @@ from starlette.websockets import WebSocketDisconnect
 from vamos_agents.remi import RemiAgent
 from vamos_agents.remi.context import CallContext
 from vamos_agents.remi.db import Database
+from vamos_voice.framing import Framing
 from vamos_voice.providers.base import CallRuntime, VoiceProvider
 from vamos_voice.server import ConfigError, build_app_from_env, create_app
 
@@ -63,6 +66,27 @@ class FakeProvider(VoiceProvider):
         await call.session.dispatch("end_call", {})
         await call.hang_up()
         pump.cancel()
+
+
+class ListeningProvider(FakeProvider):
+    """Primes, greets after the callee's Hello, then listens until the callee hangs up (no log, no end_call)."""
+
+    async def run_call(self, call: CallRuntime) -> None:
+        heard = asyncio.Event()
+
+        async def to_vendor(pcm: bytes) -> None:
+            heard.set()
+
+        call.inbound.bind(to_vendor)
+        pump = asyncio.create_task(call.inbound.run())
+        for read in ("get_account", "get_dialed_phone", "get_contact_history"):
+            assert "error" not in await call.session.dispatch(read, {})
+        call.start.mark_primed()
+        await call.inbound.release()
+        await asyncio.wait_for(heard.wait(), 5)
+        call.start.mark_callee_spoke()
+        await call.outbound.send(GREETING, "greeting")
+        await pump  # the callee's {"type": "end"} ends it
 
 
 @pytest.fixture
@@ -116,3 +140,45 @@ def test_startup_fails_loudly_on_missing_config() -> None:
         build_app_from_env(base)
     with pytest.raises(ConfigError, match="OPENAI_API_KEY"):
         build_app_from_env({**base, "VAMOS_VENDOR": "openai_realtime"})
+
+
+def _audio(pcm: bytes) -> str:
+    return json.dumps({"type": "audio", "audio": base64.b64encode(pcm).decode()})
+
+
+@pytest.mark.postgres
+def test_json_framing_agent_hang_up_sends_end(pg_dsn: str) -> None:
+    """The bench's json framing: the agent's end_call reaches the actor as {"type": "end"}, then a 1000 close,
+    so the actor records a normal end (client_end) rather than a dropped socket."""
+    seed_full_world(pg_dsn)
+    agent = RemiAgent(
+        CallContext.from_json(CONTEXT_JSON), connect_db=lambda: Database.connect(app_dsn(pg_dsn))
+    )
+    app = create_app(agent, FakeProvider(), framing=Framing.JSON)
+    with TestClient(app) as client, client.websocket_connect("/voice") as ws:
+        ws.send_text(_audio(HELLO))
+        assert ws.receive_text() == _audio(GREETING)
+        assert json.loads(ws.receive_text()) == {"type": "end"}
+        closed = ws.receive()
+        assert closed["type"] == "websocket.close" and closed["code"] == 1000
+
+
+@pytest.mark.postgres
+def test_json_framing_callee_end_still_logs_the_contact_attempt(pg_dsn: str) -> None:
+    """The callee hangs up in-band before Remi logs the call: finalize() writes the fallback row, as on a drop."""
+    seed_full_world(pg_dsn)
+    agent = RemiAgent(
+        CallContext.from_json(CONTEXT_JSON), connect_db=lambda: Database.connect(app_dsn(pg_dsn))
+    )
+    before = snapshot(pg_dsn)
+    with (
+        TestClient(create_app(agent, ListeningProvider(), framing=Framing.JSON)) as client,
+        client.websocket_connect("/voice") as ws,
+    ):
+        ws.send_text(_audio(HELLO))
+        assert ws.receive_text() == _audio(GREETING)
+        ws.send_text(json.dumps({"type": "end"}))
+        assert ws.receive()["type"] == "websocket.close", "no end is echoed back to the callee"
+    (change,) = changes(before, snapshot(pg_dsn))
+    assert (change["op"], change["table"]) == ("insert", "contact_attempts")
+    assert change["row"]["summary"].startswith("The call ended before Remi finished its notes.")
