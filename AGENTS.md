@@ -42,7 +42,7 @@ vamos_voice/                      # the framework: never imports an agent
     gemini_live/  gpt_live/  pipecat/
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
-    agent.py ... tests/           # world clients (db, payments), and its own tests
+    agent.py ... tests/           # world clients (db; payments via the World's gateway), and its own tests
 tests/                            # framework tests, the agents x vendors parity matrix,
   fake_inbound.py                 # a test-only inbound agent (not a pack, never shipped)
 Dockerfile                        # ONE recipe: ARG AGENT x ARG VENDOR
@@ -90,7 +90,7 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 | `AgentContext` (string map), `CallClock` | the typed view of the context (Remi: account, phone, call time in Eastern) |
 | `ToolRegistry`, JSON-schema reduction, `CallSession.dispatch`, redaction | the tools, their gates (levels and messages), domain rules (`policy.py`) |
 | `GateLadder` engine | the ladder's levels and explanations |
-| vendor protocols, tool-format conversion, VAD mapping | world clients (Postgres, Stripe, Fineract...) built from the agent's env |
+| vendor protocols, tool-format conversion, VAD mapping | world clients (Postgres, a payment gateway, Fineract...) built from the agent's env |
 
 Why the line is there:
 
@@ -300,9 +300,7 @@ Agents:
 | Variable | Agent | Meaning |
 |---|---|---|
 | `VERIS_AGENT_CONTEXT` keys `account_id`, `phone_id`, `call_time` | remi | Required; `TAS-NNNNNN`, a `phones` row id, ISO-8601 with offset. |
-| `DATABASE_URL` | remi | Postgres DSN of the collections twin (bench-injected). Required. |
-| `STRIPE_API_KEY` / `STRIPE_API_BASE` | remi | Stripe twin key (required) and base URL (bench-injected). |
-| `SSL_CERT_FILE` | remi | Optional CA bundle for Stripe traffic. |
+| `DATABASE_URL` | remi | Postgres DSN of the collections twin (bench-injected). Required. Payments go through the payment gateway inside that database (`gateway_tokenize_card`, `gateway_tokenize_ach`, `gateway_charge`), so Remi has no other world variable. |
 
 Any missing required variable stops the process at startup (exit 2) with a message naming it.
 
@@ -357,10 +355,12 @@ string instead of the key (veris-sandbox
 `benchmark/api/app/services/engine_runner.py`, `_image_candidate_spec`).
 `image.env` holds only per-candidate, non-secret config (model and voice names).
 
-The bench injects `DATABASE_URL`, `STRIPE_API_BASE` (the twins' addresses) and
-`VERIS_AGENT_CONTEXT`. It does **not** inject the Stripe twin's key: set
-`STRIPE_API_KEY` once as a non-secret bench candidate-env value, the twin's
-published fixture key (`sk_test_RxytMgpr9ZDOd`), as the VAmoS Energy bench does.
+The bench injects `DATABASE_URL` (the collections twin's DSN) and
+`VERIS_AGENT_CONTEXT`. That is Remi's whole world: the debt-collection World has
+no Stripe twin (Stripe does not serve debt collection agencies), and payments go
+through the payment gateway inside the collections database (utility-bench
+`collections_bench/WORLD.md`, "The payment gateway"). No `STRIPE_*` value is
+needed on the bench; one left over in candidate-env is ignored.
 
 Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 
@@ -388,8 +388,6 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | `grok_voice` | `openai-realtime` | `XAI_API_KEY` | `VAMOS_GROK_MODEL` (e.g. `grok-voice-think-fast-2.0`, as Riley "Grok Voice"), optional `VAMOS_GROK_VOICE` |
 | `gpt_live` | `gpt-live` | `OPENAI_API_KEY` (a project with GPT-Live access) | `VAMOS_GPT_LIVE_MODEL` (`gpt-live-1`), `VAMOS_GPT_LIVE_BACKEND_MODEL` (e.g. `gpt-5.6-terra`, as Rory "OpenAI GPT-Live 1"), optional `VAMOS_GPT_LIVE_VOICE` |
 | `pipecat` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY` (plus `CARTESIA_API_KEY` for Cartesia) | `VAMOS_PIPECAT_TTS`, `VAMOS_CARTESIA_VOICE_ID` when using Cartesia |
-
-Every vendor also needs the non-secret candidate-env `STRIPE_API_KEY` above.
 
 `wait_for_callee_first` is about the bench actor: `false` for an outbound
 agent (the actor, as callee, speaks first). An inbound agent's candidate is
@@ -456,8 +454,10 @@ uv run ruff check . && uv run ruff format --check .
   barge-in, end of call), pinned where it differs from OpenAI Realtime.
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
 - `vamos_agents/remi/tests/`: Remi's rules, tools against a real Postgres
-  (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`), Stripe
-  gateway against an httpx mock, `/voice` smoke test.
+  (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`) loaded with
+  the World's own SQL (schema, payment gateway, rows; vendored in
+  `tests/fixtures/collections_world.sql`, resynced with `resync_world.sh`),
+  the payment gateway client against the real gateway functions, `/voice` smoke test.
 
 No test calls a paid API.
 

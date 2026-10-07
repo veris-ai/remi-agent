@@ -21,7 +21,7 @@ from vamos_agents.remi.db import Database
 from vamos_voice.providers.base import CallRuntime, VoiceProvider
 from vamos_voice.server import ConfigError, build_app_from_env, create_app
 
-from .support import CONTEXT_JSON, FakePayments, rows, seed_world
+from .support import CONTEXT_JSON, app_dsn, changes, seed_full_world, snapshot
 
 HELLO = b"\x01\x00" * 4800  # 200 ms of PCM16 at 24 kHz: stands in for "Hello?"
 
@@ -67,17 +67,16 @@ class FakeProvider(VoiceProvider):
 
 @pytest.fixture
 def app(pg_dsn: str):
-    seed_world(pg_dsn)
+    seed_full_world(pg_dsn)
     agent = RemiAgent(
-        CallContext.from_json(CONTEXT_JSON),
-        connect_db=lambda: Database.connect(pg_dsn),
-        payments=FakePayments(),
+        CallContext.from_json(CONTEXT_JSON), connect_db=lambda: Database.connect(app_dsn(pg_dsn))
     )
     return create_app(agent, FakeProvider())
 
 
 @pytest.mark.postgres
 def test_voice_call_end_to_end(app, pg_dsn: str) -> None:
+    before = snapshot(pg_dsn)
     with TestClient(app) as client:
         assert client.get("/health").json() == {"status": "ok", "agent": "remi", "vendor": "fake"}
         with client.websocket_connect("/voice") as ws:
@@ -88,21 +87,29 @@ def test_voice_call_end_to_end(app, pg_dsn: str) -> None:
         with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect("/voice"):
             pass
         assert refused.value.code == 1013  # one call per pod
-    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    (change,) = changes(before, snapshot(pg_dsn))  # the World has earlier Remi calls: diff, not filter
+    attempt = change["row"]
+    assert (change["op"], change["table"], attempt["account_id"]) == (
+        "insert",
+        "contact_attempts",
+        "TAS-420101",
+    )
     assert attempt["disposition"] == "failed_verification" and attempt["duration_s"] >= 1
 
 
 def test_startup_fails_loudly_on_missing_config() -> None:
     names = {"VAMOS_AGENT": "remi", "VAMOS_VENDOR": "openai_realtime"}
-    world = {"DATABASE_URL": "postgresql://x", "STRIPE_API_KEY": "sk_test_x"}
-    with pytest.raises(ConfigError, match="DATABASE_URL, STRIPE_API_KEY"):
+    world = {"DATABASE_URL": "postgresql://x"}
+    with pytest.raises(ConfigError, match="DATABASE_URL") as missing:
         build_app_from_env(names)
+    assert "STRIPE" not in str(missing.value)  # payments go through the World's database now
+    with pytest.raises(ConfigError, match="DATABASE_URL"):
+        build_app_from_env({**names, "STRIPE_API_KEY": "sk_test_x"})
     with pytest.raises(ConfigError, match="VERIS_AGENT_CONTEXT"):
         build_app_from_env({**names, **world})
     base = {
         "VERIS_AGENT_CONTEXT": CONTEXT_JSON,
         "DATABASE_URL": "postgresql://x",
-        "STRIPE_API_KEY": "sk_test_x",
         "VAMOS_AGENT": "remi",
     }
     with pytest.raises(ConfigError, match="VAMOS_VENDOR"):

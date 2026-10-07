@@ -7,8 +7,10 @@ lock: the session's tools share one connection and one account.
 
 Writes go through ``Transaction.insert``/``update`` with table and column names
 checked against WORLD.md's schema and quoted as identifiers, so no value is
-ever spliced into SQL. Timestamps are always passed in from ``CallClock``;
-nothing here calls ``now()``.
+ever spliced into SQL. ``payment_methods`` and ``payments`` are not writable:
+only the World's gateway functions write them, reached through
+``Transaction.call_gateway`` (see ``payments``). Timestamps are always passed in
+from ``CallClock``; nothing here calls ``now()``.
 """
 
 from __future__ import annotations
@@ -33,15 +35,8 @@ STATEMENT_TIMEOUT_MS = 5_000
 
 #: The columns Remi may write, per table (WORLD.md). Anything else is a bug.
 WRITABLE: dict[str, frozenset[str]] = {
-    "accounts": frozenset(
-        {
-            "current_balance_cents",
-            "paid_since_charge_off_cents",
-            "last_payment_on",
-            "status",
-            "stripe_customer_id",
-        }
-    ),
+    # A payment's effect on the balance, paid-to-date and last payment date is the gateway's to write.
+    "accounts": frozenset({"status"}),
     "consumers": frozenset({"language_preference", "deceased_on"}),
     "phones": frozenset({"consent_revoked_at", "status"}),
     "contact_attempts": frozenset(
@@ -68,16 +63,13 @@ WRITABLE: dict[str, frozenset[str]] = {
             "kind",
             "total_cents",
             "instalments",
-            "stripe_payment_method_id",
+            "method_id",
             "created_at",
             "confirmation_letter_due_by",
         }
     ),
     "promises_to_pay": frozenset(
         {"promise_id", "account_id", "amount_cents", "due_on", "method", "created_at"}
-    ),
-    "payments": frozenset(
-        {"payment_id", "account_id", "stripe_payment_intent_id", "amount_cents", "status", "at"}
     ),
     "callbacks": frozenset({"callback_id", "account_id", "phone_id", "scheduled_for", "consumer_requested"}),
     "letters": frozenset({"letter_id", "account_id", "kind", "queued_at"}),
@@ -89,6 +81,8 @@ KEYS = {
     "account_flags": "flag_id",
 }
 JSON_COLUMNS = frozenset({"details", "instalments"})
+#: WORLD.md's payment gateway: the only way a payment method or payment is written.
+GATEWAY_FUNCTIONS = frozenset({"gateway_tokenize_card", "gateway_tokenize_ach", "gateway_charge"})
 
 
 class NotFound(LookupError):
@@ -130,6 +124,24 @@ class Transaction:
         cursor = await self._conn.execute(query, [*(_value(c, v) for c, v in changes.items()), key])
         if cursor.rowcount != 1:
             raise NotFound(f"{table} {key} matched {cursor.rowcount} rows")
+
+    async def call_gateway(self, function: str, args: dict[str, Any]) -> dict[str, Any]:
+        """``select * from <gateway function>(name => value, ...)``: its one result row.
+
+        Only the World's three payment-gateway functions; their parameter names are
+        identifiers and every value is a bound parameter. Errors propagate (``payments`` maps them).
+        """
+        if function not in GATEWAY_FUNCTIONS:
+            raise ValueError(f"{function} is not a payment-gateway function")
+        query = sql.SQL("select * from {}({})").format(
+            sql.Identifier("public", function),
+            sql.SQL(", ").join(sql.SQL("{} => %s").format(sql.Identifier(name)) for name in args),
+        )
+        cursor = await self._conn.execute(query, list(args.values()))
+        row = await cursor.fetchone()
+        if row is None:
+            raise NotFound(f"{function} answered no row")
+        return row
 
 
 class Database:

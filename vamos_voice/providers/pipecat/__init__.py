@@ -256,7 +256,7 @@ class PipecatProvider(VoiceProvider):
 def _dispatcher(session: CallSession) -> Callable[[FunctionCallParams], Any]:
     async def handle(params: FunctionCallParams) -> None:
         # Shielded: a barge-in may cancel the handler, but a payment or a database write
-        # that has started must finish, or the world and Stripe would disagree.
+        # that has started must finish, or the call and the world would disagree.
         result = await asyncio.shield(session.dispatch(params.function_name, dict(params.arguments)))
         if session.ended:
             await params.result_callback(result, properties=FunctionCallResultProperties(run_llm=False))
