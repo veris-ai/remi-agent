@@ -239,7 +239,7 @@ Vendors:
 |---|---|---|
 | `OPENAI_API_KEY` | openai_realtime, pipecat | Required. |
 | `VAMOS_OPENAI_REALTIME_MODEL` / `VAMOS_OPENAI_VOICE` / `VAMOS_OPENAI_TRANSCRIBE_MODEL` | openai_realtime | Defaults `gpt-realtime` / `marin` / `gpt-4o-mini-transcribe`. |
-| `GEMINI_API_KEY` | gemini_live | Gemini **Developer API** key. Required. |
+| `GOOGLE_API_KEY` | gemini_live | Gemini **Developer API** key. Required. (Not `GEMINI_API_KEY`: Veris Bench reserves the `GEMINI_*`, `XAI_*`, `GROK_*` and `VERIS_*` prefixes in candidate-env.) |
 | `VAMOS_GEMINI_MODEL` / `VAMOS_GEMINI_VOICE` | gemini_live | Defaults `gemini-2.5-flash-native-audio-preview-12-2025` / `Puck`. |
 | `VAMOS_PIPECAT_STT` / `VAMOS_PIPECAT_TTS` | pipecat | `deepgram` (default) or `openai` / `openai` (default) or `cartesia`. |
 | `VAMOS_PIPECAT_LLM_MODEL` | pipecat | Default `gpt-4.1`. |
@@ -322,7 +322,7 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | Vendor | `trace_adapter` | Bench candidate-env (secret) | `image.env` (non-secret) |
 |---|---|---|---|
 | `openai_realtime` | `openai-realtime` | `OPENAI_API_KEY` | `VAMOS_OPENAI_REALTIME_MODEL` (e.g. `gpt-realtime-2.1`, as Riley/Rory) |
-| `gemini_live` | `gemini-live` | `GEMINI_API_KEY` | `VAMOS_GEMINI_MODEL` (e.g. `gemini-3.8-live`, as Riley/Rory) |
+| `gemini_live` | `gemini-live` | `GOOGLE_API_KEY` | `VAMOS_GEMINI_MODEL` (e.g. `gemini-3.8-live`, as Riley/Rory) |
 | `pipecat` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY` (plus `CARTESIA_API_KEY` for Cartesia) | `VAMOS_PIPECAT_TTS`, `VAMOS_CARTESIA_VOICE_ID` when using Cartesia |
 
 Every vendor also needs the non-secret candidate-env `STRIPE_API_KEY` above.
