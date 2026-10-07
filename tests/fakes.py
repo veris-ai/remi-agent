@@ -55,7 +55,7 @@ def _remi() -> AgentSpec:
     from vamos_agents.remi.world import Agency
 
     context = CallContext("TAS-420101", "ph_420101_1", datetime.fromisoformat("2027-02-10T09:00:00-05:00"))
-    agent = RemiAgent(context, connect_db=_no_db, payments=None)  # type: ignore[arg-type]
+    agent = RemiAgent(context, connect_db=_no_db)
     agent.agency = Agency("Tallmere Account Services, LLC", "2091843-DCA", "+12125550100", "Dana Whitlock")
     return agent
 

@@ -2,8 +2,9 @@
 
 Remi works for Tallmere Account Services, LLC and places outbound calls to
 consumers in New York City for the VAmoS Debt Collection benchmark. Its world
-is a Postgres collections database and a Stripe twin, both reached through
-clients built from the environment here and opened in ``connect()``.
+is one Postgres collections database (``DATABASE_URL``), opened in
+``connect()``; payments go through the gateway functions inside it
+(``payments.PaymentGateway``), so there is no second world client.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from .call import CONNECT_READS, RemiCall
 from .context import CallContext
 from .db import Database
 from .gates import GATES
-from .payments import PaymentGateway, StripeGateway
 from .prompt import render_instructions
 from .tools import REGISTRY
 from .world import Agency
@@ -55,23 +55,17 @@ async def connect_with_retry(connect: Callable[[], Awaitable[Database]]) -> Data
 
 
 class RemiAgent(AgentSpec):
-    """The debt-collection agent: callee first, the RULES.md opening as gates, Postgres + Stripe."""
+    """The debt-collection agent: callee first, the RULES.md opening as gates, one Postgres world."""
 
     name = "remi"
     call_start = CALLEE_FIRST
     tools = REGISTRY
     gates = GATES
-    required_env = ("DATABASE_URL", "STRIPE_API_KEY")
+    required_env = ("DATABASE_URL",)
 
-    def __init__(
-        self,
-        context: CallContext,
-        connect_db: Callable[[], Awaitable[Database]],
-        payments: PaymentGateway,
-    ) -> None:
+    def __init__(self, context: CallContext, connect_db: Callable[[], Awaitable[Database]]) -> None:
         self.context = context
         self._connect_db = connect_db
-        self.payments = payments
         self.db: Database | None = None
         self.agency: Agency | None = None
 
@@ -79,11 +73,7 @@ class RemiAgent(AgentSpec):
     def from_env(cls, env: Mapping[str, str], context: AgentContext) -> Self:
         call_context = CallContext.parse(context)
         dsn = env["DATABASE_URL"]
-        return cls(
-            call_context,
-            connect_db=lambda: Database.connect(dsn),
-            payments=StripeGateway(env["STRIPE_API_KEY"], env.get("STRIPE_API_BASE")),
-        )
+        return cls(call_context, connect_db=lambda: Database.connect(dsn))
 
     def call_time(self) -> datetime:
         return self.context.call_time
@@ -104,7 +94,7 @@ class RemiAgent(AgentSpec):
     def open_call(self, clock: CallClock) -> RemiCall:
         if self.db is None:
             raise RuntimeError("RemiAgent.connect() must run before a call")
-        return RemiCall(self.context, clock, self.db, self.payments)
+        return RemiCall(self.context, clock, self.db)
 
     def describe(self) -> str:
         return f"remi account={self.context.account_id}"

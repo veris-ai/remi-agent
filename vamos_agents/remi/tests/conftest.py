@@ -12,7 +12,7 @@ from vamos_agents.remi.db import Database
 from vamos_voice.context import CallClock
 from vamos_voice.session import CallSession
 
-from .support import CALL_TIME, FakePayments, PostgresUnavailable, start_postgres, stop_postgres
+from .support import CALL_TIME, PostgresUnavailable, app_dsn, start_postgres, stop_postgres
 
 
 @pytest.fixture(scope="session")
@@ -48,26 +48,21 @@ def context() -> CallContext:
 
 
 @pytest.fixture
-def payments() -> FakePayments:
-    return FakePayments()
-
-
-@pytest.fixture
 async def make_session(
-    pg_dsn: str, context: CallContext, payments: FakePayments, ticks: ManualClock
+    pg_dsn: str, context: CallContext, ticks: ManualClock
 ) -> AsyncIterator[Callable[..., CallSession]]:
     """Build the framework's CallSession around a RemiCall on the seeded world (seed first with
     ``support.seed_world``): the exact dispatch path a real call takes."""
     opened: list[Database] = []
 
     async def build(call_context: CallContext | None = None) -> CallSession:
-        db = await Database.connect(pg_dsn)
+        db = await Database.connect(app_dsn(pg_dsn))  # as the app login: the gateway's guards bind
         opened.append(db)
         ctx = call_context or context
         clock = CallClock(ctx.call_time, monotonic=ticks)
         clock.start()
         return CallSession(
-            RemiCall(ctx, clock, db, payments), RemiAgent.tools, RemiAgent.gates, CALLEE_FIRST.connect_reads
+            RemiCall(ctx, clock, db), RemiAgent.tools, RemiAgent.gates, CALLEE_FIRST.connect_reads
         )
 
     yield build

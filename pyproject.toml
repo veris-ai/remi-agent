@@ -20,8 +20,6 @@ dependencies = [
 # --- agents ---
 remi = [
     "psycopg[binary]>=3.3,<3.4",
-    "stripe>=16.0,<17",
-    "httpx>=0.28,<0.29",
 ]
 
 # --- vendors (the speech-to-speech vendors need nothing beyond the core: raw websockets) ---
@@ -66,10 +64,6 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests", "vamos_agents"]
-filterwarnings = [
-    # stripe's own httpx client passes bytes as data=; not ours to fix.
-    "ignore:Use 'content=<...>' to upload raw bytes:DeprecationWarning",
-]
 markers = [
     "postgres: needs a real Postgres (docker or REMI_TEST_DATABASE_URL); Remi's tests",
 ]

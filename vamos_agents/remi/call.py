@@ -29,7 +29,7 @@ from . import policy
 from .context import CallContext
 from .db import Database, Transaction
 from .gates import Gate
-from .payments import PaymentGateway, SavedMethod
+from .payments import SavedMethod
 from .world import Account, Agency, Consumer, ContactAttempt, Creditor, Phone
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,6 @@ class RemiCall:
     context: CallContext
     clock: CallClock
     db: Database
-    payments: PaymentGateway
 
     # Connect-time reads.
     agency: Agency | None = None
@@ -88,7 +87,8 @@ class RemiCall:
     hardship_recorded: bool = False
     deceased_flag_id: str | None = None
     letters_queued: set[str] = field(default_factory=set)
-    payment_methods: dict[str, SavedMethod] = field(default_factory=dict)
+    payment_methods: dict[str, SavedMethod] = field(default_factory=dict)  # tokenized on this call
+    declined_methods: set[str] = field(default_factory=set)
     contact_logged: bool = False
     ended: bool = False
 

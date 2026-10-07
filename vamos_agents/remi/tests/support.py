@@ -1,9 +1,16 @@
-"""Test support: a real Postgres with WORLD.md's schema, a seeded account, a fake Stripe.
+"""Test support: a real Postgres loaded with the World's own SQL (schema, payment gateway, rows).
 
 Postgres comes from ``REMI_TEST_DATABASE_URL`` when set, otherwise from a
 throwaway ``postgres:16-alpine`` container started with the docker CLI. With
 neither available the database tests are skipped with that reason; there is
-no fake database (the SQL is the thing under test).
+no fake database and no fake gateway (the SQL is the thing under test).
+
+The World's SQL is vendored in ``fixtures/collections_world.sql`` (its header
+names the utility-bench commit). The DSN the fixtures hand out is the owner's,
+for seeding and inspecting; Remi itself connects as ``APP_ROLE``, a login that
+owns nothing, so the gateway's write guards bind: a direct write to
+``payment_methods`` or ``payments``, or any read of the processor's vault,
+fails the test.
 """
 
 from __future__ import annotations
@@ -14,24 +21,31 @@ import shutil
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 
-from vamos_agents.remi.payments import BankDetails, CardDetails, ChargeResult, SavedMethod
-
-SCHEMA = (Path(__file__).parent / "fixtures" / "world_schema.sql").read_text()
+WORLD_SQL = (Path(__file__).parent / "fixtures" / "collections_world.sql").read_text()
+ROWS_MARKER = "-- ===== collections_bench/generated/world/rows.sql ====="
+#: The schema and the gateway (the database), and the World's ~110 accounts (its rows).
+DATABASE_SQL, ROWS_SQL = WORLD_SQL.split(ROWS_MARKER)
 CALL_TIME = "2027-02-10T09:00:00-05:00"
 CONTEXT_JSON = json.dumps({"account_id": "TAS-420101", "call_time": CALL_TIME, "phone_id": "ph_420101_1"})
 
+APP_ROLE, APP_PASSWORD = "remi_app", "remi_app"
+
+# The gateway's test instruments (WORLD.md, "Outcomes"): Stripe's published test numbers.
 GOOD_CARD = "4242424242424242"
-DECLINING_CARD = "4000000000009995"
+AMEX_CARD = "378282246310005"
+INSUFFICIENT_FUNDS_CARD = "4000000000009995"
+DECLINED_CARD = "4000000000000002"
+EXPIRED_CARD = "4000000000000069"
 GOOD_BANK = ("110000000", "000123456789")
-FAILING_BANK = ("110000000", "000111111116")
+DECLINING_BANK = ("110000000", "000222222227")
 
 
 class PostgresUnavailable(RuntimeError):
@@ -111,7 +125,6 @@ ACCOUNT = {
     "max_plan_months": 12,
     "min_instalment_cents": 2500,
     "status": "active",
-    "stripe_customer_id": None,
 }
 CONSUMER = {
     "consumer_id": "con_420101",
@@ -171,10 +184,10 @@ def seed_world(
     creditor_address: str | None = "PO Box 4410, Wilmington, DE 19850",
     creditor_kind: str = "bank_card",
 ) -> None:
-    """Reset the schema and seed one agency, one creditor and one account (TAS-420101 by default)."""
+    """Reset the database (schema and gateway) and seed one agency, one creditor and one account
+    (TAS-420101 by default, as the World has it), with the given overrides."""
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("drop schema public cascade; create schema public;")
-        conn.execute(SCHEMA)
+        _reset(conn)
         _insert(
             conn,
             "agency",
@@ -201,6 +214,47 @@ def seed_world(
         _insert(conn, "accounts", {**ACCOUNT, **(account or {})})
         for row in LETTER_HISTORY if history is None else history:
             _insert(conn, "contact_attempts", row)
+        _grant_app(conn)
+
+
+def seed_full_world(dsn: str) -> None:
+    """Reset and load the whole World as the bench seeds it: schema, gateway, every row."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        _reset(conn)
+        conn.execute(ROWS_SQL)
+        _grant_app(conn)
+
+
+def _reset(conn: psycopg.Connection) -> None:
+    conn.execute("drop schema public cascade; create schema public;")
+    conn.execute(DATABASE_SQL)
+
+
+def _grant_app(conn: psycopg.Connection) -> None:
+    """The app login Remi uses: the agency's tables, the three gateway functions, nothing of the processor's."""
+    conn.execute(
+        f"""
+        do $$ begin
+          if not exists (select from pg_roles where rolname = '{APP_ROLE}') then
+            create role {APP_ROLE} login password '{APP_PASSWORD}';
+          end if;
+        end $$;
+        grant usage on schema public to {APP_ROLE};
+        grant select, insert, update, delete on all tables in schema public to {APP_ROLE};
+        revoke all on public.processor_vault from {APP_ROLE};
+        """
+    )
+    helpers = conn.execute(
+        "select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace "
+        "where n.nspname = 'public' and p.proname like 'processor%'"
+    ).fetchall()
+    for (signature,) in helpers:
+        conn.execute(f"revoke execute on function {signature} from public")
+
+
+def app_dsn(owner_dsn: str) -> str:
+    """The same database, as the app login Remi connects with."""
+    return make_conninfo(owner_dsn, user=APP_ROLE, password=APP_PASSWORD)
 
 
 def rows(dsn: str, table: str, where: str = "true") -> list[dict[str, Any]]:
@@ -215,41 +269,34 @@ def all_text(dsn: str) -> str:
         return "\n".join(str(conn.execute(f"select * from {t}").fetchall()) for t in tables)
 
 
-# --- a fake Stripe ------------------------------------------------------------------------
+Snapshot = dict[str, dict[Any, dict[str, Any]]]
 
 
-@dataclass
-class FakePayments:
-    """Stripe's documented test-card behaviour, in memory: 9995 declines, 000111111116 fails."""
+def snapshot(dsn: str) -> Snapshot:
+    """Every row of every table, keyed by table then by the row's first column (its primary key)."""
+    with psycopg.connect(dsn, row_factory=dict_row) as conn:
+        tables = [
+            r["tablename"]
+            for r in conn.execute("select tablename from pg_tables where schemaname = 'public' order by 1")
+        ]
+        result: Snapshot = {}
+        for table in tables:
+            fetched = conn.execute(f"select * from {table}").fetchall()
+            result[table] = {next(iter(row.values())): row for row in fetched}
+        return result
 
-    customers: list[str] = field(default_factory=list)
-    charges: list[dict[str, Any]] = field(default_factory=list)
-    _secrets: dict[str, str] = field(default_factory=dict)
 
-    async def create_customer(self, *, account_id: str, name: str) -> str:
-        customer = f"cus_test_{len(self.customers) + 1}"
-        self.customers.append(customer)
-        return customer
-
-    async def save_card(self, *, customer_id: str, name: str, card: CardDetails) -> SavedMethod:
-        pm = f"pm_card_{len(self._secrets) + 1}"
-        self._secrets[pm] = card.number
-        return SavedMethod(pm, "card", card.number[-4:], "visa")
-
-    async def save_bank_account(self, *, customer_id: str, name: str, bank: BankDetails) -> SavedMethod:
-        pm = f"pm_bank_{len(self._secrets) + 1}"
-        self._secrets[pm] = bank.account_number
-        return SavedMethod(pm, "ach", bank.account_number[-4:])
-
-    async def charge(
-        self, *, customer_id: str, method: SavedMethod, amount_cents: int, account_id: str
-    ) -> ChargeResult:
-        secret = self._secrets[method.payment_method_id]
-        ok = secret not in (DECLINING_CARD, FAILING_BANK[1])
-        intent = f"pi_test_{len(self.charges) + 1}"
-        self.charges.append(
-            {"method": method.method, "amount_cents": amount_cents, "status": "succeeded" if ok else "failed"}
-        )
-        return ChargeResult(
-            intent, "succeeded" if ok else "failed", None if ok else "Your card has insufficient funds."
-        )
+def changes(before: Snapshot, after: Snapshot) -> list[dict[str, Any]]:
+    """The answer key's shape: ``{"op": "insert", "table", "row"}`` and ``{"op": "update", "table", "key",
+    "set"}`` (only the changed columns). Deletes are reported too, so a test sees them."""
+    found: list[dict[str, Any]] = []
+    for table, now in after.items():
+        then = before.get(table, {})
+        for key, row in now.items():
+            if key not in then:
+                found.append({"op": "insert", "table": table, "row": row})
+            elif row != then[key]:
+                changed = {c: v for c, v in row.items() if then[key].get(c) != v}
+                found.append({"op": "update", "table": table, "key": key, "set": changed})
+        found.extend({"op": "delete", "table": table, "key": k} for k in then.keys() - now.keys())
+    return found

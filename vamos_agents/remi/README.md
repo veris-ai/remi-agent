@@ -6,7 +6,7 @@ Account Services, LLC, places **outbound** calls to consumers in New York
 City, and must apply the benchmark's policy against the benchmark's world:
 
 - Policy: [`collections_bench/RULES.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/RULES.md) (veris-ai/utility-bench)
-- World: [`collections_bench/WORLD.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/WORLD.md): a Postgres collections database plus a Stripe twin
+- World: [`collections_bench/WORLD.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/WORLD.md): one Postgres collections database, with the payment gateway inside it (no Stripe: Stripe does not serve debt collection agencies)
 
 Remi reads those documents' rules into its own code (`policy.py`, the gates,
 the prompt). It never imports or copies the benchmark's grader.
@@ -26,7 +26,7 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 | `tools` | 17 tools (below) | `tools/` |
 | `gates` | `Gate` ladder NONE → ASSESSED → PROCEEDING → VERIFIED → DEBT_UNLOCKED, plus a collection stop on tools tagged `collection` | `gates.py`, `call.py` |
 | per-call state | `RemiCall`: connect reads, assessment, verification, outcomes; `finalize()` writes the call's one `contact_attempts` row if the model did not | `call.py` |
-| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; `StripeGateway` (own `StripeClient`, no globals) from `STRIPE_API_KEY`/`STRIPE_API_BASE` | `db.py`, `payments.py` |
+| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; `PaymentGateway`, the client for the World's gateway functions, on that same database | `db.py`, `payments.py` |
 | rules | RULES.md's numbers and calendar as pure functions | `policy.py` |
 
 ## The opening, enforced
@@ -57,9 +57,9 @@ early with a message saying what must happen first:
 | `log_dispute` | verified | dispute or medical financial assistance; collection stops. |
 | `set_language` | verified | Records the language preference. |
 | `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits. |
-| `add_payment_method` | debt unlocked, `collection` | Card or ACH to Stripe; every card/bank field redacted. |
-| `take_payment` | debt unlocked, `collection` | Pay in full or a one-payment settlement at/above the floor. Declines are real. |
-| `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan / settlement_instalments, equal monthly instalments. |
+| `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
+| `take_payment` | debt unlocked, `collection` | `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: Remi sets `status` `paid`/`settled` (the gateway already moved the balance). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
+| `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan / settlement_instalments, equal monthly instalments, charged to a `method_id` saved this call. |
 | `record_promise` | debt unlocked, `collection` | Exact amount and date ≤14 days out. |
 | `schedule_callback` | verified | 8 a.m.–<9 p.m. ET. |
 | `queue_letter` | verified | Idempotent per call. |
@@ -67,14 +67,32 @@ early with a message saying what must happen first:
 | `log_contact_attempt` | assessed | The call's one row; time, duration and disposition come from the session and the clock. |
 | `end_call` | assessed | Requires the log; the line closes after the last words play. |
 
+## Payments
+
+The World's payment gateway is three SQL functions in the collections database
+(WORLD.md, "The payment gateway"); `payments.PaymentGateway` is Remi's one client
+for them, called inside the tool's own transaction so a charge and the status or
+arrangement that depends on it land together.
+
+- Remi never writes `payment_methods` or `payments` (they are not in `db.WRITABLE`),
+  never reads or writes the processor's `processor_vault` or `processor_*`
+  functions, and runs no DDL. `Transaction.call_gateway` calls only the three
+  `gateway_*` functions, with named, bound arguments.
+- Every `at` is the call's clock (`CallClock.now()`), never the database's `now()`.
+- A gateway error (SQLSTATE 22023, `gateway: ...`) becomes a tool error in the
+  gateway's words ("The payment gateway refused it: the card number is not
+  valid ..."); nothing is written. A decline is not an error: `take_payment`
+  returns `status: declined` with `decline_code` (`insufficient_funds`,
+  `card_declined`, `expired_card`) and a reason to relay.
+- Card number, expiry, security code and bank account number pass only into the
+  gateway call; they are redacted in logs and never stored or returned.
+
 ## Config
 
 | Variable | Set by | Meaning |
 |---|---|---|
 | `VERIS_AGENT_CONTEXT` | bench, per attempt | `{"account_id","call_time","phone_id"}`. Required. |
-| `DATABASE_URL` | bench (world) | Collections twin DSN. Required. |
-| `STRIPE_API_KEY` / `STRIPE_API_BASE` | bench (world) | Stripe twin key (required) / base URL. |
-| `SSL_CERT_FILE` | optional | CA bundle Stripe traffic trusts. |
+| `DATABASE_URL` | bench (world) | Collections twin DSN, payments included. Required; the only world variable. |
 
 Plus the framework's and the vendor's variables (AGENTS.md section 11).
 
@@ -84,12 +102,18 @@ Plus the framework's and the vendor's variables (AGENTS.md section 11).
 uv run --all-extras pytest -q vamos_agents/remi
 ```
 
-- `tests/test_tools.py`: every flow against a real Postgres with WORLD.md's
-  schema (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`),
-  asserting the exact rows the answer key expects; card data in no row, log
-  or result; the wall-clock guard over every Remi module.
+- `tests/test_tools.py`: every flow against a real Postgres loaded with the
+  World's own SQL (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`),
+  asserting the exact rows the answer key expects (REMI-001 diffed against the
+  whole World); declines and their fallbacks; card data in no row, log or
+  result; the wall-clock guard over every Remi module.
+- `tests/fixtures/collections_world.sql`: the World's schema, payment gateway and
+  rows, vendored from utility-bench (the header names the commit). Resync with
+  `tests/fixtures/resync_world.sh <utility-bench checkout> [ref]`. Remi never
+  imports utility-bench. The tests seed as the owner and connect Remi as a login
+  that owns nothing, so the gateway's write guards bind.
 - `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
-- `tests/test_payments.py`: `StripeGateway` against an httpx mock of Stripe.
+- `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, balance effects, no direct writes.
 - `tests/test_smoke.py`: the real server running Remi over `/voice` with a fake provider; startup config errors.
 
 Remi also runs in the root parity matrix (`tests/test_parity.py`) on every vendor.

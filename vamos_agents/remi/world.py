@@ -98,4 +98,3 @@ class Account:
     max_plan_months: int
     min_instalment_cents: int
     status: str
-    stripe_customer_id: str | None
