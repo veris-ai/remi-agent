@@ -55,15 +55,8 @@ async def verified(s: CallSession) -> None:
     assert (await s.dispatch("verify_right_party", VERIFY))["verified"] is True
 
 
-async def answer_language(s: CallSession, code: str = "en", said: str = "English, please.") -> None:
-    assert "error" not in await s.dispatch("ask_language", {})
-    recorded = await s.dispatch("set_language", {"language": code, "consumer_said": said})
-    assert "error" not in recorded, recorded
-
-
 async def unlocked(s: CallSession) -> dict:
     await verified(s)
-    await answer_language(s)
     details = await s.dispatch("get_debt_details", DISCLOSED)
     assert "error" not in details, details
     return details
@@ -107,7 +100,7 @@ async def test_debt_tools_wait_for_verification_and_disclosures(pg_dsn, make_ses
     refused = await s.dispatch(
         "get_debt_details", {"recording_disclosure_given": True, "mini_miranda_given": True}
     )
-    assert "language question" in refused["error"] and "alternative-format" in refused["error"]
+    assert "alternative-format" in refused["error"] and "language" not in refused["error"]
     assert (
         "disclosures"
         in (
@@ -116,43 +109,20 @@ async def test_debt_tools_wait_for_verification_and_disclosures(pg_dsn, make_ses
     )
 
 
-async def test_language_is_never_recorded_without_asking(pg_dsn, make_session) -> None:
-    """REMI-001: no preference on record, so 'en' cannot be written until the question was asked,
-    and the debt stays locked until the consumer has answered."""
+async def test_english_only_no_language_step(pg_dsn, make_session) -> None:
+    """No language tool exists, the opening never asks for one, and the debt unlocks without it."""
+    from vamos_agents.remi.tools import REGISTRY
+
+    assert not [t for t in REGISTRY.specs() if "language" in t.name]
     seed_world(pg_dsn)
     s = await make_session()
-    assert (await open_call(s))["call_assessment"]["language_question_due"] is True
-    await s.dispatch("verify_right_party", VERIFY)
+    assessment = (await open_call(s))["call_assessment"]
+    assert not any("language" in k for k in assessment)
+    verified_result = await s.dispatch("verify_right_party", VERIFY)
+    assert "language" not in verified_result["next"]
     before = snapshot(pg_dsn)
-    assumed = await s.dispatch(
-        "set_language", {"language": "en", "consumer_said": "We can continue in English."}
-    )
-    assert "ask_language" in assumed["error"] and "Never assume English" in assumed["error"]
-    refused = await s.dispatch("get_debt_details", DISCLOSED)
-    assert "ask_language" in refused["error"]
+    assert "error" not in await s.dispatch("get_debt_details", DISCLOSED)
     assert changes(before, snapshot(pg_dsn)) == []
-
-    asked = await s.dispatch("ask_language", {})
-    assert asked["say"] == "Which language do you prefer for this call?"
-    still = await s.dispatch("get_debt_details", DISCLOSED)
-    assert "answer to the language question" in still["error"]
-    assert "error" in await s.dispatch("set_language", {"language": "en"})  # no consumer_said
-
-    recorded = await s.dispatch("set_language", {"language": "es", "consumer_said": "Español, por favor."})
-    assert recorded["recorded"] == "es"
-    assert "error" not in await s.dispatch("get_debt_details", DISCLOSED)
-    (consumer,) = rows(pg_dsn, "consumers", "consumer_id = 'con_420101'")
-    assert consumer["language_preference"] == "es"
-
-
-async def test_language_on_record_needs_no_question(pg_dsn, make_session) -> None:
-    seed_world(pg_dsn, consumer={"language_preference": "en"})
-    s = await make_session()
-    assert (await open_call(s))["call_assessment"]["language_question_due"] is False
-    await s.dispatch("verify_right_party", VERIFY)
-    assert "error" not in await s.dispatch("get_debt_details", DISCLOSED)
-    on_record = await s.dispatch("ask_language", {})
-    assert on_record["on_record"] == "en" and "Do not ask anew" in on_record["next"]
 
 
 async def test_connect_reads_return_no_secrets_and_assess_the_call(pg_dsn, make_session) -> None:
@@ -203,8 +173,10 @@ async def test_three_failed_verifications_lock_the_call(pg_dsn, make_session) ->
 
 # --- money -----------------------------------------------------------------------------------
 
-#: REMI-001 (pay a small balance in full by card): the answer key's postconditions, verbatim from
-#: utility-bench collections_bench/generated/manifest.json at the commit collections_world.sql names.
+#: REMI-001 (pay a small balance in full by card): the answer key's postconditions from
+#: utility-bench collections_bench/generated/manifest.json at the commit collections_world.sql names,
+#: minus the consumers.language_preference update: the bench is English-only for now, so Remi has no
+#: language step and never writes that column.
 REMI_001_POSTCONDITIONS = [
     {
         "op": "insert",
@@ -218,7 +190,6 @@ REMI_001_POSTCONDITIONS = [
         },
         "table": "contact_attempts",
     },
-    {"key": "con_420101", "op": "update", "set": {"language_preference": "en"}, "table": "consumers"},
     {
         "op": "insert",
         "row": {
@@ -696,7 +667,6 @@ async def test_time_barred_call_requeues_the_notice(pg_dsn, make_session) -> Non
     s = await make_session()
     assert (await open_call(s))["call_assessment"]["time_barred"] is True
     await s.dispatch("verify_right_party", VERIFY)
-    await answer_language(s)
     assert "time-barred" in (await s.dispatch("get_debt_details", DISCLOSED))["error"]
     assert "error" not in await s.dispatch(
         "get_debt_details", {**DISCLOSED, "time_barred_disclosure_given": True}

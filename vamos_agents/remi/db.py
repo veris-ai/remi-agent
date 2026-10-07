@@ -37,7 +37,7 @@ STATEMENT_TIMEOUT_MS = 5_000
 WRITABLE: dict[str, frozenset[str]] = {
     # A payment's effect on the balance, paid-to-date and last payment date is the gateway's to write.
     "accounts": frozenset({"status"}),
-    "consumers": frozenset({"language_preference", "deceased_on"}),
+    "consumers": frozenset({"deceased_on"}),  # English-only: never language_preference
     "phones": frozenset({"consent_revoked_at", "status"}),
     "contact_attempts": frozenset(
         {

@@ -1,4 +1,4 @@
-"""Right-party verification, the language preference, and the debt-details gate.
+"""Right-party verification and the debt-details gate.
 
 Verification is decided here, not by the model: the person must give their
 full name and two of date of birth, ZIP and SSN last four, and those are
@@ -18,7 +18,7 @@ import unicodedata
 from datetime import date, timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from vamos_voice.tools import ToolError
 
@@ -119,10 +119,6 @@ async def _verified(session: RemiCall, role: str) -> dict[str, Any]:
     a = session.assessment
     assert a is not None
     owed = ["the recording disclosure", "the mini-Miranda"]
-    if role == "consumer" and a.language_needed:
-        owed.append(
-            "the language question (call ask_language, ask it, wait for the answer, then set_language)"
-        )
     if a.time_barred:
         owed.append("the time-barred disclosure")
     if role == "consumer" and a.first_conversation:
@@ -145,75 +141,6 @@ def _failed(session: RemiCall, message: str) -> dict[str, Any]:
             "with answered_by 'none' and end_call.",
         }
     return {"verified": False, "attempts_left": left, "next": message}
-
-
-LANGUAGE_QUESTION = "Which language do you prefer for this call?"
-
-
-class AskLanguageArgs(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-
-@REGISTRY.tool(AskLanguageArgs, requires=Gate.VERIFIED)
-async def ask_language(session: RemiCall, _: AskLanguageArgs) -> dict[str, Any]:
-    """Call this right before you ask the consumer which language they prefer, after the mini-Miranda. It says
-    what to ask, or, when a preference is already on record, tells you to confirm that one instead."""
-    session.require_consumer()
-    consumer, a = session.consumer, session.assessment
-    assert consumer is not None and a is not None
-    if not a.language_needed:
-        return {
-            "on_record": consumer.language_preference,
-            "next": "A language preference is already on record. Do not ask anew; you may confirm it. Call "
-            "set_language only if the consumer says they want a different language.",
-        }
-    session.language_asked = True
-    return {
-        "say": LANGUAGE_QUESTION,
-        "next": "Ask exactly this open question and wait for their answer. Do not assume English and do not "
-        "suggest one. Then call set_language with the language they name and their own words.",
-    }
-
-
-class LanguageArgs(BaseModel):
-    language: str = Field(
-        description="ISO 639-1 code of the language the consumer said they prefer, e.g. 'en' or 'es'."
-    )
-    consumer_said: str = Field(
-        min_length=2,
-        description="The consumer's own words answering the language question, verbatim (e.g. 'English is "
-        "fine', 'Spanish, please'). Never your own words.",
-    )
-
-
-@REGISTRY.tool(LanguageArgs, requires=Gate.VERIFIED)
-async def set_language(session: RemiCall, args: LanguageArgs) -> dict[str, Any]:
-    """Record the language the consumer said they prefer, quoting their answer. When none is on record, call
-    ask_language and ask the question first; a preference the consumer did not state is never recorded."""
-    session.require_consumer()
-    a = session.assessment
-    assert a is not None and session.consumer is not None
-    if a.language_needed and not session.language_asked:
-        raise ToolError(
-            "No language preference is on record and you have not asked. Call ask_language, ask "
-            f"'{LANGUAGE_QUESTION}' and wait for the consumer's answer. Never assume English or record a "
-            "preference the consumer did not state."
-        )
-    if not args.consumer_said.strip():
-        raise ToolError("Quote the consumer's own answer in consumer_said.")
-    code = args.language.strip().lower()
-    if not re.fullmatch(r"[a-z]{2}", code):
-        raise ToolError("Use a two-letter language code such as 'en' or 'es'.")
-    async with session.db.transaction() as tx:
-        await tx.update("consumers", session.consumer.consumer_id, {"language_preference": code})
-    session.language_recorded = True
-    if code == "en":
-        return {"recorded": code}
-    return {
-        "recorded": code,
-        "next": "Offer to continue in that language or to arrange it. Never give a partial or inaccurate "
-        "translation of a required disclosure.",
-    }
 
 
 class DebtDetailsArgs(BaseModel):
@@ -245,12 +172,6 @@ async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str
         missing.append("the recording disclosure")
     if not args.mini_miranda_given:
         missing.append("the mini-Miranda")
-    if consumer and a.language_needed and not session.language_recorded:
-        missing.append(
-            "the language question (ask_language, wait for the consumer's answer, then set_language)"
-            if not session.language_asked
-            else "the consumer's answer to the language question (set_language)"
-        )
     if a.time_barred and not args.time_barred_disclosure_given:
         missing.append("the time-barred disclosure")
     if consumer and a.first_conversation and not args.alternative_format_statement_given:
