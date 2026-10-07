@@ -239,7 +239,7 @@ Vendors:
 |---|---|---|
 | `OPENAI_API_KEY` | openai_realtime, pipecat | Required. |
 | `VAMOS_OPENAI_REALTIME_MODEL` / `VAMOS_OPENAI_VOICE` / `VAMOS_OPENAI_TRANSCRIBE_MODEL` | openai_realtime | Defaults `gpt-realtime` / `marin` / `gpt-4o-mini-transcribe`. |
-| `GEMINI_API_KEY` | gemini_live | Gemini **Developer API** key. Required. |
+| `GOOGLE_API_KEY` | gemini_live | Gemini **Developer API** key. Required. (Not `GEMINI_API_KEY`: Veris Bench reserves the `GEMINI_*`, `XAI_*`, `GROK_*` and `VERIS_*` prefixes in candidate-env.) |
 | `VAMOS_GEMINI_MODEL` / `VAMOS_GEMINI_VOICE` | gemini_live | Defaults `gemini-2.5-flash-native-audio-preview-12-2025` / `Puck`. |
 | `VAMOS_PIPECAT_STT` / `VAMOS_PIPECAT_TTS` | pipecat | `deepgram` (default) or `openai` / `openai` (default) or `cartesia`. |
 | `VAMOS_PIPECAT_LLM_MODEL` | pipecat | Default `gpt-4.1`. |
@@ -284,10 +284,21 @@ docker push $REPO/remi-openai-realtime:<version>
 docker inspect --format='{{index .RepoDigests 0}}' $REPO/remi-openai-realtime:<version>  # register THIS ref
 ```
 
-The image carries no secrets and no other agent. Vendor keys come from the
-bench's candidate-env (`PUT /v1/benches/{id}/candidate-env/{KEY}`), referenced
-as `${env:KEY}`. World variables (`DATABASE_URL`, `STRIPE_*`) and
-`VERIS_AGENT_CONTEXT` are injected by the bench; never set them on the candidate.
+The image carries no secrets and no other agent. Vendor keys live in the
+bench's candidate-env (`PUT /v1/benches/{id}/candidate-env/{KEY}`, `is_secret:
+true`), and the engine merges every candidate-env key into every image
+candidate's environment. **Never reference them from `image.env`:** for image
+candidates the engine resolves `${env:KEY}` only inside the channel and init
+config, not in `image.env`, and `image.env` wins over candidate-env, so
+`"OPENAI_API_KEY": "${env:OPENAI_API_KEY}"` would hand the agent the literal
+string instead of the key (veris-sandbox
+`benchmark/api/app/services/engine_runner.py`, `_image_candidate_spec`).
+`image.env` holds only per-candidate, non-secret config (model and voice names).
+
+The bench injects `DATABASE_URL`, `STRIPE_API_BASE` (the twins' addresses) and
+`VERIS_AGENT_CONTEXT`. It does **not** inject the Stripe twin's key: set
+`STRIPE_API_KEY` once as a non-secret bench candidate-env value, the twin's
+published fixture key (`sk_test_RxytMgpr9ZDOd`), as the VAmoS Energy bench does.
 
 Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 
@@ -303,16 +314,18 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
     "ref": "us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e/remi-openai-realtime@sha256:<digest>",
     "port": 8008, "path": "/voice", "health_path": "/health",
     "trace_adapter": "openai-realtime",
-    "env": {"OPENAI_API_KEY": "${env:OPENAI_API_KEY}"}
+    "env": {"VAMOS_OPENAI_REALTIME_MODEL": "gpt-realtime-2.1"}
   }
 }
 ```
 
-| Vendor | `trace_adapter` | `image.env` |
-|---|---|---|
-| `openai_realtime` | `openai-realtime` | `OPENAI_API_KEY` |
-| `gemini_live` | `gemini-live` | `GEMINI_API_KEY` |
-| `pipecat` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY` (plus `CARTESIA_API_KEY`, `VAMOS_PIPECAT_TTS`, `VAMOS_CARTESIA_VOICE_ID` for Cartesia) |
+| Vendor | `trace_adapter` | Bench candidate-env (secret) | `image.env` (non-secret) |
+|---|---|---|---|
+| `openai_realtime` | `openai-realtime` | `OPENAI_API_KEY` | `VAMOS_OPENAI_REALTIME_MODEL` (e.g. `gpt-realtime-2.1`, as Riley/Rory) |
+| `gemini_live` | `gemini-live` | `GOOGLE_API_KEY` | `VAMOS_GEMINI_MODEL` (e.g. `gemini-3.8-live`, as Riley/Rory) |
+| `pipecat` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY` (plus `CARTESIA_API_KEY` for Cartesia) | `VAMOS_PIPECAT_TTS`, `VAMOS_CARTESIA_VOICE_ID` when using Cartesia |
+
+Every vendor also needs the non-secret candidate-env `STRIPE_API_KEY` above.
 
 `wait_for_callee_first` is about the bench actor: `false` for an outbound
 agent (the actor, as callee, speaks first). An inbound agent's candidate is
