@@ -65,7 +65,7 @@ early with a message saying what must happen first:
 | `schedule_callback` | verified | 8 a.m.–<9 p.m. ET. |
 | `queue_letter` | verified | Idempotent per call. |
 | `transfer_to_human` | proceeding | Disposition `transferred`. |
-| `log_contact_attempt` | assessed | The call's one row; time, duration and disposition come from the session and the clock. |
+| `log_contact_attempt` | assessed | The call's one row; time, duration and disposition come from the session and the clock, and the summary leads with the facts the session recorded (disposition, who answered, whether the debt was read and after which attested disclosures, outcomes), then the model's notes. |
 | `end_call` | assessed | Requires the log; the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
 
 ## Payments

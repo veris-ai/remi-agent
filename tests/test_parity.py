@@ -110,6 +110,7 @@ class OpenAIScript:
 
     def tool_calls(self, *names: str) -> None:
         self.n += 1
+        self.sock.push({"type": "response.created", "response": {"id": f"r{self.n}"}})
         for i, name in enumerate(names):
             self.sock.push(
                 {

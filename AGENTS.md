@@ -184,7 +184,7 @@ Discovery: `VAMOS_AGENT=<name>` → `vamos_voice.registry.load_agent` imports
 |---|---|---|
 | Before anyone speaks | the connect reads run as **real tool calls** (so the judge's trace shows them first); caller audio is **held, not dropped** | optional connect reads, same mechanism |
 | First words | the callee's: no agent audio leaves until their first utterance is detected; anything earlier is dropped | the agent's: the provider requests an opening turn carrying `opening_instruction`; audio flows at once |
-| OpenAI Realtime | `response.create` + `tool_choice: "required"`, then each skipped read by name; then release held audio | then `response.create` with `instructions = session instructions + opening_instruction` |
+| OpenAI Realtime | a text-only `response.create` (`output_modalities: ["text"]`, per response; the session stays audio) + `tool_choice: "required"` + `instructions = session instructions + prime_instruction`, then each skipped read by name; then release held audio | then `response.create` with `instructions = session instructions + opening_instruction` |
 | Gemini Live (no forced tool choice) | a user-role text turn labelled `[Call system note, not the person on the line]` | then the opening as the same kind of labelled note |
 | Grok Voice (no forced tool choice) | the Gemini fallback in Realtime frames: a labelled user-role `conversation.item.create` + `response.create`; a skipped read is asked for again by name | `response.create` with per-response `instructions`, as OpenAI |
 | GPT-Live (tools live on a delegated Responses backend) | `session.start` with the backend's `tool_choice: "required"`; `session.instructions.append` (`prime_instruction`) makes the live model delegate; each missing read forced by name via `session.update`; then `tool_choice: "auto"` | `session.instructions.append` with `opening_instruction`, after `session.started` |
@@ -204,7 +204,34 @@ asked for would put words in its mouth. The agent's gates take over instead:
 Remi refuses every tool beyond the reads with "Run the connect-time reads
 first: <the missing ones>", so the model runs them on its next turn, before it
 can discuss or take money. A late priming reply after the deadline is handled
-as an ordinary turn.
+as an ordinary turn: on the Realtime protocol a priming response still in
+flight at the deadline is left to finish (a caller turn meanwhile is answered
+right after it, in one reply with the read results).
+
+### After the call start: caller turns and liveness (Realtime protocol)
+
+Smoke trial `trial_tf9ud89g67fpyh8l2tb37` lost three of ten Remi calls on
+gpt-realtime-2.1 to the same thing: a television behind the callee (bench noise
+at about -42 dBFS; the callee speaks at -7 to -20). Server VAD turned every
+broadcast phrase into a caller turn, and with the vendor answering and
+interrupting on its own each reply was cancelled within a second. So:
+
+- **`CallerSpeech`** (`vamos_voice/audio.py`) measures the caller's audio as it
+  is forwarded: a 20 ms frame is the caller's own voice when it is within 20 dB
+  of the loudest level heard on the call (and above -55 dBFS). On every
+  recording of that trial it confirmed every caller utterance and no background frame.
+- **`manages_turns`** (OpenAI: the session sets `create_response` and
+  `interrupt_response` off): a VAD turn interrupts the agent (`response.cancel`
+  + truncate) and gets a reply only once the caller's own voice was heard in it.
+  A background-only turn stays in the conversation (traced) but is neither
+  answered nor allowed to interrupt. Grok documents neither switch, so its VAD
+  keeps both (`manages_turns = False`).
+- **One response at a time.** A reply asked for while a response is in flight
+  waits for its `response.done` (requests coalesce), including one refused with
+  `conversation_already_has_active_response`; a cancelled response is followed by the reply.
+- **Liveness.** Once the caller has finished a turn, a reply must start within
+  `TurnTaking.reply_timeout_s` (4 s); otherwise the provider logs
+  `liveness: ... requesting one` and sends `response.create` itself.
 
 ## 7. The clock rule
 
@@ -285,11 +312,12 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 | Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`) | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
 | Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |
 | `TurnTaking` mapping | silence, prefix padding, threshold | silence only (`threshold`/`prefix_padding_ms` not documented; xAI defaults) | silence, prefix padding | **none**: no VAD settings exist | silence via VAD + turn timeout |
-| Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
+| Turn management (who gets a reply, what may interrupt) | the provider: `create_response`/`interrupt_response` off, `CallerSpeech` decides (`manages_turns = True`) | the vendor's VAD (no documented switch; `manages_turns = False`) | vendor | vendor | Pipecat |
+| Callee-spoke signal | `input_audio_buffer.committed` of a turn with the caller's own voice | `input_audio_buffer.committed` | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
 
-`RealtimeProtocolProvider` exposes the two hooks dialects differ on:
-`priming_frames(setup, missing, first)` (default: forced `tool_choice`) and
-`truncates_on_barge_in` (default `True`). `CallStartPolicy.reprime_instruction`
+`RealtimeProtocolProvider` exposes the hooks dialects differ on:
+`priming_frames(setup, missing, first)` (default: text-only forced `tool_choice`),
+`truncates_on_barge_in` (default `True`) and `manages_turns` (default `True`). `CallStartPolicy.reprime_instruction`
 / `reprime_note` are the shared "still missing" wording.
 
 ## 11. Config contract (environment)
@@ -487,6 +515,9 @@ uv run ruff check . && uv run ruff format --check .
 - `tests/test_grok_voice.py`, `tests/test_gpt_live.py`: each vendor's own
   frame translation (session shape, priming fallback / backend forcing,
   barge-in, end of call), pinned where it differs from OpenAI Realtime.
+- `tests/test_realtime_turns.py`: the Realtime call flow after priming, replaying the
+  bench failures offline (background speech, the deadline mid-priming, a response lost
+  to a race, the liveness guard); `tests/test_audio.py` pins `CallerSpeech`.
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
 - `tests/test_framing.py`: both framings, alone and through the real server (agent hang-up
   sends `end` before the 1000 close, a caller's `end` finalizes the call, binary unchanged),

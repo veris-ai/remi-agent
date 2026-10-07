@@ -3,7 +3,11 @@
 Every call ends with exactly one contact-attempt row (NYC § 2-193).
 ``log_contact_attempt`` writes it with the duration from ``CallClock`` and the
 disposition derived from what the session recorded (WORLD.md's precedence), so
-the model supplies only who answered and a plain-language summary. If the
+the model supplies only who answered and a plain-language summary. The stored
+summary leads with the facts the session recorded (disposition, who answered,
+whether the debt was read and after which attested disclosures, outcomes), so
+the row stays true even when the model's notes describe what it meant to say
+rather than what it said; the notes follow, labelled as Remi's. If the
 other side hangs up first, ``RemiCall.finalize`` writes the row instead.
 ``end_call`` is refused until the call is logged.
 """
@@ -115,7 +119,10 @@ class ContactLogArgs(BaseModel):
         )
     )
     summary: str = Field(
-        min_length=10, description="One or two plain-language sentences: what happened and the outcome."
+        min_length=10,
+        description="One or two plain-language sentences: what was actually said and done on this call, and the "
+        "outcome. Only what happened, never what you meant or were told to say. Disposition, who answered and "
+        "what was disclosed are recorded for you.",
     )
     number_is_wrong: bool = Field(
         False,
@@ -140,7 +147,7 @@ async def log_contact_attempt(session: RemiCall, args: ContactLogArgs) -> dict[s
     elif answered_by is None and session.verified_as is not None:
         answered_by = session.verified_as
     disposition = await session.write_contact_attempt(
-        answered_by=answered_by, summary=args.summary.strip(), number_is_wrong=args.number_is_wrong
+        answered_by=answered_by, notes=args.summary.strip(), number_is_wrong=args.number_is_wrong
     )
     return {
         "logged": True,

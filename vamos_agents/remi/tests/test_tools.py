@@ -154,6 +154,44 @@ async def test_should_not_call_closes_without_verification(pg_dsn, make_session)
     assert (await s.dispatch("end_call", {}))["ended"] is True
 
 
+async def test_the_contact_summary_leads_with_what_the_call_recorded(pg_dsn, make_session) -> None:
+    """REMI-103: on a should-not-call account the model said only "Hi. I'll keep this brief and then
+    I'll let you go." and logged that it had identified itself as Tallmere's virtual assistant. The
+    stored summary's facts come from the session, and the model's words are labelled as its notes."""
+    seed_world(pg_dsn, phone={"source": "employer"})
+    s = await make_session()
+    await open_call(s)
+    claim = "Remi identified as a virtual assistant for Tallmere Account Services and ended the call."
+    await s.dispatch("log_contact_attempt", {"answered_by": "none", "summary": claim})
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert attempt["summary"] == (
+        "Disposition: should_not_call. The call should not have been placed (employer_phone): "
+        f"no one was verified and the debt was not read. Remi's notes: {claim}"
+    )
+
+    seed_world(pg_dsn)
+    s2 = await make_session()
+    await unlocked(s2)
+    await s2.dispatch("log_contact_attempt", {"answered_by": "consumer", "summary": "Reviewed the balance."})
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert attempt["summary"].startswith(
+        "Disposition: no_commitment. Answered by: the verified consumer. Debt read after attesting: "
+        "the recording disclosure, the mini-Miranda, the alternative-format statement."
+    )
+
+
+def test_the_summary_is_asked_for_only_what_happened() -> None:
+    from importlib.resources import files
+
+    from vamos_agents.remi.tools.catalog import REGISTRY
+
+    prompt = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
+    assert "only what was actually said and done on this call" in prompt
+    (spec,) = [t for t in REGISTRY.specs() if t.name == "log_contact_attempt"]
+    described = spec.parameters["properties"]["summary"]["description"]
+    assert "never what you meant or were told to say" in described
+
+
 async def test_three_failed_verifications_lock_the_call(pg_dsn, make_session) -> None:
     seed_world(pg_dsn)
     s = await make_session()

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import numpy as np
+
 from vamos_voice.agent import AgentSpec
 from vamos_voice.call_start import PRIMING_TIMEOUT_S, CallStart, CallStartPolicy
 from vamos_voice.context import AgentContext, CallClock
@@ -22,7 +24,17 @@ from vamos_voice.providers.base import CallRuntime, InboundAudio, OutboundAudio,
 from vamos_voice.server import session_setup
 from vamos_voice.session import CallSession
 
-HELLO = b"\x01\x00" * 4800  # 200 ms of PCM16 at 24 kHz: stands in for "Hello?"
+
+def tone(ms: int, dbfs: float) -> bytes:
+    """``ms`` of a 220 Hz tone at ``dbfs`` RMS, PCM16 24 kHz: a stand-in for a voice at that level."""
+    t = np.arange(24 * ms) / 24_000
+    amplitude = 32768 * 10 ** (dbfs / 20) * np.sqrt(2)
+    return (np.sin(2 * np.pi * 220 * t) * amplitude).astype("<i2").tobytes()
+
+
+HELLO = tone(200, -12)  # 200 ms at a caller's speaking level: stands in for "Hello?"
+#: A television behind the caller: speech-like for server VAD, ~30 dB under their voice.
+BACKGROUND = tone(1000, -42)
 
 
 @dataclass(frozen=True)
