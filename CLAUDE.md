@@ -2,7 +2,7 @@
 
 Read **AGENTS.md** first: it is the canonical guide (why one repo, framework vs
 pack, the `AgentSpec` contract, call start, clock, traces, config, how to add an
-agent / vendor / tool, build and push). Agent specifics: `agents/<name>/README.md`.
+agent / vendor / tool, build and push). Agent specifics: `vamos_agents/<name>/README.md`.
 
 Hard rules:
 

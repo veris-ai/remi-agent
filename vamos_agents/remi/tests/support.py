@@ -22,7 +22,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from agents.remi.payments import BankDetails, CardDetails, ChargeResult, SavedMethod
+from vamos_agents.remi.payments import BankDetails, CardDetails, ChargeResult, SavedMethod
 
 SCHEMA = (Path(__file__).parent / "fixtures" / "world_schema.sql").read_text()
 CALL_TIME = "2027-02-10T09:00:00-05:00"

@@ -1,9 +1,9 @@
-"""Agent discovery: an agent is a package ``agents.<name>`` exporting an ``AgentSpec`` as ``AGENT``.
+"""Agent discovery: an agent is a package ``vamos_agents.<name>`` exporting an ``AgentSpec`` as ``AGENT``.
 
 The framework never imports an agent by name in code; it resolves
 ``VAMOS_AGENT`` at runtime by convention, the same way vendors are found
 under ``vamos_voice/providers/``. Adding an agent means adding
-``agents/<name>/`` and a ``<name>`` extra in pyproject.toml, nothing here.
+``vamos_agents/<name>/`` and a ``<name>`` extra in pyproject.toml, nothing here.
 An image carries exactly one agent folder, so only that one is importable.
 """
 
@@ -16,7 +16,7 @@ import pkgutil
 from .agent import AgentSpec
 
 #: The package agent packs live under.
-AGENTS_PACKAGE = "agents"
+AGENTS_PACKAGE = "vamos_agents"
 
 
 class UnknownAgent(LookupError):
@@ -32,7 +32,7 @@ def agent_names() -> list[str]:
 
 
 def load_agent(name: str) -> type[AgentSpec]:
-    """Import ``agents.<name>`` and return its ``AGENT``. Import errors propagate:
+    """Import ``vamos_agents.<name>`` and return its ``AGENT``. Import errors propagate:
     a pack whose extra is not installed must fail loudly, not vanish."""
     if name not in agent_names():
         raise UnknownAgent(f"no agent {name!r}; known: {', '.join(agent_names()) or 'none'}")

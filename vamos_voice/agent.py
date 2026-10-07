@@ -1,13 +1,13 @@
 """``AgentSpec``: everything that makes one agent that agent, and nothing about voice vendors.
 
-An agent pack (``agents/<name>/``) subclasses ``AgentSpec`` and exports the
+An agent pack (``vamos_agents/<name>/``) subclasses ``AgentSpec`` and exports the
 class as ``AGENT``. The framework finds it by name (``vamos_voice.registry``),
 validates it at startup, and drives every call through it; no framework file
 changes when an agent is added.
 
 What an agent declares (class attributes):
 
-- ``name``: the folder under ``agents/``, the ``AGENT`` build arg, the extra in
+- ``name``: the folder under ``vamos_agents/``, the ``AGENT`` build arg, the extra in
   pyproject.toml and the first half of the image name.
 - ``call_start``: who speaks first and which connect-time reads run before
   (``vamos_voice.call_start``: ``callee_first`` for outbound, ``agent_first``

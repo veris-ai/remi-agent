@@ -7,9 +7,9 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from agents.remi import policy
-from agents.remi.context import CallContext
-from agents.remi.world import Account, ContactAttempt, Phone
+from vamos_agents.remi import policy
+from vamos_agents.remi.context import CallContext
+from vamos_agents.remi.world import Account, ContactAttempt, Phone
 from vamos_voice.context import CallClock, ContextError
 
 from .support import ACCOUNT, CONTEXT_JSON, PHONE

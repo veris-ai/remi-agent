@@ -445,8 +445,8 @@ async def test_time_barred_call_requeues_the_notice(pg_dsn, make_session) -> Non
 
 def test_tool_timestamps_never_come_from_wall_time() -> None:
     """Static guard: no Remi code calls a wall clock, and no SQL it sends uses now()."""
-    from agents.remi import agent, call, context, db, gates, payments, policy, prompt
-    from agents.remi.tools import connect, flags, identity, money, wrapup
+    from vamos_agents.remi import agent, call, context, db, gates, payments, policy, prompt
+    from vamos_agents.remi.tools import connect, flags, identity, money, wrapup
 
     for module in (
         agent,

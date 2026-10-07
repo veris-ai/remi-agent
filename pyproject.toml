@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# One extra per agent pack under agents/ (named like the folder) and one per vendor under
+# One extra per agent pack under vamos_agents/ (named like the folder) and one per vendor under
 # vamos_voice/providers/. An image installs exactly one of each: --extra $AGENT --extra $VENDOR.
 
 # --- agents ---
@@ -45,7 +45,7 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["vamos_voice", "agents"]
+packages = ["vamos_voice", "vamos_agents"]
 
 
 [tool.ruff]
@@ -63,7 +63,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests", "agents"]
+testpaths = ["tests", "vamos_agents"]
 filterwarnings = [
     # stripe's own httpx client passes bytes as data=; not ours to fix.
     "ignore:Use 'content=<...>' to upload raw bytes:DeprecationWarning",

@@ -6,7 +6,7 @@ placed; confirm the right party; give the recording disclosure and the
 mini-Miranda (and, when due, the language question, the time-barred
 disclosure and the alternative-format statement); only then the debt. The
 prompt asks the model to keep that order. ``RemiCall.gate`` computes how far
-the call has got, and ``agents.remi.gates`` refuses any tool that arrives
+the call has got, and ``vamos_agents.remi.gates`` refuses any tool that arrives
 early with an error that says what must happen first. Nothing reaches the
 database out of order, however the model behaves.
 

@@ -5,10 +5,10 @@ from datetime import datetime
 
 import pytest
 
-from agents.remi.agent import CALLEE_FIRST, RemiAgent
-from agents.remi.call import RemiCall
-from agents.remi.context import CallContext
-from agents.remi.db import Database
+from vamos_agents.remi.agent import CALLEE_FIRST, RemiAgent
+from vamos_agents.remi.call import RemiCall
+from vamos_agents.remi.context import CallContext
+from vamos_agents.remi.db import Database
 from vamos_voice.context import CallClock
 from vamos_voice.session import CallSession
 

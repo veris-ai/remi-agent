@@ -1,13 +1,13 @@
 # One image recipe for every agent x vendor. Build one image per pair:
 #   docker build --platform linux/amd64 --build-arg AGENT=remi --build-arg VENDOR=openai_realtime .
-# AGENT is a folder under agents/ and an extra in pyproject.toml; VENDOR is a folder under
+# AGENT is a folder under vamos_agents/ and an extra in pyproject.toml; VENDOR is a folder under
 # vamos_voice/providers/ and an extra. Only those two extras and that one agent's code are installed.
 FROM ghcr.io/astral-sh/uv:0.11.26 AS uv
 
 FROM python:3.12.13-slim-bookworm
 ARG AGENT
 ARG VENDOR
-RUN test -n "$AGENT" || (echo "build with --build-arg AGENT=<folder under agents/, e.g. remi>" >&2 && false)
+RUN test -n "$AGENT" || (echo "build with --build-arg AGENT=<folder under vamos_agents/, e.g. remi>" >&2 && false)
 RUN test -n "$VENDOR" || (echo "build with --build-arg VENDOR=<openai_realtime|gemini_live|pipecat>" >&2 && false)
 
 COPY --from=uv /uv /usr/local/bin/uv
@@ -21,8 +21,8 @@ WORKDIR /agent
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-dev --no-install-project --extra "$AGENT" --extra "$VENDOR"
 COPY vamos_voice ./vamos_voice
-COPY agents/__init__.py ./agents/__init__.py
-COPY agents/${AGENT} ./agents/${AGENT}
+COPY vamos_agents/__init__.py ./vamos_agents/__init__.py
+COPY vamos_agents/${AGENT} ./vamos_agents/${AGENT}
 RUN uv sync --locked --no-dev --extra "$AGENT" --extra "$VENDOR" \
     && useradd --system --uid 10001 --no-create-home vamos
 

@@ -12,7 +12,7 @@ import urllib.parse
 import httpx
 import stripe
 
-from agents.remi.payments import BankDetails, CardDetails, StripeGateway
+from vamos_agents.remi.payments import BankDetails, CardDetails, StripeGateway
 
 from .support import DECLINING_CARD, GOOD_CARD
 

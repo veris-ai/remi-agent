@@ -4,11 +4,11 @@ Every VAmoS voice agent in one repository: the candidates under test on Veris
 Bench's VAmoS benchmarks. A shared framework, **`vamos_voice`**, owns the
 server, the bench's `voice_ws` audio channel, call-start etiquette, tool
 dispatch and gates, and the voice vendors. Each agent is a small **pack**
-under `agents/` that supplies its prompt, tools, rules and world clients.
+under `vamos_agents/` that supplies its prompt, tools, rules and world clients.
 
 | Agent | Benchmark | Calls | Vendors |
 |---|---|---|---|
-| [Remi](agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS) |
+| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS) |
 
 ## Quickstart
 
@@ -26,7 +26,7 @@ docker run --rm -p 8008:8008 \
 curl localhost:8008/health
 ```
 
-`AGENT` is a folder under `agents/`; `VENDOR` is one of `openai_realtime`,
+`AGENT` is a folder under `vamos_agents/`; `VENDOR` is one of `openai_realtime`,
 `gemini_live`, `pipecat`. The voice channel is `ws://<host>:8008/voice`
 (PCM16, 24 kHz, mono, binary frames).
 

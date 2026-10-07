@@ -81,7 +81,7 @@ Plus the framework's and the vendor's variables (AGENTS.md section 11).
 ## Tests
 
 ```bash
-uv run --all-extras pytest -q agents/remi
+uv run --all-extras pytest -q vamos_agents/remi
 ```
 
 - `tests/test_tools.py`: every flow against a real Postgres with WORLD.md's

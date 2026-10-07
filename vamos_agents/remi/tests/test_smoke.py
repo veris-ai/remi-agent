@@ -15,9 +15,9 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from agents.remi import RemiAgent
-from agents.remi.context import CallContext
-from agents.remi.db import Database
+from vamos_agents.remi import RemiAgent
+from vamos_agents.remi.context import CallContext
+from vamos_agents.remi.db import Database
 from vamos_voice.providers.base import CallRuntime, VoiceProvider
 from vamos_voice.server import ConfigError, build_app_from_env, create_app
 

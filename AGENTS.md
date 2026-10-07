@@ -7,7 +7,7 @@ come) gets its own agent, and every agent runs on several voice vendors.
 
 | Agent | Benchmark | Direction | Pack |
 |---|---|---|---|
-| **Remi** | VAmoS Debt Collection (`collections_bench` in veris-ai/utility-bench) | outbound, the callee speaks first | `agents/remi/` ([README](agents/remi/README.md)) |
+| **Remi** | VAmoS Debt Collection (`collections_bench` in veris-ai/utility-bench) | outbound, the callee speaks first | `vamos_agents/remi/` ([README](vamos_agents/remi/README.md)) |
 | Rory (energy), Riley (banking) | VAmoS Energy / Banking | inbound, the agent speaks first | live in their own repos today; see section 14 |
 
 This file is the canonical guide. `CLAUDE.md` points here and repeats only the hard rules.
@@ -29,7 +29,7 @@ that plugs in through one small contract, `AgentSpec`.
 vamos_voice/                      # the framework: never imports an agent
   __main__.py  server.py          # python -m vamos_voice: /health + /voice, startup config checks
   agent.py                        # AgentSpec (the contract) + ConfigError
-  registry.py                     # VAMOS_AGENT=<name> -> agents.<name>.AGENT
+  registry.py                     # VAMOS_AGENT=<name> -> vamos_agents.<name>.AGENT
   context.py                      # AgentContext (VERIS_AGENT_CONTEXT as a str map) + CallClock
   call_start.py                   # CallStartPolicy: callee_first (outbound) / agent_first (inbound)
   audio.py                        # PCM16 helpers, streaming resampler
@@ -39,7 +39,7 @@ vamos_voice/                      # the framework: never imports an agent
   providers/                      # the vendor seam and the vendors
     base.py realtime_protocol.py wire.py
     openai_realtime/  gemini_live/  pipecat/
-agents/
+vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
     agent.py ... tests/           # world clients (db, payments), and its own tests
 tests/                            # framework tests, the agents x vendors parity matrix,
@@ -69,7 +69,7 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 └─────────────────────────────────────────────────────────────────────┘
       │ every tool call: session.dispatch(name, args) → dict ({"error": ...} on refusal)
       ▼
-┌──────── CallSession (session/engine.py) ────────┐      ┌──────── AgentSpec (agents/<name>/) ────────┐
+┌──────── CallSession (session/engine.py) ────────┐      ┌──────── AgentSpec (vamos_agents/<name>/) ────────┐
 │ registry lookup → gates.refusal(state, tool)    │◀─────│ tools (ToolRegistry)   gates (Gates)        │
 │ → args validation → handler(state, args)        │      │ call_start   instructions(clock)            │
 │ redact in logs; track connect reads             │      │ open_call(clock) → per-call state           │
@@ -79,7 +79,7 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 
 ## 4. The boundary: framework vs pack, and why
 
-| Lives in `vamos_voice/` (framework) | Lives in `agents/<name>/` (pack) |
+| Lives in `vamos_voice/` (framework) | Lives in `vamos_agents/<name>/` (pack) |
 |---|---|
 | server, `/health`, `/voice`, one call per pod | the agent's name, persona, prompt text |
 | `CallerLine`, held inbound audio, gated outbound audio, barge-in playout | the per-call state and its `finalize()` (e.g. Remi's contact-attempt row) |
@@ -105,11 +105,11 @@ Why the line is there:
 ## 5. The `AgentSpec` contract
 
 `vamos_voice/agent.py`. A pack subclasses it and exports the class as `AGENT`
-from `agents/<name>/__init__.py`.
+from `vamos_agents/<name>/__init__.py`.
 
 ```python
 class AgentSpec(abc.ABC):
-    name: ClassVar[str]  # folder under agents/, AGENT build arg, extra, image prefix
+    name: ClassVar[str]  # folder under vamos_agents/, AGENT build arg, extra, image prefix
     call_start: ClassVar[CallStartPolicy]  # callee_first(...) or agent_first(...)
     tools: ClassVar[ToolRegistry]
     gates: ClassVar[Gates]  # usually a GateLadder[State]
@@ -143,7 +143,7 @@ Supporting pieces an agent uses:
 - `AgentContext.require(*keys)` and `parse_instant(raw, what)` to build the typed view.
 
 Discovery: `VAMOS_AGENT=<name>` → `vamos_voice.registry.load_agent` imports
-`agents.<name>` and validates `AGENT`. No framework edit adds an agent.
+`vamos_agents.<name>` and validates `AGENT`. No framework edit adds an agent.
 
 ## 6. Call start: inbound vs outbound
 
@@ -176,12 +176,12 @@ over every framework module and every Remi module.
 2. Refuse with `ToolError("what to do instead")`. Do all writes of one tool in
    one transaction; never leave partial writes.
 3. Take time only from `state.clock`. Put any benchmark number in the pack's `policy.py`.
-4. Test it against the pack's world (Remi: `agents/remi/tests/test_tools.py`,
+4. Test it against the pack's world (Remi: `vamos_agents/remi/tests/test_tools.py`,
    real Postgres). Parity tests pick the schema up automatically.
 
 ## 9. Adding a NEW agent (checklist)
 
-1. `agents/<name>/` with `__init__.py` exporting `AGENT = <Name>Agent`.
+1. `vamos_agents/<name>/` with `__init__.py` exporting `AGENT = <Name>Agent`.
 2. `<Name>Agent(AgentSpec)`: `name = "<name>"`, `call_start`, `tools`, `gates`,
    `required_env`, `from_env`, `call_time`, `connect`/`close`, `instructions`, `open_call`.
 3. A per-call state with `ended` and `finalize()`; a hang-up tool that sets `ended`.
@@ -189,10 +189,10 @@ over every framework module and every Remi module.
    globals, every network call with a timeout), opened in `connect()`.
 5. A `<name>` extra in `pyproject.toml` with the pack's dependencies, every one
    bounded (`>=x,<y`); `uv lock`.
-6. Tests under `agents/<name>/tests/` (rules, tools against the world, a
+6. Tests under `vamos_agents/<name>/tests/` (rules, tools against the world, a
    `/voice` smoke test with a fake provider, the wall-clock guard).
 7. Add an `AgentCase` to `tests/fakes.AGENT_CASES` (the parity matrix fails until you do).
-8. `agents/<name>/README.md`; a row in this file's agent table and config table (section 11).
+8. `vamos_agents/<name>/README.md`; a row in this file's agent table and config table (section 11).
 9. Build `--build-arg AGENT=<name> --build-arg VENDOR=<v>` for each vendor.
 
 Nothing in `vamos_voice/` changes. If it seems to need to, the change is a
@@ -227,7 +227,7 @@ Framework (every image):
 
 | Variable | Set by | Meaning |
 |---|---|---|
-| `VAMOS_AGENT` | image (`ARG AGENT`) | Which `agents/<name>` runs. |
+| `VAMOS_AGENT` | image (`ARG AGENT`) | Which `vamos_agents/<name>` runs. |
 | `VAMOS_VENDOR` | image (`ARG VENDOR`) | Which `vamos_voice/providers/<name>` runs. |
 | `VERIS_AGENT_CONTEXT` | bench, per attempt | JSON object of strings; parsed into `AgentContext`. Absent = empty (inbound agents may not get one). |
 | `PORT` | image | Default `8008`. |
@@ -349,13 +349,13 @@ on paper; it fits without framework changes, and the test-only
 | Speaks first with a fixed `GREETING` ("Thanks for calling Acme Energy, this is Rory…"), triggered 15 ways | `call_start = agent_first(f'Greet the caller with exactly: "{GREETING}"')`; no connect reads (the caller is unknown until verified) |
 | No per-call context; `RORY_REFERENCE_TIME` (ISO or epoch), frozen, falls back to wall time | `from_env` parses `RORY_REFERENCE_TIME` (required, no wall-time fallback); `call_time()` returns it; `CallClock` adds elapsed time; `AgentContext` stays empty |
 | `verify_caller(account_number, name_on_account, second_factor)`; everything except `verify_caller`/`transfer_to_human` refused until `session.account` is set; 3 attempts | `GateLadder` with levels `CALLER < VERIFIED`; the two tools declare no `requires`, the other 14 declare `VERIFIED`; attempts counted on the call state |
-| 16 tools: Stripe-only (bills, payment, extension, paperless, supplier), Fineract+Stripe (account, history, arrangements), none (transfer) | One `ToolRegistry` in `agents/rory/tools/`; `make_payment` declares its card fields in `redact` |
+| 16 tools: Stripe-only (bills, payment, extension, paperless, supplier), Fineract+Stripe (account, history, arrangements), none (transfer) | One `ToolRegistry` in `vamos_agents/rory/tools/`; `make_payment` declares its card fields in `redact` |
 | Stripe via module globals; Fineract via `httpx` Basic auth + `Fineract-Platform-TenantId` (`FINERACT_API_BASE`, `_USER`, `_PASSWORD`, `_TENANT`) | `required_env = ("STRIPE_API_KEY", "FINERACT_API_BASE")`; `from_env` builds a `StripeClient` instance and a Fineract client; `connect()` checks both |
 | Prompt `agent_desc.txt` + `today_context()` | `instructions(clock)`: the prompt plus the date from `clock` |
 | Per-call `CallSession` with `account`, `failed_attempts`; no `end_call` | `open_call(clock)` returns that state; add an `end_call` tool so providers can hang up (or rely on the caller hanging up; `ended` stays False) |
 | Vapi/PolyAI/Cartesia hosted vendors calling back over HTTP | Out of scope for the framework (no inbound endpoints); such a vendor would be a provider with its own authenticated callback, a framework decision to make then |
 
-Migration path (optional, later): move `rory_tools/` into `agents/rory/` as the
+Migration path (optional, later): move `rory_tools/` into `vamos_agents/rory/` as the
 pack above; port vendors one at a time into `vamos_voice/providers/` only where
 the framework lacks them (Deepgram Agent, ElevenLabs, Grok as a
 `RealtimeProtocolProvider` subclass...); add `rory` to `AGENT_CASES`; build
@@ -375,7 +375,7 @@ uv run ruff check . && uv run ruff format --check .
   discovery, `AgentContext`, the gate engine and dispatch (refusals, redaction, never raises).
 - `tests/test_parity.py`: agents x vendors, on the frames each provider sends.
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
-- `agents/remi/tests/`: Remi's rules, tools against a real Postgres
+- `vamos_agents/remi/tests/`: Remi's rules, tools against a real Postgres
   (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`), Stripe
   gateway against an httpx mock, `/voice` smoke test.
 

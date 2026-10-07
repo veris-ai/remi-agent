@@ -49,9 +49,9 @@ class AgentCase:
 
 
 def _remi() -> AgentSpec:
-    from agents.remi import RemiAgent
-    from agents.remi.context import CallContext
-    from agents.remi.world import Agency
+    from vamos_agents.remi import RemiAgent
+    from vamos_agents.remi.context import CallContext
+    from vamos_agents.remi.world import Agency
 
     context = CallContext("TAS-420101", "ph_420101_1", datetime.fromisoformat("2027-02-10T09:00:00-05:00"))
     agent = RemiAgent(context, connect_db=_no_db, payments=None)  # type: ignore[arg-type]
