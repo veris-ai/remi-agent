@@ -8,7 +8,7 @@ FROM python:3.12.13-slim-bookworm
 ARG AGENT
 ARG VENDOR
 RUN test -n "$AGENT" || (echo "build with --build-arg AGENT=<folder under vamos_agents/, e.g. remi>" >&2 && false)
-RUN test -n "$VENDOR" || (echo "build with --build-arg VENDOR=<openai_realtime|gemini_live|grok_voice|gpt_live|pipecat>" >&2 && false)
+RUN test -n "$VENDOR" || (echo "build with --build-arg VENDOR=<a folder under vamos_voice/providers/, e.g. openai_realtime>" >&2 && false)
 
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \

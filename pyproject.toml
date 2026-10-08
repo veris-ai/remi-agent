@@ -31,6 +31,14 @@ pipecat = [
     "pipecat-ai[deepgram,cartesia,openai,silero,websocket]>=1.12,<1.13",
     "openai>=3.0,<4",
 ]
+# Managed voice agents: the vendor runs STT, LLM and TTS; tools are client-side over the socket.
+deepgram = []
+elevenlabs = [
+    "httpx>=0.28,<0.29",  # the per-call stored agent (create/delete)
+]
+fluxions = [
+    "httpx>=0.28,<0.29",  # GET /config (the soul cap) and /voices at warm-up
+]
 
 [dependency-groups]
 dev = [

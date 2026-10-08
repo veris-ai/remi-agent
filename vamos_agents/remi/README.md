@@ -134,6 +134,19 @@ arrangement that depends on it land together.
 
 Plus the framework's and the vendor's variables (AGENTS.md section 11).
 
+## On the managed voice agents (Deepgram, ElevenLabs, Fluxions)
+
+These vendors run STT, the LLM and TTS on their side; Remi's tools come back
+over the same socket as client-side calls, so every call still goes through
+Remi's gates. What differs for Remi (AGENTS.md section 10 has the protocol
+details):
+
+| Vendor | Bench candidate | Remi-specific notes |
+|---|---|---|
+| `deepgram` (`remi-deepgram`) | `trace_adapter: deepgram-voice-agent`; candidate-env `DEEPGRAM_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json` (+ optional `VAMOS_DEEPGRAM_LLM_MODEL`, default `gpt-4.1-mini`) | No greeting in `Settings`: Remi stays silent until the callee's first words. Checked against the live API: no agent audio before "Hello?", tool calls round-trip, `end_call` hangs up after the goodbye. |
+| `elevenlabs` (`remi-elevenlabs`) | `trace_adapter: elevenlabs-convai`; candidate-env `ELEVENLABS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json` (+ optional `VAMOS_ELEVENLABS_LLM`, default `gpt-4.1-mini`) | A stored agent is created per call with Remi's instructions (screen pop included) and deleted after it: about 2 s between `/voice` connecting and the vendor hearing the callee (their "Hello?" is buffered, not lost). Parameters Remi leaves undescribed get their own name as description (ElevenLabs requires one). Checked against the live API, agents cleaned up. |
+| `fluxions` (`remi-fluxions`) | `trace_adapter: fluxions-realtime`; candidate-env `FLUXIONS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json`; no `public_endpoint` | **Remi cannot run on `api.fluxions.ai` today:** its instructions are ~14,300 characters with the screen pop and that host keeps 4,000 of the soul (silently). The provider refuses such a call before connecting rather than run Remi on a third of its policy. It needs a Fluxions host with a larger `max_soul_chars` (`VAMOS_FLUXIONS_BASE_URL`). The protocol itself was checked live with a cut prompt (callee first, tool calls, paced playback). |
+
 ## Tests
 
 ```bash
