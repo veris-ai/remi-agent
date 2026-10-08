@@ -40,6 +40,7 @@ vamos_voice/                      # the framework: never imports an agent
   registry.py                     # VAMOS_AGENT=<name> -> vamos_agents.<name>.AGENT
   context.py                      # AgentContext (VERIS_AGENT_CONTEXT as a str map) + CallClock
   call_start.py                   # CallStartPolicy: callee_first (outbound) / agent_first (inbound)
+  screen_pop.py                   # ScreenPop: the agent's connect-time reads, appended to the instructions
   audio.py                        # PCM16 helpers, streaming resampler
   tools/registry.py               # ToolRegistry: pydantic args -> one JSON schema, requires/redact/tags
   session/engine.py               # CallSession: the one dispatch path (gates, redaction, never raises)
@@ -65,11 +66,12 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
                          ▼
 ┌──────────────── vamos_voice/server.py (one app, every agent x vendor) ────────────────┐
 │ GET /health  503 until agent.connect() and provider.warm_up() finish                  │
-│ WS  /voice   one call per pod: clock, CallSession, CallRuntime → provider.run_call()  │
+│ WS  /voice   one call per pod: clock, CallSession, agent.screen_pop() (connect reads, │
+│              before any vendor session), CallRuntime → provider.run_call()            │
 │              → agent state's finalize()                                               │
 └───────────────────────────────────────────────────────────────────────────────────────┘
-      │ CallRuntime: setup (instructions, tool specs, TurnTaking, CallStartPolicy)
-      │              start (CallStart)  inbound (held while priming)  outbound (gated)
+      │ CallRuntime: setup (instructions + screen pop, tool specs, TurnTaking, CallStartPolicy)
+      │              start (CallStart)  inbound (caller audio)  outbound (gated)
       ▼
 ┌──────── VoiceProvider (providers/base.py): the vendor seam ────────┐
 │ openai_realtime → RealtimeProtocolProvider (GA protocol, once)     │
@@ -83,8 +85,9 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 ┌──────── CallSession (session/engine.py) ────────┐      ┌──────── AgentSpec (vamos_agents/<name>/) ────────┐
 │ registry lookup → gates.refusal(state, tool)    │◀─────│ tools (ToolRegistry)   gates (Gates)        │
 │ → args validation → handler(state, args)        │      │ call_start   instructions(clock)            │
-│ redact in logs; track connect reads             │      │ open_call(clock) → per-call state           │
-└─────────────────────────────────────────────────┘      │ from_env / connect / close: world clients   │
+│ redact in logs                                  │      │ open_call(clock) → per-call state           │
+└─────────────────────────────────────────────────┘      │ screen_pop(state) → ScreenPop (reads done)  │
+                                                         │ from_env / connect / close: world clients   │
                                                          └─────────────────────────────────────────────┘
 ```
 
@@ -110,7 +113,7 @@ sends first makes the actor record `client_end`, a normal end.
 
 **One hang-up path.** `CallerLine.close()` is the hang-up for every socket
 vendor: the agent's hang-up tool (`CallRuntime.hang_up`, after the last words
-play), a provider failure (priming included) and the server's end of call all
+play), a provider failure and the server's end of call all
 go through it, so a deliberate end in `json` always sends `end` before the
 close. Pipecat owns its transport, so its `LineSerializer` applies the same
 `Framing`: the pipeline's `EndFrame`/`CancelFrame` is written as `end` before
@@ -121,8 +124,8 @@ Pipecat closes with 1000, and a caller's `end` cancels the pipeline.
 | Lives in `vamos_voice/` (framework) | Lives in `vamos_agents/<name>/` (pack) |
 |---|---|
 | server, `/health`, `/voice`, one call per pod | the agent's name, persona, prompt text |
-| `CallerLine`, held inbound audio, gated outbound audio, barge-in playout | the per-call state and its `finalize()` (e.g. Remi's contact-attempt row) |
-| `CallStartPolicy` mechanics in every provider | which policy, which connect reads, what the opening says |
+| `CallerLine`, inbound audio, gated outbound audio, barge-in playout | the per-call state and its `finalize()` (e.g. Remi's contact-attempt row) |
+| `CallStartPolicy` mechanics in every provider; running the screen pop before any vendor session | which policy, what the opening says; the screen pop (which reads, how they render, what they record on the state) |
 | `AgentContext` (string map), `CallClock` | the typed view of the context (Remi: account, phone, call time in Eastern) |
 | `ToolRegistry`, JSON-schema reduction, `CallSession.dispatch`, redaction | the tools, their gates (levels and messages), domain rules (`policy.py`) |
 | `GateLadder` engine | the ladder's levels and explanations |
@@ -131,7 +134,7 @@ Pipecat closes with 1000, and a caller's `end` cancels the pipeline.
 Why the line is there:
 
 - **Vendor work is the expensive, drift-prone part.** Barge-in truncation,
-  priming, held audio, VAD mapping and trace-friendly sockets are written
+  the call-start gate, VAD mapping and trace-friendly sockets are written
   once and tested once (`tests/test_parity.py`), for every agent.
 - **Rules belong to an agent.** A benchmark grades its own policy; nothing
   domain-specific may leak into the framework, or the next agent inherits the
@@ -163,6 +166,7 @@ class AgentSpec(abc.ABC):
     async def close(self) -> None: ...
     def instructions(self, clock: CallClock) -> str: ...  # from context + clock only: identical per vendor
     def open_call(self, clock: CallClock) -> CallState: ...  # per-call state; handlers receive it
+    async def screen_pop(self, call: CallState) -> ScreenPop | None: ...  # optional (section 6)
     def describe(self) -> str: ...  # one log line, no secrets
 ```
 
@@ -184,36 +188,66 @@ Supporting pieces an agent uses:
 Discovery: `VAMOS_AGENT=<name>` → `vamos_voice.registry.load_agent` imports
 `vamos_agents.<name>` and validates `AGENT`. No framework edit adds an agent.
 
-## 6. Call start: inbound vs outbound
+## 6. Call start: the screen pop, then who speaks first
 
-`vamos_voice/call_start.py`. Every provider honours the policy the same way.
+### The screen pop (`vamos_voice/screen_pop.py`)
 
-| | `callee_first(connect_reads, prime_instruction)` (outbound: Remi) | `agent_first(opening_instruction, connect_reads=(), prime_instruction="")` (inbound: Rory, Riley) |
+A real collector's dialer shows the account on screen when the call
+connects; nobody looks it up while the person says "Hello?". Agents do the
+same. `AgentSpec.screen_pop(call)` runs the agent's connect-time reads
+**itself**, on the call's fresh state, through its own world clients and the
+same handlers its tools use (no second copy of the SQL), records them on the
+state so its gates treat them as done, and returns a `ScreenPop(heading,
+body)`. The server (`call_runtime`) runs it once per call, after the state
+exists and **before the provider opens its vendor session**, and appends
+`# <heading>` and the body to the instructions every vendor receives.
+
+So, for every vendor identically:
+
+- the reads finish before any caller audio reaches a vendor and before any
+  agent audio reaches the caller (the vendor session does not exist yet);
+- they are the agent's own SQL on its own database role, so the World's SQL
+  log shows them first (Remi's grader accepts the model's tool calls *or* the
+  SQL log's SELECTs on accounts/phones/contact_attempts before the first
+  spoken turn);
+- the model knows the account from its first token: the section is part of
+  the session instructions (OpenAI/Grok `session.update`, Gemini
+  `systemInstruction`, GPT-Live `session.start` for both the live model and its
+  backend, Pipecat's system instruction);
+- nothing asks the model to act before the callee speaks: no forced
+  `tool_choice`, no priming response, no labelled note, no instruction append.
+
+What the section shows is the agent's to decide, under its own redaction rules
+(Remi renders exactly the redacted dicts its read tools return: no date of
+birth, ZIP, SSN or street; verification stays server-side). The agent still
+decides everything from that data (should-not-call, cap reached, cease on
+file) and still discloses nothing it should not: the policy is unchanged.
+
+A screen pop that raises is logged (`screen pop failed for <agent>`) and the
+call starts without the section; the read tools still exist, the instructions
+say to run them when the section is missing, and the gates name any read not
+done. An agent with nothing to show returns None (the default).
+
+**Why not priming.** The framework used to "prime" the model: hold the
+caller's audio and make the model call the reads (forced `tool_choice` on
+OpenAI and Pipecat, labelled notes on Gemini and Grok, the backend's
+`tool_choice` on GPT-Live) under a 6 s deadline. It was unreliable and
+vendor-dependent (mini-run `trial_5sy9iim6ancmrxjd9pp0b`): on GPT-Live the
+reads never ran, the deadline fired and the model, with no account, asked for
+"Dana Whitlock" (the agency's callback contact) instead of the consumer (0/10);
+on gpt-realtime sometimes only `get_account` ran before it spoke. The reads
+are plumbing, not behaviour under test, so the agent does them, the same way
+on every vendor; turn taking stays each vendor's own.
+
+### Who speaks first (`vamos_voice/call_start.py`)
+
+| | `callee_first()` (outbound: Remi) | `agent_first(opening_instruction)` (inbound: Rory, Riley) |
 |---|---|---|
-| Before anyone speaks | the connect reads run as **real tool calls** (so the judge's trace shows them first); caller audio is **held, not dropped** | optional connect reads, same mechanism |
-| First words | the callee's: no agent audio leaves until their first utterance is detected; anything earlier is dropped | the agent's: the provider requests an opening turn carrying `opening_instruction`; audio flows at once |
-| OpenAI Realtime | a text-only `response.create` (`output_modalities: ["text"]`, per response; the session stays audio) + `tool_choice: "required"` + `instructions = session instructions + prime_instruction`, then each skipped read by name; then release held audio | then `response.create` with `instructions = session instructions + opening_instruction` |
-| Gemini Live (no forced tool choice) | a user-role text turn labelled `[Call system note, not the person on the line]` | then the opening as the same kind of labelled note |
-| Grok Voice (no forced tool choice) | the Gemini fallback in Realtime frames: a labelled user-role `conversation.item.create` + `response.create`; a skipped read is asked for again by name | `response.create` with per-response `instructions`, as OpenAI |
-| GPT-Live (tools live on a delegated Responses backend) | `session.start` with the backend's `tool_choice: "required"`; `session.instructions.append` (`prime_instruction`) makes the live model delegate; each missing read forced by name via `session.update`; then `tool_choice: "auto"` | `session.instructions.append` with `opening_instruction`, after `session.started` |
-| Pipecat | a forced chat completion through the instrumented `openai` SDK; reads land in the pipeline's context | then, when the caller's socket connects, `LLMMessagesAppendFrame(opening, run_llm=True)` |
-
-**Priming deadline.** Priming never holds a caller forever: a model can skip
-the reads, or a vendor can stall. If the connect reads are not all done within
-`VAMOS_PRIMING_TIMEOUT_S` (default 6 s, `call_start.PRIMING_TIMEOUT_S`), every
-priming provider stops priming and releases the held audio, logging a warning
-that names the missing reads. `CallStart.priming_deadline` runs beside the
-call loops for the socket vendors; Pipecat bounds its priming completions the
-same way. GPT-Live also sets the backend's `tool_choice` back to `"auto"`.
-
-The framework does **not** run the reads itself on the model's behalf. The
-judge's trace must show only what the model did, and a read the model never
-asked for would put words in its mouth. The agent's gates take over instead:
-Remi refuses every tool beyond the reads with "Run the connect-time reads
-first: <the missing ones>", so the model runs them on its next turn, before it
-can discuss or take money. A late priming reply after the deadline is handled
-as an ordinary turn: on the Realtime protocol a priming response still in
-flight at the deadline is left to the vendor (its reads count if they arrive).
+| First words | the callee's: caller audio flows to the vendor at once; no agent audio leaves until their first utterance is detected; anything earlier is dropped | the agent's: the provider requests an opening turn carrying `opening_instruction`; audio flows at once |
+| OpenAI Realtime / Grok Voice | nothing is requested; the vendor's VAD answers the callee | `response.create` with `instructions = session instructions + opening_instruction` |
+| Gemini Live | nothing is requested | a user-role text turn labelled `[Call system note, not the person on the line]` carrying the opening (the Live API has no other way to ask for a turn) |
+| GPT-Live | nothing is requested | `session.instructions.append` with `opening_instruction`, after `session.started` |
+| Pipecat | the LLM runs only on a user turn | `LLMMessagesAppendFrame(opening, run_llm=True)` when the caller's socket connects |
 
 ### After the call start: turns (Realtime protocol)
 
@@ -252,7 +286,8 @@ over every framework module and every Remi module.
 
 1. `vamos_agents/<name>/` with `__init__.py` exporting `AGENT = <Name>Agent`.
 2. `<Name>Agent(AgentSpec)`: `name = "<name>"`, `call_start`, `tools`, `gates`,
-   `required_env`, `from_env`, `call_time`, `connect`/`close`, `instructions`, `open_call`.
+   `required_env`, `from_env`, `call_time`, `connect`/`close`, `instructions`, `open_call`,
+   and `screen_pop` if the agent knows who it is talking to when the call connects (section 6).
 3. A per-call state with `ended` and `finalize()`; a hang-up tool that sets `ended`.
 4. World clients built in `from_env` from the agent's own env vars (no module
    globals, every network call with a timeout), opened in `connect()`.
@@ -276,9 +311,10 @@ Remi, and document it here.
    and `run_call`; export `PROVIDER`.
 2. A `ToolFormat` converting `setup.tools` to the vendor's declarations.
 3. Map `setup.turn_taking` onto the vendor's VAD; send `setup.instructions` verbatim.
-4. Call start: if `call.session.missing_reads`, force them (section 6); then
-   `call.start.mark_primed()`, `await call.inbound.release()`, and if
-   `setup.start_policy.agent_opens` request the opening turn. Call
+4. Call start: send `setup.instructions` (the screen pop is already in them)
+   in the session setup; once the vendor accepts audio, `call.inbound.bind(...)`
+   and run `call.inbound.run()`; if `setup.start_policy.agent_opens` request
+   the opening turn. Never ask the model to act before the callee speaks. Call
    `call.start.mark_callee_spoke()` on the vendor's first user-turn signal;
    send agent audio only via `call.outbound.send`.
 5. Route every tool call to `call.session.dispatch` and send its dict back;
@@ -301,17 +337,15 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 
 | Capability | openai_realtime | grok_voice | gemini_live | gpt_live | pipecat |
 |---|---|---|---|---|---|
-| Forced tool choice for priming | `response.create` `tool_choice` | **no** (undocumented): labelled note fallback | **no**: labelled note | on the backend only: `session.update` `delegation.responses.tool_choice` | `tool_choice` on the SDK call |
+| Forced tool choice (never used: the screen pop needs none) | `response.create` `tool_choice` | **no** (undocumented) | **no** | on the backend only (left `"auto"`) | `tool_choice` on the SDK call |
 | Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`) | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
 | Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |
 | `TurnTaking` mapping | silence, prefix padding, threshold | silence only (`threshold`/`prefix_padding_ms` not documented; xAI defaults) | silence, prefix padding | **none**: no VAD settings exist | silence via VAD + turn timeout |
 | Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat |
 | Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
 
-`RealtimeProtocolProvider` exposes the hooks dialects differ on:
-`priming_frames(setup, missing, first)` (default: text-only forced `tool_choice`),
-and `truncates_on_barge_in` (default `True`). `CallStartPolicy.reprime_instruction`
-/ `reprime_note` are the shared "still missing" wording.
+`RealtimeProtocolProvider` exposes the hook dialects differ on:
+`truncates_on_barge_in` (default `True`).
 
 ## 11. Config contract (environment)
 
@@ -325,7 +359,6 @@ Framework (every image):
 | `PORT` | image | Default `8008`. |
 | `VAMOS_LOG_LEVEL` | optional | Default `INFO`. |
 | `VAMOS_VOICE_FRAMING` | candidate `image.env` | `/voice` framing, `binary` (default) or `json` (section 3, "Framing"); must match the channel's `protocol`. Bench candidates use `json`. Anything else stops startup. |
-| `VAMOS_PRIMING_TIMEOUT_S` | optional | Seconds the connect reads may hold the caller before priming is abandoned (section 6). Default `6`; must be a positive number. |
 
 Vendors:
 
@@ -369,15 +402,17 @@ reserved prefix (`tests/test_parity.py` pins the key names).
 
 The judge reads an agent trace built by the bench's OTel bundle; for Remi its
 first check is that the account, dialed-phone and contact-history reads come
-before anyone is asked for by name. Priming exists to make that true.
+before anyone is asked for by name. The screen pop (section 6) makes that true
+through the World's SQL log, which the grader accepts as well as tool calls;
+the trace shows the reads' results in the session instructions.
 
 | Vendor | `trace_adapter` | How the trace is built | Requirement |
 |---|---|---|---|
 | `openai_realtime` | `openai-realtime` | The adapter hooks the `websockets` asyncio client's `send`/`recv` and reads GA Realtime events. | Keep traffic on `wire.connect_websocket`, JSON text frames; keep `audio.input.transcription` on so the caller's words are traced. |
-| `grok_voice` | `openai-realtime` | The Realtime adapter, which already reads Grok's dialect (top-level `turn_detection`, no `output_item.added`, no `response.done` for a response cancelled by speech). | `grok-transcribe` on, or the caller is missing from the trace. Priming notes are user-role *items*, not transcriptions, so the adapter does not record them as the caller. |
-| `gpt_live` | `gpt-live` | Same hook: system and model from `session.start`, tools from `session.delegation.responses.tools`, tool calls from nested `response.output_item.done`, results from `response.item.create`, both speakers from timed transcript deltas. | Tools only on the delegation backend; results only via `response.item.create`. Priming instructions are `session.instructions.append` and never appear as the caller. |
-| `gemini_live` | `gemini-live` | Same hook; camelCase setup/toolCall/toolResponse frames. | **Developer API only** (function calls carry `id`s; Vertex omits them). Priming/opening notes appear as labelled `user` turns. |
-| `pipecat` | none (omit) | The LLM runs in-process through the `openai` SDK, which the bundle instruments (OpenInference `OpenAIInstrumentor`): each completion is an LLM span with tool calls; results arrive in the next request. | Keep LLM calls on the `openai` SDK, including priming. |
+| `grok_voice` | `openai-realtime` | The Realtime adapter, which already reads Grok's dialect (top-level `turn_detection`, no `output_item.added`, no `response.done` for a response cancelled by speech). | `grok-transcribe` on, or the caller is missing from the trace. |
+| `gpt_live` | `gpt-live` | Same hook: system and model from `session.start`, tools from `session.delegation.responses.tools`, tool calls from nested `response.output_item.done`, results from `response.item.create`, both speakers from timed transcript deltas. | Tools only on the delegation backend; results only via `response.item.create`. An opening instruction is `session.instructions.append` and never appears as the caller. |
+| `gemini_live` | `gemini-live` | Same hook; camelCase setup/toolCall/toolResponse frames. | **Developer API only** (function calls carry `id`s; Vertex omits them). Opening notes appear as labelled `user` turns. |
+| `pipecat` | none (omit) | The LLM runs in-process through the `openai` SDK, which the bundle instruments (OpenInference `OpenAIInstrumentor`): each completion is an LLM span with tool calls; results arrive in the next request. | Keep LLM calls on the `openai` SDK. |
 
 ## 13. Build, push, register on the bench
 
@@ -477,7 +512,7 @@ on paper; it fits without framework changes, and the test-only
 
 | Rory today | As an `AgentSpec` |
 |---|---|
-| Speaks first with a fixed `GREETING` ("Thanks for calling Acme Energy, this is Rory…"), triggered 15 ways | `call_start = agent_first(f'Greet the caller with exactly: "{GREETING}"')`; no connect reads (the caller is unknown until verified) |
+| Speaks first with a fixed `GREETING` ("Thanks for calling Acme Energy, this is Rory…"), triggered 15 ways | `call_start = agent_first(f'Greet the caller with exactly: "{GREETING}"')`; no screen pop (the caller is unknown until verified) |
 | No per-call context; `RORY_REFERENCE_TIME` (ISO or epoch), frozen, falls back to wall time | `from_env` parses `RORY_REFERENCE_TIME` (required, no wall-time fallback); `call_time()` returns it; `CallClock` adds elapsed time; `AgentContext` stays empty |
 | `verify_caller(account_number, name_on_account, second_factor)`; everything except `verify_caller`/`transfer_to_human` refused until `session.account` is set; 3 attempts | `GateLadder` with levels `CALLER < VERIFIED`; the two tools declare no `requires`, the other 14 declare `VERIFIED`; attempts counted on the call state |
 | 16 tools: Stripe-only (bills, payment, extension, paperless, supplier), Fineract+Stripe (account, history, arrangements), none (transfer) | One `ToolRegistry` in `vamos_agents/rory/tools/`; `make_payment` declares its card fields in `redact` |
@@ -503,13 +538,16 @@ uv run ruff check . && uv run ruff format --check .
 ```
 
 - `tests/test_framework.py`: the boundary (no `agents` import, no wall clock),
-  discovery, `AgentContext`, the gate engine and dispatch (refusals, redaction, never raises).
-- `tests/test_parity.py`: agents x vendors, on the frames each provider sends.
+  discovery, `AgentContext`, the gate engine and dispatch (refusals, redaction, never raises),
+  the screen pop (appended, marks the state; a failure is logged and the call goes on).
+- `tests/test_parity.py`: agents x vendors, on the frames each provider sends, including
+  Remi's screen pop (reads before any vendor frame, section in the setup, no secrets, no
+  forced tool choice, gates past the reads).
 - `tests/test_grok_voice.py`, `tests/test_gpt_live.py`: each vendor's own
-  frame translation (session shape, priming fallback / backend forcing,
+  frame translation (session shape, the screen pop in both GPT-Live instruction sets,
   barge-in, end of call), pinned where it differs from OpenAI Realtime.
-- `tests/test_realtime_turns.py`: the Realtime call flow after priming (text-only priming,
-  vendor-native turn taking, the deadline mid-priming, a request refused for an active response).
+- `tests/test_realtime_turns.py`: the Realtime call flow (nothing but the session at call start,
+  vendor-native turn taking, a request refused for an active response).
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
 - `tests/test_framing.py`: both framings, alone and through the real server (agent hang-up
   sends `end` before the 1000 close, a caller's `end` finalizes the call, binary unchanged),

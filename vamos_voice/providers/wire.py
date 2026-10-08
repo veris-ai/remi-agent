@@ -32,22 +32,14 @@ def connect_websocket(url: str, headers: Mapping[str, str]) -> AbstractAsyncCont
     )
 
 
-async def run_until_first_done(
-    *background: Coroutine[Any, Any, None], **loops: Coroutine[Any, Any, None]
-) -> None:
+async def run_until_first_done(**loops: Coroutine[Any, Any, None]) -> None:
     """Run the call's loops (caller→vendor, vendor→caller) until one ends; cancel the rest,
-    and re-raise the first failure. ``background`` coroutines (e.g. the priming deadline) run
-    alongside: finishing does not end the call, failing does."""
-    loop_tasks = {asyncio.create_task(coro, name=name) for name, coro in loops.items()}
-    tasks = loop_tasks | {asyncio.create_task(coro) for coro in background}
-    pending = set(tasks)
+    and re-raise the first failure."""
+    tasks = {asyncio.create_task(coro, name=name) for name, coro in loops.items()}
     try:
-        while True:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-            if done & loop_tasks:
-                return
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
     finally:
         for task in tasks:
             task.cancel()

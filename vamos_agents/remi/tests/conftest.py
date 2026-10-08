@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from vamos_agents.remi.agent import CALLEE_FIRST, RemiAgent
+from vamos_agents.remi.agent import RemiAgent
 from vamos_agents.remi.call import RemiCall
 from vamos_agents.remi.context import CallContext
 from vamos_agents.remi.db import Database
@@ -61,9 +61,7 @@ async def make_session(
         ctx = call_context or context
         clock = CallClock(ctx.call_time, monotonic=ticks)
         clock.start()
-        return CallSession(
-            RemiCall(ctx, clock, db), RemiAgent.tools, RemiAgent.gates, CALLEE_FIRST.connect_reads
-        )
+        return CallSession(RemiCall(ctx, clock, db), RemiAgent.tools, RemiAgent.gates)
 
     yield build
     for db in opened:

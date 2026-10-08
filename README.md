@@ -28,8 +28,10 @@ curl localhost:8008/health
 
 `AGENT` is a folder under `vamos_agents/`; `VENDOR` is one of `openai_realtime`,
 `grok_voice` (xAI, key `XAI_API_KEY`), `gpt_live` (OpenAI GPT-Live),
-`gemini_live`, `pipecat`. Vendors differ in what they support (forced tool
-choice, barge-in truncation, VAD settings); AGENTS.md section 10 lists the
+`gemini_live`, `pipecat`. Vendors differ in what they support (barge-in
+truncation, VAD settings); what the agent knows when the call connects does
+not: the agent's own screen pop puts it in every vendor's instructions
+(AGENTS.md section 6). AGENTS.md section 10 lists the
 differences and how each is handled. The voice channel is `ws://<host>:8008/voice`
 (PCM16, 24 kHz, mono): raw binary frames by default, or base64 JSON envelopes
 with an in-band `{"type": "end"}` hang-up when `VAMOS_VOICE_FRAMING=json`, which

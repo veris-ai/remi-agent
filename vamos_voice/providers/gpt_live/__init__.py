@@ -26,16 +26,12 @@ The protocol (developers.openai.com "Live conversations", "Live delegation"):
   makes it act with ``session.instructions.append`` (a trusted instruction,
   not a user turn, so nothing has to be labelled).
 
-Call start (``CALLEE_FIRST``): the session starts with the backend's
-``tool_choice: "required"`` and the caller's audio held. An instruction append
-(the policy's ``prime_instruction``) makes the live model delegate; the
-backend must answer with a tool call. Each read still missing is then forced
-by name via ``session.update`` before the backend continues; once all are in,
-``tool_choice`` goes back to ``"auto"``, the held audio is released, and no
-agent audio leaves before the callee's first transcribed words.
-
-Call start (``AGENT_FIRST``): after ``session.started`` (and any connect
-reads), an instruction append carrying the policy's ``opening_instruction``.
+Call start: ``session.start`` carries the instructions with the agent's
+screen pop already in them, for the live model and, after the preamble, for
+the backend, whose ``tool_choice`` is ``"auto"``: no read is ever forced.
+Caller audio flows after ``session.started``. ``CALLEE_FIRST``: no agent
+audio leaves before the callee's first transcribed words. ``AGENT_FIRST``: an
+instruction append carrying the policy's ``opening_instruction``.
 """
 
 from __future__ import annotations
@@ -72,14 +68,6 @@ BACKEND_PREAMBLE = (
 )
 
 
-def tool_choice_update(choice: Any) -> dict[str, Any]:
-    """``session.update`` changing only the backend's ``tool_choice`` (the one mutable part)."""
-    return {
-        "type": "session.update",
-        "session": {"delegation": {"type": "responses", "responses": {"tool_choice": choice}}},
-    }
-
-
 def instruction(content: str) -> dict[str, Any]:
     """``session.instructions.append`` for the whole session (not one delegation)."""
     return {"type": "session.instructions.append", "delegation_id": None, "content": content}
@@ -106,8 +94,8 @@ class GptLiveProvider(VoiceProvider):
             voice=env.get("VAMOS_GPT_LIVE_VOICE") or DEFAULT_VOICE,
         )
 
-    def session_start(self, setup: SessionSetup, force_tools: bool) -> dict[str, Any]:
-        """The one ``session.start``; ``force_tools`` while connect reads are still to run."""
+    def session_start(self, setup: SessionSetup) -> dict[str, Any]:
+        """The one ``session.start``."""
         return {
             "type": "session.start",
             "session": {
@@ -120,7 +108,7 @@ class GptLiveProvider(VoiceProvider):
                         "model": self.backend_model,
                         "instructions": BACKEND_PREAMBLE + setup.instructions,
                         "tools": self.tool_format.convert(setup.tools),
-                        "tool_choice": "required" if force_tools else "auto",
+                        "tool_choice": "auto",
                         # One call per run, answered before the next: a call may depend on the last result.
                         "parallel_tool_calls": False,
                     },
@@ -138,7 +126,6 @@ class _LiveCall:
 
     def __init__(self, provider: GptLiveProvider, ws: Any, call: CallRuntime) -> None:
         self.provider, self.ws, self.call = provider, ws, call
-        self.priming = True
         #: Completed function calls per delegation, answered when its backend run completes.
         self.pending: dict[str, list[dict[str, Any]]] = {}
 
@@ -155,8 +142,7 @@ class _LiveCall:
 
     async def run(self) -> None:
         call = self.call
-        missing = call.session.missing_reads
-        await self.send(self.provider.session_start(call.setup, force_tools=bool(missing)))
+        await self.send(self.provider.session_start(call.setup))
         while (event := await self.recv()) is not None and event.get("type") != "session.started":
             if event.get("type") == "error":
                 raise RuntimeError(f"gpt-live error before session.started: {event.get('error')}")
@@ -167,15 +153,9 @@ class _LiveCall:
             await self.send({"type": "session.input_audio.append", "audio": base64.b64encode(pcm).decode()})
 
         call.inbound.bind(forward)
-        if missing:
-            await self.send(instruction(call.setup.start_policy.prime_instruction))
-        else:
-            await self.finish_priming()
-        await run_until_first_done(
-            call.start.priming_deadline(lambda: call.session.missing_reads, self.abandon_priming),
-            caller_to_vendor=call.inbound.run(),
-            vendor_to_caller=self.events(),
-        )
+        if call.setup.start_policy.agent_opens:
+            await self.send(instruction(call.setup.start_policy.opening_instruction))
+        await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
 
     async def events(self) -> None:
         while (event := await self.recv()) is not None:
@@ -189,7 +169,7 @@ class _LiveCall:
         if kind == "session.output_audio.delta":
             await call.outbound.send(base64.b64decode(event.get("delta", "")), AUDIO_ITEM)
         elif kind == "session.input_transcript.delta":
-            if event.get("delta", "").strip() and call.start.primed:
+            if event.get("delta", "").strip():
                 call.start.mark_callee_spoke()
         elif kind == "response.event":
             return await self.on_backend_event(event.get("delegation_id") or "", event.get("event") or {})
@@ -213,7 +193,7 @@ class _LiveCall:
         return False
 
     async def run_completed(self, calls: list[dict[str, Any]]) -> bool:
-        """A backend run finished: answer its calls, then continue the backend (forcing reads while priming)."""
+        """A backend run finished: answer its calls, then continue the backend."""
         call = self.call
         for item in calls:
             output = await dispatch_json_call(call.session, item["name"], item.get("arguments"))
@@ -232,42 +212,9 @@ class _LiveCall:
             await call.hang_up()
             await self.send({"type": "session.close"})
             return True
-        if self.priming:
-            if missing := call.session.missing_reads:
-                if not calls:  # the live model answered without delegating: ask again
-                    await self.send(instruction(call.setup.start_policy.reprime_instruction(missing)))
-                    return False
-                await self.send(tool_choice_update({"type": "function", "name": missing[0]}))
-                await self.send({"type": "response.create"})
-                return False
-            await self.send(tool_choice_update("auto"))
-            if calls:
-                await self.send({"type": "response.create"})
-            await self.finish_priming()
-            return False
         if calls:
             await self.send({"type": "response.create"})
         return False
-
-    async def abandon_priming(self) -> None:
-        """The deadline passed with reads missing: hand the backend back its own tool choice, then
-        release the caller as if priming had finished (the agent's gates refuse what needs the reads)."""
-        if not self.priming:
-            return
-        await self.send(tool_choice_update("auto"))
-        await self.finish_priming()
-
-    async def finish_priming(self) -> None:
-        """The reads are done (or there were none, or the deadline passed): release the caller,
-        and open if the agent speaks first. Runs once."""
-        if not self.priming:
-            return
-        call = self.call
-        self.priming = False
-        call.start.mark_primed()
-        await call.inbound.release()
-        if call.setup.start_policy.agent_opens:
-            await self.send(instruction(call.setup.start_policy.opening_instruction))
 
 
 PROVIDER = GptLiveProvider

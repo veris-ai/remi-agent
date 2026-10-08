@@ -12,26 +12,22 @@ Trace: no ``trace_adapter``. The LLM runs in this process through the
 ``OpenAIInstrumentor``), so every chat completion, with its tool calls and the
 tool results in the next request, becomes an LLM span in the agent trace.
 
-Call start: priming is a direct chat completion (same SDK, so it is traced)
-with ``tool_choice`` forcing the connect reads, before the pipeline starts.
-The pipeline then begins with those calls and results already in its context,
-and the LLM runs only on a user turn, so the callee speaks first. For an agent
-that speaks first, the pipeline's first frames (queued when the caller's
-socket connects) append the policy's opening instruction and run the LLM.
+Call start: the system instruction carries the agent's screen pop, so the
+pipeline starts with an empty context and the LLM runs only on a user turn:
+the callee speaks first. For an agent that speaks first, the pipeline's first
+frames (queued when the caller's socket connects) append the policy's opening
+instruction and run the LLM.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any, Self
 
-from openai import AsyncOpenAI
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.adapters.services.open_ai_adapter import OpenAILLMAdapter
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import EndFrame, Frame, FunctionCallResultProperties, LLMMessagesAppendFrame
@@ -61,7 +57,6 @@ from .services import STT_FACTORIES, TTS_FACTORIES, ServiceConfig
 logger = logging.getLogger(__name__)
 
 DEFAULT_LLM_MODEL = "gpt-4.1"
-LLM_TIMEOUT_S = 20
 VAD_EDGE_S = 0.2
 
 
@@ -96,10 +91,6 @@ class PipecatProvider(VoiceProvider):
     def __init__(self, config: ServiceConfig, llm_model: str) -> None:
         self.config, self.llm_model = config, llm_model
         self._vad: SileroVADAnalyzer | None = None
-        #: Builds the SDK client used for priming; tests swap in one with a mock transport.
-        self.openai_client: Callable[[], AsyncOpenAI] = lambda: AsyncOpenAI(
-            api_key=config.openai_api_key, timeout=LLM_TIMEOUT_S, max_retries=1
-        )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Self:
@@ -122,64 +113,6 @@ class PipecatProvider(VoiceProvider):
             settings=OpenAILLMService.Settings(model=self.llm_model, system_instruction=setup.instructions),
         )
 
-    def openai_tools(self, setup: SessionSetup) -> list[Any]:
-        """The same tools in chat-completions form, rendered by Pipecat's own OpenAI adapter."""
-        return OpenAILLMAdapter().to_provider_tools_format(self.tool_format.convert(setup.tools))
-
-    async def prime(self, call: CallRuntime, context: LLMContext) -> None:
-        """Run the connect reads as real, traced model tool calls before the callee speaks."""
-        if not call.setup.start_policy.connect_reads:
-            return
-        client = self.openai_client()
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": call.setup.instructions},
-            {"role": "system", "content": call.setup.start_policy.prime_instruction},
-        ]
-        tools = self.openai_tools(call.setup)
-        forced: Any = "required"
-        for _ in range(len(call.setup.start_policy.connect_reads) + 1):
-            completion = await client.chat.completions.create(
-                model=self.llm_model, messages=messages, tools=tools, tool_choice=forced
-            )
-            message = completion.choices[0].message
-            tool_calls = message.tool_calls or []
-            turn = [
-                {
-                    "role": "assistant",
-                    "content": message.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                        }
-                        for tc in tool_calls
-                    ],
-                }
-            ]
-            for tc in tool_calls:
-                result = await call.session.dispatch(
-                    tc.function.name, json.loads(tc.function.arguments or "{}")
-                )
-                turn.append(
-                    {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, default=str)}
-                )
-            messages += turn
-            context.add_messages(turn)
-            missing = call.session.missing_reads
-            if not missing:
-                return
-            forced = {"type": "function", "function": {"name": missing[0]}}
-        call.start.warn_priming_abandoned(call.session.missing_reads)
-
-    async def prime_within_deadline(self, call: CallRuntime, context: LLMContext) -> None:
-        """Prime, but never past the call's priming deadline; then the caller is heard either way."""
-        try:
-            await asyncio.wait_for(self.prime(call, context), call.start.priming_timeout_s)
-        except TimeoutError:
-            call.start.warn_priming_abandoned(call.session.missing_reads)
-        call.start.mark_primed()
-
     def opening_frames(self, setup: SessionSetup) -> list[Frame]:
         """What the pipeline does as soon as the caller is connected: open the call if the agent speaks first."""
         if not setup.start_policy.agent_opens:
@@ -190,9 +123,7 @@ class PipecatProvider(VoiceProvider):
     # --- the call --------------------------------------------------------------------------
 
     async def run_call(self, call: CallRuntime) -> None:
-        context = self.build_context(call.setup)
-        await self.prime_within_deadline(call, context)
-        worker = self.build_worker(call, context)
+        worker = self.build_worker(call, self.build_context(call.setup))
         await PipelineRunner(handle_sigint=False).run(worker)
 
     def build_worker(self, call: CallRuntime, context: LLMContext) -> PipelineWorker:

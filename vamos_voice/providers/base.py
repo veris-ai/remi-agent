@@ -4,17 +4,18 @@ A ``VoiceProvider`` turns one bench call into one vendor session. It receives
 a ``CallRuntime`` holding everything vendor-neutral, already built and shared
 by every provider:
 
-- ``setup``: the rendered instructions, the tool specs (convert them with your
+- ``setup``: the rendered instructions (the agent's screen pop already
+  appended, ``vamos_voice.screen_pop``), the tool specs (convert them with your
   ``ToolFormat``), and the turn-taking numbers every vendor maps to its own VAD;
 - ``session``: send every tool call to ``session.dispatch`` and return its dict;
-- ``start``: the ``CallStart`` (prime the connect reads, then the agent's
-  start policy: hold the line for the callee, or open with a greeting);
-- ``inbound`` / ``outbound``: caller audio in (held until priming finishes) and
-  agent audio out (dropped until the callee has spoken; playout tracked for
-  barge-in truncation and for hanging up after the last words).
+- ``start``: the ``CallStart`` (hold the line for the callee, or open with a greeting);
+- ``inbound`` / ``outbound``: caller audio in (forwarded once the provider binds
+  its vendor send and runs the pump) and agent audio out (dropped until the
+  callee has spoken; playout tracked for barge-in truncation and for hanging
+  up after the last words).
 
 A provider owns only what is genuinely vendor-specific: the wire protocol, the
-tool-format conversion, how it forces the priming reads, and how it maps
+tool-format conversion, how it requests an opening turn, and how it maps
 barge-in. Everything a rule or a grader cares about lives above this line, and
 no provider ever imports an agent: it sees only what the ``CallRuntime`` carries.
 """
@@ -39,8 +40,6 @@ from ..tools import ToolSpec
 
 logger = logging.getLogger(__name__)
 
-#: Longest the caller's audio is held while priming runs; older audio is dropped first.
-MAX_HELD_MS = 30_000
 #: Longest the agent waits for its last words to play before closing the line.
 MAX_DRAIN_S = 15.0
 
@@ -141,43 +140,22 @@ class CallerLine:
 
 
 class InboundAudio:
-    """Caller audio toward the vendor. Held while priming runs, then released in order."""
+    """Caller audio toward the vendor, in order, once the provider has bound its vendor send."""
 
     def __init__(self, line: CallerLine, forward: Callable[[bytes], Awaitable[None]] | None = None) -> None:
         self._line = line
         self._forward = forward
-        self._held = bytearray()
-        self._open = False
-        self._lock = asyncio.Lock()
 
     def bind(self, forward: Callable[[bytes], Awaitable[None]]) -> None:
-        """Where caller audio goes (the provider's vendor send)."""
+        """Where caller audio goes (the provider's vendor send). Bind before ``run``."""
         self._forward = forward
-
-    async def release(self) -> None:
-        """Priming finished: send what was held, then pass audio straight through."""
-        async with self._lock:
-            self._open = True
-            if self._held:
-                held, self._held = bytes(self._held), bytearray()
-                await self._send(held)
 
     async def run(self) -> None:
         """Pump until the caller hangs up."""
-        cap = int(MAX_HELD_MS * 48)  # 24 kHz * 2 bytes per ms
-        while (frame := await self._line.receive()) is not None:
-            async with self._lock:
-                if self._open:
-                    await self._send(frame)
-                else:
-                    self._held.extend(frame)
-                    if len(self._held) > cap:
-                        del self._held[: len(self._held) - cap]
-
-    async def _send(self, pcm: bytes) -> None:
         if self._forward is None:
             raise RuntimeError("InboundAudio has no destination: call bind() first")
-        await self._forward(pcm)
+        while (frame := await self._line.receive()) is not None:
+            await self._forward(frame)
 
 
 @dataclass

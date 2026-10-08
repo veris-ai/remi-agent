@@ -8,13 +8,13 @@ function calls carry an ``id`` the trace can match each tool result to.
 Audio: the channel's 24 kHz PCM16 is resampled to Gemini's native 16 kHz on
 the way in; Gemini's output is 24 kHz, forwarded as is.
 
-Call start: the Live API has no forced tool choice, so priming is a text turn
-(the policy's ``prime_note``, labelled as a call-system note so the judge never mistakes it for
-the callee) asking the model to run the connect reads silently. Any read it
-skips is asked for again by name. Audio the model produces before the callee
+Call start: the agent's screen pop is already in ``systemInstruction``, so
+the model knows the account before it hears anything; caller audio flows
+right after ``setupComplete``. Audio the model produces before the callee
 speaks is dropped by the shared ``OutboundAudio`` gate. For an agent that
-speaks first, the opening is requested the same way: a labelled text turn
-carrying the policy's ``opening_note``.
+speaks first, the opening is requested with a text turn carrying the policy's
+``opening_note`` (labelled as a call-system note so the judge never mistakes
+it for the caller): the Live API has no other way to ask for a turn.
 """
 
 from __future__ import annotations
@@ -140,14 +140,13 @@ class GeminiLiveProvider(VoiceProvider):
             await _GeminiCall(self, ws, call).run()
 
 
-def _prime_turn(text: str) -> dict[str, Any]:
+def _note_turn(text: str) -> dict[str, Any]:
     return {"clientContent": {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": True}}
 
 
 class _GeminiCall:
     def __init__(self, provider: GeminiLiveProvider, ws: Any, call: CallRuntime) -> None:
         self.provider, self.ws, self.call = provider, ws, call
-        self.priming = True
         self.turn = 0
         self.resampler = Resampler(CHANNEL_RATE_HZ, INPUT_RATE_HZ)
 
@@ -185,15 +184,9 @@ class _GeminiCall:
                 )
 
         call.inbound.bind(forward)
-        if call.session.missing_reads:
-            await self.send(_prime_turn(call.setup.start_policy.prime_note))
-        else:
-            await self.finish_priming()
-        await run_until_first_done(
-            call.start.priming_deadline(lambda: call.session.missing_reads, self.finish_priming),
-            caller_to_vendor=call.inbound.run(),
-            vendor_to_caller=self.events(),
-        )
+        if call.setup.start_policy.agent_opens:
+            await self.send(_note_turn(call.setup.start_policy.opening_note))
+        await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
 
     async def events(self) -> None:
         while (message := await self.recv()) is not None:
@@ -204,7 +197,7 @@ class _GeminiCall:
         """Handle one server message; True when the call is over."""
         call = self.call
         content = message.get("serverContent") or {}
-        if (content.get("inputTranscription") or {}).get("text", "").strip() and call.start.primed:
+        if (content.get("inputTranscription") or {}).get("text", "").strip():
             call.start.mark_callee_spoke()
         for part in (content.get("modelTurn") or {}).get("parts", []):
             blob = part.get("inlineData") or {}
@@ -219,7 +212,9 @@ class _GeminiCall:
                 return True
         if content.get("turnComplete"):
             self.turn += 1
-            return await self.turn_complete()
+            if call.session.ended:
+                await call.hang_up()
+                return True
         if "goAway" in message:
             logger.warning("gemini: goAway %s", message["goAway"])
         return False
@@ -230,32 +225,6 @@ class _GeminiCall:
             result = await self.call.session.dispatch(fc["name"], fc.get("args") or {})
             responses.append({"id": fc.get("id"), "name": fc["name"], "response": result})
         await self.send({"toolResponse": {"functionResponses": responses}})
-
-    async def turn_complete(self) -> bool:
-        call = self.call
-        if self.priming:
-            missing = call.session.missing_reads
-            if missing:
-                await self.send(_prime_turn(call.setup.start_policy.reprime_note(missing)))
-                return False
-            await self.finish_priming()
-            return False
-        if call.session.ended:
-            await call.hang_up()
-            return True
-        return False
-
-    async def finish_priming(self) -> None:
-        """The reads are done (or there were none, or the deadline passed): release the caller,
-        and open if the agent speaks first. Runs once."""
-        if not self.priming:
-            return
-        call = self.call
-        self.priming = False
-        call.start.mark_primed()
-        await call.inbound.release()
-        if call.setup.start_policy.agent_opens:
-            await self.send(_prime_turn(call.setup.start_policy.opening_note))
 
 
 PROVIDER = GeminiLiveProvider

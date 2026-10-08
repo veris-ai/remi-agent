@@ -1,9 +1,12 @@
 """Connect-time reads: the account, the dialed phone, the contact history.
 
-RULES.md step 1, and the grader's first check: the tool trace must show these
-three reads before Remi asks for anyone by name. They are separate tools on
-purpose, so each read is visible in the trace on its own. Once all three have
-run, the result of the last one carries the call's ``call_assessment``:
+RULES.md step 1, and the grader's first check: these three reads come before
+Remi asks for anyone by name. Remi's screen pop (``vamos_agents.remi.screen_pop``)
+runs these same handlers when the call connects, before any vendor session
+opens, so they are done (and in the World's SQL log) before anyone speaks.
+They stay tools so the model can re-read, or make the reads itself if the
+screen pop failed (the gates name any read still missing). Once all three
+have run, the result of the last one carries the call's ``call_assessment``:
 whether the call may proceed and what its opening owes.
 
 ``get_account`` returns nothing a third party could learn the debt from and
@@ -30,8 +33,8 @@ class NoArgs(BaseModel):
 @REGISTRY.tool(NoArgs, requires=Gate.NONE)
 async def get_account(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """Connect-time read 1 of 3. Reads the account being called (from the dialer's context): the consumer's
-    name, the account status and whether the debt is time-barred. Call
-    get_account, get_dialed_phone and get_contact_history before saying anything past a greeting."""
+    name, the account status and whether the debt is time-barred. The dialer already ran it when the call
+    connected (see "Account on screen"); call it again only to re-read."""
     db, ctx = session.db, session.context
     session.agency = await db.agency()
     account = await db.account(ctx.account_id)

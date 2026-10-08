@@ -1,6 +1,6 @@
 """Smoke: the real server running the test-only inbound agent over /voice, with a fake provider.
 
-The fake provider plays a model for an agent that speaks first: no priming,
+The fake provider plays a model for an agent that speaks first: no screen pop,
 the greeting goes out before the caller says anything, the account tool is
 refused until the caller is verified, then the call ends. No database, no
 vendor, no network.
@@ -44,9 +44,6 @@ class InboundFakeProvider(VoiceProvider):
 
         call.inbound.bind(to_vendor)
         pump = asyncio.create_task(call.inbound.run())
-        assert call.session.missing_reads == []
-        call.start.mark_primed()
-        await call.inbound.release()
         assert call.start.audio_open, "an inbound agent's line is never held"
         assert await call.outbound.send(GREETING, "greeting")
         await asyncio.wait_for(heard.wait(), 5)

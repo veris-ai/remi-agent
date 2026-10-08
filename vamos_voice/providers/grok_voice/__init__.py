@@ -1,8 +1,8 @@
 """The agent on xAI's Grok Voice Agent API (speech-to-speech), a dialect of the Realtime protocol.
 
 Everything protocol-level is ``RealtimeProtocolProvider``; this file is the
-xAI endpoint, the session shape and the two capabilities where Grok differs
-from OpenAI. Audio is PCM16 24 kHz both ways, the channel's own rate, so
+xAI endpoint, the session shape and the capability where Grok differs from
+OpenAI. Audio is PCM16 24 kHz both ways, the channel's own rate, so
 nothing is resampled. Bench candidate: ``trace_adapter: openai-realtime`` (the
 bench's Realtime adapter reads Grok's frames, including its top-level
 ``turn_detection`` and its missing ``output_item.added``).
@@ -21,10 +21,8 @@ veris-ai/rory-agent ``grok-voice/README.md``):
   of the documented session, so only ``TurnTaking.silence_ms`` is mapped and
   the rest stay on xAI's defaults.
 - **No forced tool choice.** ``response.create`` documents only
-  ``instructions``. Priming therefore works like Gemini Live's: a user-role
-  text item labelled as a call-system note (the policy's ``prime_note``) plus
-  ``response.create``, then the note again naming any read still missing.
-  Anything the model says meanwhile is dropped by the shared outbound gate.
+  ``instructions``. Nothing here needs one: the connect-time reads are the
+  agent's screen pop, already in the session instructions.
 - **No truncation.** xAI lists ``conversation.item.truncate`` and
   ``response.cancel`` as unsupported. Under server VAD Grok stops generating
   on its own when the caller speaks, and the model's context ends where
@@ -90,22 +88,6 @@ class GrokVoiceProvider(RealtimeProtocolProvider):
             },
             "tools": self.tool_format.convert(setup.tools),
         }
-
-    def priming_frames(self, setup: SessionSetup, missing: list[str], first: bool) -> list[dict[str, Any]]:
-        """No forced tool choice: a labelled call-system note, then a response to act on it."""
-        policy = setup.start_policy
-        note = policy.prime_note if first else policy.reprime_note(missing)
-        return [
-            {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": note}],
-                },
-            },
-            {"type": "response.create"},
-        ]
 
 
 PROVIDER = GrokVoiceProvider
