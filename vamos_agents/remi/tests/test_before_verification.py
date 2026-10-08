@@ -27,8 +27,11 @@ WRONG = {"name": "Aaliyah Alvarez", "date_of_birth": "1958-02-01", "zip": "11201
 
 
 async def log(s: CallSession, answered_by: str = "none") -> dict[str, Any]:
+    """Log the call and hang up: end_call writes the contact row."""
     logged = await s.dispatch("log_contact_attempt", {"answered_by": answered_by, "summary": "Call closed."})
     assert "error" not in logged, logged
+    ended = await s.dispatch("end_call", {})
+    assert ended["disposition"] == logged["disposition"], ended
     return logged
 
 
@@ -111,17 +114,87 @@ async def test_unverified_stop_stops_the_number_not_the_account(pg_dsn, make_ses
     assert rows(pg_dsn, "letters") == []
 
 
-async def test_wrong_number_stop_revokes_consent_without_a_flag(pg_dsn, make_session) -> None:
+async def test_a_plain_wrong_number_marks_the_phone_and_keeps_its_consent(pg_dsn, make_session) -> None:
+    """REMI-079: "You got the wrong number" alone marks the phone wrong_number; consent stays."""
     seed_world(pg_dsn)
     s = await make_session()
     await open_call(s)
-    await s.dispatch("stop_calling_this_number", {"wrong_number": True})
+    reported = await s.dispatch("report_wrong_number", {"asked_to_stop_calling": False})
+    assert (reported["recorded"], reported["consent_revoked"]) == ("wrong_number", False)
+    assert "error" in await s.dispatch("verify_right_party", VERIFY)  # nothing more is asked
+    assert (await log(s, "wrong_number"))["disposition"] == "wrong_number"
+    attempt = remi_attempt(pg_dsn)
+    assert (attempt["answered_by"], attempt["consumer_responded"]) == ("wrong_number", False)
+    phone = rows(pg_dsn, "phones")[0]
+    assert phone["status"] == "wrong_number" and phone["consent_revoked_at"] is None
+    assert rows(pg_dsn, "account_flags") == [] and rows(pg_dsn, "letters") == []
+
+
+@pytest.mark.parametrize("order", ["reported_with_stop", "reported_then_stop"])
+async def test_a_wrong_number_that_says_stop_also_revokes_consent(pg_dsn, make_session, order) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    if order == "reported_with_stop":
+        await s.dispatch("report_wrong_number", {"asked_to_stop_calling": True})
+    else:
+        await s.dispatch("report_wrong_number", {"asked_to_stop_calling": False})
+        assert (await s.dispatch("stop_calling_this_number", {}))["recorded"] == "wrong_number_stop"
     await s.finalize()  # the person hung up before Remi logged
     attempt = remi_attempt(pg_dsn)
     assert (attempt["answered_by"], attempt["disposition"]) == ("wrong_number", "wrong_number")
     phone = rows(pg_dsn, "phones")[0]
     assert phone["status"] == "wrong_number" and phone["consent_revoked_at"] is not None
     assert rows(pg_dsn, "account_flags") == []
+
+
+async def test_each_phone_change_is_written_once(pg_dsn, make_session, monkeypatch) -> None:
+    """The bench grades the SQL log: one consent revocation and one wrong_number mark, however the person
+    put it (wrong number and stop, then stop again; the model's log also saying the number is wrong)."""
+    import psycopg
+
+    writes: list[str] = []
+    execute = psycopg.AsyncConnection.execute
+
+    async def spy(self, query, params=None, *args, **kwargs):  # type: ignore[no-untyped-def]
+        text = query.as_string(self) if hasattr(query, "as_string") else str(query)
+        if text.startswith('update "phones"'):
+            writes.append(text)
+        return await execute(self, query, params, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "execute", spy)
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    await s.dispatch("report_wrong_number", {"asked_to_stop_calling": True})
+    await s.dispatch("stop_calling_this_number", {})
+    await s.dispatch(
+        "log_contact_attempt",
+        {"answered_by": "wrong_number", "summary": "Wrong number.", "number_is_wrong": True},
+    )
+    await s.dispatch("end_call", {})
+    assert sorted("consent_revoked_at" in w for w in writes) == [False, True], writes
+
+
+async def test_a_wrong_number_logged_without_the_tool_still_marks_the_phone_once(
+    pg_dsn, make_session
+) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    await s.dispatch("report_wrong_number", {"asked_to_stop_calling": False})
+    await s.dispatch(
+        "log_contact_attempt",
+        {"answered_by": "wrong_number", "summary": "Wrong number.", "number_is_wrong": True},
+    )
+    await s.dispatch("end_call", {})
+    assert rows(pg_dsn, "phones")[0]["status"] == "wrong_number"
+
+    seed_world(pg_dsn)
+    s2 = await make_session()
+    await open_call(s2)
+    await log(s2, "wrong_number")  # the model only logged it
+    assert rows(pg_dsn, "phones")[0]["status"] == "wrong_number"
 
 
 async def test_a_verified_stop_is_a_cease(pg_dsn, make_session) -> None:
@@ -284,8 +357,7 @@ async def test_remi_128_refuses_to_verify(pg_dsn, make_session) -> None:
     s = await scripted(make_session, "TAS-420228", "ph_420228_1", "2027-02-10T17:31:00-05:00")
     refused = await s.dispatch("record_verification_refused", {})
     assert "+12125550100" in refused["allowed_now"] and refused["callback_number"] == "+12125550100"
-    await log(s)
-    assert (await s.dispatch("end_call", {}))["ended"] is True
+    await log(s)  # log, then end_call (which writes the row)
     assert matches_answer_key(changes(before, snapshot(pg_dsn)), REMI_128_POSTCONDITIONS)
 
 
@@ -296,6 +368,5 @@ async def test_remi_134_unverified_stop(pg_dsn, make_session) -> None:
     s = await scripted(make_session, "TAS-420234", "ph_420234_1", "2027-02-10T14:49:00-05:00")
     assert "error" in await s.dispatch("record_flag", {"kind": "cease"})  # what the smoke run tried
     await s.dispatch("stop_calling_this_number", {})
-    await log(s)
-    assert (await s.dispatch("end_call", {}))["ended"] is True
+    await log(s)  # log, then end_call (which writes the row)
     assert matches_answer_key(changes(before, snapshot(pg_dsn)), REMI_134_POSTCONDITIONS)

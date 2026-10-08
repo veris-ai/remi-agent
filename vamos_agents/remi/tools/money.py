@@ -173,6 +173,9 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
         "amount": policy.dollars(amount),
         "remaining_balance": policy.dollars(balance - amount),
         "paid_with": _described(saved),
+        "consumer_has_heard": False,
+        "allowed_now": "The charge went through, and the consumer does not know that yet: the outcome reaches "
+        "them before anything else, including logging or ending the call.",
     }
 
 

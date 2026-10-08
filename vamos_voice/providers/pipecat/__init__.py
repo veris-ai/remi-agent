@@ -135,7 +135,7 @@ class PipecatProvider(VoiceProvider):
                 audio_out_enabled=True,
                 audio_in_sample_rate=CHANNEL_RATE_HZ,
                 audio_out_sample_rate=CHANNEL_RATE_HZ,
-                serializer=LineSerializer(call.line.framing),
+                serializer=LineSerializer(call.line.framing, on_caller_end=call.line.caller_gone),
             ),
         )
         llm = self.build_llm(call.setup)
@@ -179,6 +179,7 @@ class PipecatProvider(VoiceProvider):
 
         @transport.event_handler("on_client_disconnected")
         async def _disconnected(_transport: Any, _client: Any) -> None:
+            call.line.caller_gone()
             await worker.cancel()
 
         return worker

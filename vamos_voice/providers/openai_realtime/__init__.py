@@ -17,6 +17,8 @@ from vamos_voice.providers.realtime_protocol import RATE_HZ, RealtimeProtocolPro
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
 DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe"
+#: Every VAmoS call is in English (as the other providers pin it).
+LANGUAGE = "en"
 
 
 class OpenAIRealtimeProvider(RealtimeProtocolProvider):
@@ -53,7 +55,8 @@ class OpenAIRealtimeProvider(RealtimeProtocolProvider):
             "audio": {
                 "input": {
                     "format": pcm,
-                    "transcription": {"model": self.transcribe_model},
+                    # The bench is English-only: pin the caller transcription's language (ISO-639-1).
+                    "transcription": {"model": self.transcribe_model, "language": LANGUAGE},
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold": turns.vad_threshold,

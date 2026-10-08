@@ -191,8 +191,24 @@ class AgentSpec(abc.ABC):
 ```
 
 The per-call state satisfies `CallState`: an `ended: bool` (set by the agent's
-hang-up tool; providers then close the line) and `async def finalize()` (runs
-whenever the socket closes, for whatever the call must always leave behind).
+hang-up tool; providers then close the line) and `async def finalize()` (for
+whatever the call must always leave behind). The framework runs `finalize`
+exactly once (`CallSession.finalize`), as early as it can:
+
+- the moment the caller hangs up or the socket drops (`CallerLine.caller_gone`,
+  which the server points at `CallSession.caller_gone`; Pipecat's serializer and
+  disconnect handler call it too), not after the provider has torn down its
+  vendor session. A vendor socket's close handshake can take seconds (2 s on
+  OpenAI Realtime, Grok and GPT-Live, 1.1 s on Mistral), and the bench drains
+  the World's log one to two seconds after the hang-up: a record written after
+  the teardown was lost on 11 of 212 Remi attempts (`trial_vj4i37mlw6q9lqc58lprk`);
+- otherwise when the provider returns or fails;
+- at the latest when the server shuts down (a pod stopped mid-call), before the
+  agent's world clients close.
+
+From `caller_gone` on, `dispatch` refuses new tool calls ("the caller has hung
+up"), and `finalize` waits (up to 10 s) for any tool call already running, so
+the agent's record comes after the call's last effect.
 
 Supporting pieces an agent uses:
 
@@ -368,6 +384,7 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 | `TurnTaking` mapping | silence, prefix padding, threshold | silence only (`threshold`/`prefix_padding_ms` not documented; xAI defaults) | silence, prefix padding | **none**: no VAD settings exist | silence via VAD + turn timeout |
 | Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat |
 | Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
+| Language (every VAmoS call is English) | transcription `language: "en"` | **none** documented (the prompt holds it) | **none**: native-audio models choose the language themselves and take no `languageCode` (the prompt holds it) | **none** documented (the prompt holds it) | `Language.EN` on Deepgram STT, OpenAI STT and Cartesia TTS (OpenAI's speech endpoint takes none) |
 
 Managed voice agents (the vendor runs STT, the LLM and TTS; tools are
 client-side over the same socket):
@@ -382,6 +399,14 @@ client-side over the same socket):
 | Callee-spoke signal | first user `ConversationText` | first non-empty `user_transcript` | first non-empty `user.transcript` |
 | Audio | linear16 24 kHz both ways (binary frames) | `pcm_24000` both ways (base64 JSON) | binary; 16 kHz up (resampled), 24 kHz down |
 | Hang-up after `end_call` | at `AgentAudioDone` if the agent is speaking, else at once | once the agent's audio has been quiet 0.6 s (max 10 s): no end-of-audio event | at `agent.done` if a turn is in progress, else at once |
+
+The other vendors' language settings: Deepgram Voice Agent `language: "en"`,
+ElevenLabs `language: "en"`, Vapi `"en"`, Cartesia `{"primary": "en"}`,
+Gradium `Lang.En`, Hugging Face Whisper `language=en`, the Grok cascade's xAI
+STT/TTS `language=en`, LiveKit Deepgram STT `en-US` (its TTS model,
+`eleven_flash_v2`, is English-only); Fluxions and Mistral's Voxtral realtime
+document none, so the prompt holds it there. Pinning a language is
+configuration, not tuning: the prompt says the same to every vendor.
 
 `RealtimeProtocolProvider` exposes the hook dialects differ on:
 `truncates_on_barge_in` (default `True`).

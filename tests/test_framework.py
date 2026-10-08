@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import importlib
 import logging
@@ -89,6 +90,8 @@ class State:
         self.verified = False
         self.ended = False
         self.finalized = 0
+        self.release = asyncio.Event()
+        self.order: list[str] = []
 
     async def finalize(self) -> None:
         self.finalized += 1
@@ -124,6 +127,13 @@ def tiny_session() -> tuple[CallSession, State]:
         raise RuntimeError("database fell over")
 
     @registry.tool(NoArgs)
+    async def slow_write(state: State, _: NoArgs) -> dict[str, Any]:
+        """A write that takes a while (a charge, a database transaction)."""
+        await state.release.wait()
+        state.order.append("slow_write")
+        return {"written": True}
+
+    @registry.tool(NoArgs)
     async def end_call(state: State, _: NoArgs) -> dict[str, Any]:
         """Hang up."""
         state.ended = True
@@ -154,6 +164,41 @@ async def test_dispatch_gates_redacts_and_never_raises(caplog: pytest.LogCapture
     assert state.finalized == 1
     assert "1234" not in caplog.text and "9999" not in caplog.text and "[redacted]" in caplog.text
     assert session.tool_log[0] == "balance"
+
+
+async def test_a_caller_hang_up_finalizes_once_after_running_tools_and_refuses_new_ones() -> None:
+    session, state = tiny_session()
+
+    async def finalize() -> None:
+        state.order.append("finalize")
+        state.finalized += 1
+
+    state.finalize = finalize  # type: ignore[method-assign]
+    running = asyncio.create_task(session.dispatch("slow_write", {}))
+    await asyncio.sleep(0)
+    session.caller_gone()
+    session.caller_gone()
+    refused = await session.dispatch("verify", {"pin": "1234"})
+    assert refused == {"error": "The caller has hung up; the call is over."}
+    await asyncio.sleep(0.01)
+    assert state.order == [], "finalize waits for the tool call already running"
+    state.release.set()
+    assert await running == {"written": True}
+    await session.finalize()
+    await session.finalize()
+    assert state.order == ["slow_write", "finalize"] and state.finalized == 1
+
+
+async def test_a_failed_finalize_is_logged_even_if_nobody_awaits_it(caplog: pytest.LogCaptureFixture) -> None:
+    session, state = tiny_session()
+
+    async def broken() -> None:
+        raise RuntimeError("world unreachable")
+
+    state.finalize = broken  # type: ignore[method-assign]
+    session.caller_gone()
+    await asyncio.sleep(0.01)
+    assert "could not be finalized" in caplog.text
 
 
 # --- the screen pop ------------------------------------------------------------------------------

@@ -215,7 +215,10 @@ class LiveKitProvider(VoiceProvider):
     def build_session(self, setup: SessionSetup, http: aiohttp.ClientSession) -> AgentSession:
         c, turns = self.config, setup.turn_taking
         return AgentSession(
-            stt=deepgram.STT(api_key=c.deepgram_api_key, model=c.stt_model, http_session=http),
+            # English-only bench: the STT language pinned (the TTS model, eleven_flash_v2, is English-only).
+            stt=deepgram.STT(
+                api_key=c.deepgram_api_key, model=c.stt_model, language="en-US", http_session=http
+            ),
             llm=openai.LLM(api_key=c.openai_api_key, model=c.llm_model, parallel_tool_calls=False),
             tts=elevenlabs.TTS(
                 api_key=c.elevenlabs_api_key, voice_id=c.tts_voice_id, model=c.tts_model, http_session=http

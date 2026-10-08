@@ -166,6 +166,35 @@ def test_json_caller_end_finalizes_the_call_without_echoing_end() -> None:
     assert call.finalized and not call.ended, "the caller hung up; the agent did not"
 
 
+class SlowTeardownProvider(ListenProvider):
+    """Like a vendor whose socket takes seconds to close: after the caller hangs up, the provider is
+    still tearing down. The agent's record must not wait for it (trial_vj4i37mlw6q9lqc58lprk: a
+    2 s close handshake put Remi's contact row after the bench had drained the World's log)."""
+
+    finalized_during_teardown: bool | None = None
+
+    async def run_call(self, call: CallRuntime) -> None:
+        await super().run_call(call)
+        await asyncio.sleep(0.05)  # the vendor's close handshake has started, nothing more
+        self.finalized_during_teardown = call.session.state.finalized
+        assert (await call.session.dispatch("end_call", {}))["error"].startswith("The caller has hung up")
+        await asyncio.sleep(0.2)
+
+
+def test_the_call_finalizes_when_the_caller_hangs_up_not_after_the_vendor_teardown() -> None:
+    agent, provider = recording_agent(), SlowTeardownProvider()
+    with (
+        TestClient(create_app(agent, provider, framing=Framing.JSON)) as client,
+        client.websocket_connect("/voice") as ws,
+    ):
+        assert json.loads(ws.receive_text()) == json.loads(envelope(GREETING))
+        ws.send_text('{"type": "end"}')
+        assert ws.receive()["type"] == "websocket.close"
+    assert provider.finalized_during_teardown is True
+    (call,) = agent.calls
+    assert call.finalized and not call.ended
+
+
 class FailingProvider(HangUpProvider):
     """The vendor fails before the call starts (e.g. it could not be reached)."""
 
@@ -212,8 +241,10 @@ async def test_pipecat_serializer_json_framing() -> None:
     assert inbound.audio == HELLO and inbound.sample_rate == 24_000
     assert await agent_ends.serialize(EndFrame()) == '{"type": "end"}', "the agent hangs up in-band"
 
-    caller_ends = LineSerializer(Framing.JSON)
+    gone: list[str] = []
+    caller_ends = LineSerializer(Framing.JSON, on_caller_end=lambda: gone.append("caller gone"))
     assert isinstance(await caller_ends.deserialize('{"type": "end"}'), CancelWorkerFrame)
+    assert gone == ["caller gone"], "the call finalizes at once, not after the pipeline winds down"
     assert await caller_ends.serialize(CancelFrame()) is None, "no end back to a caller who hung up"
     assert await caller_ends.deserialize('{"type": "mark"}') is None
 

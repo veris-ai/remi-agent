@@ -24,9 +24,9 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 | context view | `VERIS_AGENT_CONTEXT` → `CallContext(account_id TAS-NNNNNN, phone_id, call_time in Eastern)`; missing or malformed stops the pod | `context.py` |
 | `call_time()` | the context's `call_time` (World frozen at 2027-02-10) | `agent.py` |
 | `instructions(clock)` | RULES.md distilled into `prompt/instructions.md`, rendered with the call's date and the agency row | `prompt/` |
-| `tools` | 17 tools (below) | `tools/` |
+| `tools` | 18 tools (below) | `tools/` |
 | `gates` | `Gate` ladder NONE → ASSESSED → PROCEEDING → VERIFIED → DEBT_UNLOCKED, plus a collection stop on tools tagged `collection` | `gates.py`, `call.py` |
-| per-call state | `RemiCall`: connect reads, assessment, verification, outcomes; `finalize()` writes the call's one `contact_attempts` row if the model did not | `call.py` |
+| per-call state | `RemiCall`: connect reads, assessment, verification, outcomes; the call's one `contact_attempts` row, written once when the call ends (`end_call`, or `finalize()` the moment the caller hangs up) | `call.py` |
 | world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; `PaymentGateway`, the client for the World's gateway functions, on that same database | `db.py`, `payments.py` |
 | rules | RULES.md's numbers and calendar as pure functions | `policy.py` |
 
@@ -55,12 +55,16 @@ early with a message saying what must happen first:
    its own ending (`record_verification_refused` → `refused_verification`), and
    an unverified "stop calling" stops the number, not the account
    (`stop_calling_this_number` → consent revoked, `unverified_stop_request`
-   flag, `unverified_stop`).
+   flag, `unverified_stop`). A wrong number marks the phone `wrong_number`
+   (`report_wrong_number`); its consent is revoked only if the person also
+   asked to stop calling it.
 3. Disclosures: recording, mini-Miranda, and when due the time-barred
    disclosure and the alternative-format statement, attested as
    `get_debt_details` arguments (so they appear in the trace, in order).
-   Calls are English-only: there is no language step, and Remi never writes
-   `consumers.language_preference`.
+   Calls are English-only: there is no language step, Remi never writes
+   `consumers.language_preference`, the prompt holds every word to English
+   whatever the callee's name, and each vendor that takes a language setting
+   has it pinned to English (AGENTS.md section 10).
 4. Only then the debt, offers and payments. A dispute, cease, attorney,
    bankruptcy, death or SCRA claim stops collection for the rest of the call.
 
@@ -97,19 +101,44 @@ cease on file) and still says nothing it may not.
 | `get_account`, `get_dialed_phone`, `get_contact_history` | none | Connect-time reads, already run by the screen pop; kept for re-reads and as the fallback if it failed. No DOB, ZIP, SSN, street, balance or creditor in the result. |
 | `verify_right_party` | proceeding | Consumer: the name they said or confirmed (first name enough) + 2 facts, incrementally; returns the state (`name_confirmed`, `facts_confirmed`, `still_needed`, `attempts_left`), never which fact failed. `estate_rep`: full name only (deceased consumer). On success, `owed_before_the_debt` lists the disclosures due. |
 | `record_verification_refused` | proceeding | The person declined to verify: no disclosure, and the call's disposition is `refused_verification` (`answered_by` null), not `failed_verification`. |
-| `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. A cease or opt-out from an unverified person is refused and pointed at `stop_calling_this_number`. |
-| `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone; records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`), or for a wrong number marks it `wrong_number`. Never touches the account's status; verification is refused afterwards. |
+| `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. A cease or opt-out from an unverified person is refused and pointed at `stop_calling_this_number`. Fields must be what the person said: placeholders ("unknown", "the caller") are refused. `deceased`: the reporter's name and relationship; `died_on` only as they gave it (refused if today or later, or before birth), otherwise recorded without a date, and recording it again later completes the flag and `deceased_on`. `scra`: the branch is required, and `log_contact_attempt` / `end_call` are refused until `transfer_to_human` (RULES.md: record `scra` and transfer). |
+| `report_wrong_number` | proceeding (unverified only) | The number is not the consumer's: phone `status` `wrong_number` at once; consent revoked only with `asked_to_stop_calling` (the person asked to stop, not merely "wrong number"). Disposition `wrong_number`; verification is refused afterwards. |
+| `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone and records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`); after `report_wrong_number` it only revokes the consent (no flag). Never touches the account's status; verification is refused afterwards. |
 | `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
 | `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits, every amount in dollars (`"$1,430.00"`). |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
-| `take_payment` | debt unlocked, `collection` | `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: Remi sets `status` `paid`/`settled` (the gateway already moved the balance). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
+| `take_payment` | debt unlocked, `collection` | `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: Remi sets `status` `paid`/`settled` (the gateway already moved the balance), and the result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
 | `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan / settlement_instalments, equal monthly instalments, charged to a `method_id` saved this call. |
 | `record_promise` | debt unlocked, `collection` | Exact amount and date ≤14 days out. |
 | `schedule_callback` | verified | 8 a.m.–<9 p.m. ET. |
 | `queue_letter` | verified | Idempotent per call. |
-| `transfer_to_human` | proceeding | Disposition `transferred`. |
-| `log_contact_attempt` | assessed | The call's one row; time, duration and disposition come from the session and the clock, and the summary leads with the facts the session recorded (disposition, who answered, whether the debt was read and after which attested disclosures, outcomes), then the model's notes. |
-| `end_call` | assessed | Requires the log; the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
+| `transfer_to_human` | proceeding | Disposition `transferred` (by WORLD.md's precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
+| `log_contact_attempt` | assessed | Before the goodbye: who answered and a plain summary (again to replace it). The row is written when the call ends, from everything recorded by then: time, duration and disposition from the session and the clock, and a summary that leads with the facts the session recorded (disposition, who answered, whether the debt was read and after which attested disclosures, outcomes, a transfer), then the model's notes. `answered_by` is what the call established: the verified party, `wrong_number` after `report_wrong_number`, `third_party` for an unverified person who reported a death, null after a refusal or an unverified stop. |
+| `end_call` | assessed | Requires the log; writes the contact row, then the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
+
+### The contact row on every ending
+
+Every call leaves exactly one `contact_attempts` row, written once, under a lock:
+
+- the agent ends it: `end_call` writes the row before the line closes;
+- the caller hangs up or the socket drops first: the framework's
+  `CallSession.caller_gone` finalizes at once (not after the vendor's own
+  teardown, which can take seconds), after any tool call already running, and
+  refuses new ones; `RemiCall.finalize` writes the row from the model's log, or
+  from the session alone if it never logged;
+- the provider fails, or the pod is stopped mid-call: the server finalizes the
+  call before it closes Remi's database.
+
+Why: in trial `trial_vj4i37mlw6q9lqc58lprk`, 11 of 212 attempts had no row.
+In each the caller hung up before the model logged; the fallback row was
+written 1.1 s (Mistral) to 2.1 s (OpenAI Realtime, Grok, GPT-Live) later,
+because finalize waited for the provider to close its vendor socket, and the
+bench drains the World's log one to two seconds after the hang-up (the same
+delay was kept on most calls and lost on 11). Providers that returned at once
+(Gemini Live, Deepgram, Pipecat: 10 to 90 ms) never lost one.
+The log now comes before the goodbye too, so the row carries the model's
+`answered_by` (a third party, a voicemail) even when the caller hangs up on the
+goodbye.
 
 ## How Remi talks (the prompt) and what its tools say back
 

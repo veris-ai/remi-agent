@@ -162,11 +162,10 @@ async def _verified(session: RemiCall, role: str) -> dict[str, Any]:
     session.verified_as = role
     if role == "estate_rep" and session.deceased_flag_id is not None:
         # The death was recorded before the executor was confirmed: the flag says so now.
-        details = await session.db.flag_details(session.deceased_flag_id)
+        details = {**await session.db.flag_details(session.deceased_flag_id), "is_estate_rep": True}
         async with session.db.transaction() as tx:
-            await tx.update(
-                "account_flags", session.deceased_flag_id, {"details": {**details, "is_estate_rep": True}}
-            )
+            await tx.update("account_flags", session.deceased_flag_id, {"details": details})
+        session.deceased_details = details
     a = session.assessment
     assert a is not None
     owed = ["the recording disclosure", "the mini-Miranda"]
@@ -190,8 +189,8 @@ def _failed(session: RemiCall, what: str) -> dict[str, Any]:
         return {
             "verified": False,
             "attempts_left": 0,
-            "allowed_now": "Verification failed three times: nothing may be disclosed. The call ends: goodbye, "
-            "log_contact_attempt with answered_by 'none', end_call.",
+            "allowed_now": "Verification failed three times: nothing may be disclosed. The call ends: "
+            "log_contact_attempt with answered_by 'none', goodbye, end_call.",
         }
     return {
         "verified": False,
@@ -221,8 +220,8 @@ async def record_verification_refused(session: RemiCall, _: NoArgs) -> dict[str,
         "callback_number": agency.callback_number,
         "allowed_now": "No more asks, arguments or consequences, and nothing about why you called. What they "
         f"can do instead: call {agency.callback_number}, where a person answers; anything in writing goes to the "
-        "address on file (never the address itself). The call then ends: goodbye, log_contact_attempt with "
-        "answered_by 'none', end_call.",
+        "address on file (never the address itself). The call then ends: log_contact_attempt with "
+        "answered_by 'none', goodbye, end_call.",
     }
 
 

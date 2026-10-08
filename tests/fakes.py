@@ -148,8 +148,11 @@ class FakeLine:
     async def receive(self) -> bytes | None:
         frame = await self.incoming.get()
         if frame is None:
-            self.closed = True
+            self.caller_gone()
         return frame
+
+    def caller_gone(self) -> None:
+        self.closed = True
 
     async def send(self, pcm: bytes) -> None:
         self.sent.append(pcm)
