@@ -50,6 +50,9 @@ vamos_voice/                      # the framework: never imports an agent
     openai_realtime/  grok_voice/     # Realtime protocol: OpenAI natively, Grok as a dialect
     gemini_live/  gpt_live/  pipecat/
     deepgram/  elevenlabs/  fluxions/ # managed voice agents: the vendor runs STT+LLM+TTS, tools client-side
+    cascade.py silero.py openai_chat.py data/   # the in-pod cascade (STT -> LLM -> TTS) and its Silero VAD
+    mistral/  huggingface/  grok_cascade/       # cascades: the vendor's legs on cascade.py
+    gradium/                                    # gradbot: Gradium's engine runs the cascade itself
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
     agent.py ... tests/           # world clients (db; payments via the World's gateway), and its own tests
@@ -83,6 +86,11 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 │ deepgram        → Deepgram Voice Agent (nova-3, managed LLM, aura) │
 │ elevenlabs      → ElevenLabs ConvAI (a stored agent per call)      │
 │ fluxions        → Fluxions realtime (bring-your-own tools)         │
+│ mistral         → CascadeProvider: Voxtral STT → Mistral → Voxtral │
+│ huggingface     → CascadeProvider: Whisper → HF router LLM → Kokoro│
+│ grok_cascade    → CascadeProvider: xAI STT → gpt-4.1-mini/Grok →   │
+│                   xAI TTS                                          │
+│ gradium         → gradbot engine: Gradium STT → LLM → Gradium TTS  │
 └─────────────────────────────────────────────────────────────────────┘
       │ every tool call: session.dispatch(name, args) → dict ({"error": ...} on refusal)
       ▼
@@ -255,6 +263,8 @@ on every vendor; turn taking stays each vendor's own.
 | Deepgram Voice Agent | no `greeting` in `Settings`; nothing is requested | `InjectUserMessage` carrying the labelled `opening_note` (no other way to ask for an LLM turn) |
 | ElevenLabs ConvAI | the per-call agent has no `first_message`; nothing is requested | `user_message` carrying the labelled `opening_note` |
 | Fluxions | `greet: false`; nothing is requested | `greet: true`: Fluxions' own opening, generated from the soul. No message asks for a turn (`user.text` is ignored on `/v1/realtime`), so `opening_instruction` itself is not sent |
+| Cascades (Mistral, Hugging Face, Grok cascade) | the LLM runs only on a finished caller turn | an opening round with `opening_instruction` appended as a system message, at once |
+| Gradium (gradbot) | `assistant_speaks_first=False`: gradbot waits for the caller's turn | `assistant_speaks_first=True` (gradbot sends the model a literal `[start]`); `opening_instruction` is appended to the instructions, the only place gradbot reads it |
 
 ### After the call start: turns (Realtime protocol)
 
@@ -368,6 +378,58 @@ client-side over the same socket):
 `RealtimeProtocolProvider` exposes the hook dialects differ on:
 `truncates_on_barge_in` (default `True`).
 
+### In-pod cascades (`providers/cascade.py`)
+
+Mistral, Hugging Face and xAI's STT/TTS sell speech in and speech out as
+separate services; no vendor holds the session. So the pipeline runs in the
+pod, written once in `CascadeProvider` and shared, and a vendor supplies only
+its three legs: `SpeechToText` (caller audio in, finished turns out),
+`ChatModel` (one LLM round: text deltas, then tool calls) and `TextToSpeech`
+(text in, PCM16 24 kHz out). Each matches the VAmoS Energy candidate of the
+same vendor (rory-agent `mistral/`, `huggingface/`, `grok-cascade/`), so the
+vendors are compared under the same plumbing on both benches.
+
+- **Turns.** The model runs only on a finished caller turn. Where the vendor
+  has endpointing it decides (xAI STT's Smart Turn, `speech_final`). Where it
+  has none (Voxtral Realtime documents none; Whisper on HF is
+  request/response), the turn ends after `TurnTaking.silence_ms` of
+  non-speech by Silero (`SilenceEndpoint`, counted in audio time), the
+  Energy candidates' rule. Turns that finish while the agent answers are
+  answered together, in one user message.
+- **Barge-in.** None of these vendors detects the caller talking over the
+  agent, so Silero (`silero.py`, the model Pipecat ships, vendored with its
+  MIT licence) runs on the caller's audio: speech while a turn is being
+  answered stops the audio (`OutboundAudio.interrupted`), clears the vendor's
+  TTS utterance (xAI `text.clear`), and silences the rest of the turn. The LLM
+  round it lands in still completes and its tool calls still run; the reply is
+  kept in the history as the words the caller can have heard
+  (`OutboundAudio.played_ms`), marked `… [interrupted by the caller]`.
+- **Playout.** TTS audio leaves in 0.5 s slices, at most 1 s ahead of real
+  time (vendors synthesize faster than speech plays; audio already at the
+  caller cannot be cut).
+- **Rounds.** Up to 5 per turn: a round's text is spoken as it streams, then
+  its tool calls run in order through `CallSession.dispatch`; a call whose
+  arguments are not JSON is answered with an error, not run. When a tool ends
+  the call, no round follows: the last words play and the line closes.
+
+**Gradium** is different: gradbot (Gradium's engine, a Rust core behind
+`gradbot.run`) runs STT, the LLM and TTS itself and owns turn taking,
+barge-in and the history, so `providers/gradium` only bridges the line and
+answers tool calls. gradbot re-prompts the model while a tool call is
+pending and the model often re-issues the same call; `ToolCalls` answers an
+identical re-issue with the earlier result instead of running it twice (the
+Energy candidate's rule). Its silence nudges (`silence_timeout_s`) are off, as
+on Energy.
+
+| Capability | mistral | huggingface | grok_cascade | gradium |
+|---|---|---|---|---|
+| End of turn | local: Silero + `silence_ms`, then `input_audio.flush` | local: Silero + `silence_ms`, utterance to Whisper | xAI Smart Turn (`smart_turn=0.7`, 3 s timeout) | gradbot |
+| Barge-in | local Silero | local Silero | local Silero + `text.clear` | gradbot (`interrupted` event) |
+| History after barge-in | trimmed to what played | trimmed | trimmed | gradbot keeps only transmitted words |
+| Forced tool choice | never (`tool_choice="auto"`) | same | same | not exposed |
+| Callee-spoke signal | first finished turn | same | same | first `stt_text` |
+| `TurnTaking` mapping | `silence_ms`, `vad_threshold` (Silero start) | same | `vad_threshold` (barge-in only) | none: gradbot's defaults |
+
 ## 11. Config contract (environment)
 
 Framework (every image):
@@ -404,6 +466,15 @@ Vendors:
 | `VAMOS_ELEVENLABS_LLM` / `VAMOS_ELEVENLABS_TTS_MODEL` / `VAMOS_ELEVENLABS_VOICE_ID` | elevenlabs | Defaults `gpt-4.1-mini` (Energy's `ELEVENLABS_LLM`) / `eleven_flash_v2` / `EXAVITQu4vr4xnSDxMaL`. |
 | `FLUXIONS_API_KEY` | fluxions | Required; sent bare in the handshake's `Authorization` header. |
 | `VAMOS_FLUXIONS_BASE_URL` / `VAMOS_FLUXIONS_VOICE` | fluxions | Defaults `https://api.fluxions.ai/vui` (the socket is `<base>/v1/realtime`, `wss`) / `maeve` (resolved to its full `voice_id` at startup). |
+| `MISTRAL_API_KEY` | mistral | Required. |
+| `VAMOS_MISTRAL_LLM_MODEL` / `VAMOS_MISTRAL_STT_MODEL` / `VAMOS_MISTRAL_TTS_MODEL` / `VAMOS_MISTRAL_VOICE` | mistral | Defaults (the Energy candidate's) `mistral-medium-2604` / `voxtral-mini-transcribe-realtime-2602` / `voxtral-mini-tts-2603` / `en_paul_neutral` (a Voxtral preset slug, resolved at startup; unknown fails the boot). |
+| `HF_TOKEN` | huggingface | Required; bills all three legs (serverless Inference Providers). |
+| `VAMOS_HF_LLM_MODEL` / `VAMOS_HF_STT_MODEL` / `VAMOS_HF_TTS_MODEL` / `VAMOS_HF_TTS_VOICE` | huggingface | Defaults `openai/gpt-oss-120b:groq` (Energy's) / `openai/whisper-large-v3` / `hexgrad/Kokoro-82M` (needs a live fal-ai route; checked at startup) / `af_heart`. |
+| `XAI_API_KEY` | grok_cascade | Required (STT, TTS, and the LLM when it is Grok). |
+| `VAMOS_GROK_CASCADE_LLM` | grok_cascade | `gpt-4.1-mini` (default, on OpenAI: needs `OPENAI_API_KEY`) or `grok-4.3` (on xAI, `reasoning_effort: "none"`). Anything else stops startup. |
+| `VAMOS_GROK_STT_MODEL` / `VAMOS_GROK_VOICE` | grok_cascade | Defaults `grok-voice-transcribe-2.0` / `carina` (the cascade's default voice differs from `grok_voice`'s). |
+| `GRADIUM_API_KEY` / `OPENAI_API_KEY` | gradium | Both required: Gradium STT/TTS, and the LLM gradbot calls. |
+| `VAMOS_GRADIUM_LLM_MODEL` / `VAMOS_GRADIUM_VOICE_ID` | gradium | Defaults `gpt-4.1-mini` (Energy's) / `4SZHfMpw-p46Ywgs` (Gradium's "Harper"). |
 
 Agents:
 
@@ -419,7 +490,8 @@ standard names, `OPENAI_API_KEY`, `GEMINI_API_KEY` and `XAI_API_KEY`, as on
 VAmoS Energy, so one bench-wide secret serves every candidate on that vendor.
 Veris Bench allows these exact names (veris-sandbox
 `benchmark/api/app/services/candidate_env.py`), while every other `GEMINI_*`,
-`XAI_*`, `GROK_*` and `VERIS_*` name stays reserved: those namespaces belong to
+`XAI_*`, `GROK_*` and `VERIS_*` name stays reserved (`MISTRAL_API_KEY`, `HF_TOKEN` and
+`GRADIUM_API_KEY` are free names, used as-is): those namespaces belong to
 the platform and to the coding-agent harnesses it runs (their CLIs keep their
 own workspace key), and a bench-wide value there would re-route them. That is
 why every other vendor setting here is `VAMOS_*`; a new variable must not use a
@@ -443,13 +515,17 @@ the trace shows the reads' results in the session instructions.
 | `deepgram` | `deepgram-voice-agent` | Same hook: system, tools and model from `Settings`, speech from `ConversationText`, calls from `FunctionCallRequest`, results from `FunctionCallResponse`. | Keep the raw protocol on `wire.connect_websocket`. |
 | `elevenlabs` | `elevenlabs-convai` | Same hook: the system prompt from the `conversation_initiation_client_data` override (tools live on the stored agent, so the trace has no tool schemas), `user_transcript`, `agent_response`, `client_tool_call` / `client_tool_result`. | The raw protocol (not the SDK); the prompt override is always sent. |
 | `fluxions` | `fluxions-realtime` | Same hook: `session.update` soul and tools, `session.created` model, `user.transcript`, `agent.sentence`, `tool.call` / `tool.result`, `agent.done`. | Keep the raw protocol on `wire.connect_websocket`. |
+| `huggingface`, `grok_cascade` | none (omit) | Same: every round is one `openai` SDK call (`openai_chat.OpenAIChat`). | Keep LLM calls on the `openai` SDK. |
+| `mistral` | none (omit) | Every round is one `mistralai` SDK `chat.complete_async`, which the bundle instruments (`MistralAIInstrumentor`). | Keep LLM calls on the `mistralai` SDK (2.x, as on Energy). |
+| `gradium` | `gradbot` | The model is called from gradbot's Rust core, so no SDK span exists; the adapter wraps `gradbot.run` and reads messages and tool answers off the handles. | Call `gradbot.run` by attribute, keywords only, at call time. |
 
 ## 13. Build, push, register on the bench
 
 Images: `us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e/<agent>-<vendor>`,
 with the vendor's underscores as dashes (the registry's convention, e.g.
 `riley-gemini-live`): `remi-openai-realtime`, `remi-gemini-live`, `remi-grok-voice`,
-`remi-gpt-live`, `remi-pipecat`, `remi-deepgram`, `remi-elevenlabs`, `remi-fluxions`.
+`remi-gpt-live`, `remi-pipecat`, `remi-deepgram`, `remi-elevenlabs`, `remi-fluxions`, `remi-mistral`,
+`remi-huggingface`, `remi-grok-cascade`, `remi-gradium`.
 
 ```bash
 REPO=us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e
@@ -506,6 +582,11 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | `deepgram` | `deepgram-voice-agent` | `DEEPGRAM_API_KEY` | `VAMOS_DEEPGRAM_LLM_MODEL` (`gpt-4.1-mini`, as Rory "Deepgram"; also the default) |
 | `elevenlabs` | `elevenlabs-convai` | `ELEVENLABS_API_KEY` | `VAMOS_ELEVENLABS_LLM` (`gpt-4.1-mini`, as Rory "ElevenLabs"; also the default) |
 | `fluxions` | `fluxions-realtime` | `FLUXIONS_API_KEY` | optional `VAMOS_FLUXIONS_BASE_URL`, `VAMOS_FLUXIONS_VOICE`. No `public_endpoint`: nothing calls back (the Energy candidate's `public_endpoint: true` is unused by its code) |
+| `mistral` | omit | `MISTRAL_API_KEY` | `VAMOS_MISTRAL_LLM_MODEL=mistral-medium-2604` (Energy's; the other models default to Energy's too) |
+| `huggingface` | omit | `HF_TOKEN` | `VAMOS_HF_LLM_MODEL=openai/gpt-oss-120b:groq` (Energy's) |
+| `grok_cascade` (GPT-4.1 mini) | omit | `XAI_API_KEY`, `OPENAI_API_KEY` | none needed (`VAMOS_GROK_CASCADE_LLM` defaults to `gpt-4.1-mini`) |
+| `grok_cascade` (Grok 4.3) | omit | `XAI_API_KEY` | `VAMOS_GROK_CASCADE_LLM=grok-4.3` (same image as the row above) |
+| `gradium` | `gradbot` | `GRADIUM_API_KEY`, `OPENAI_API_KEY` | `VAMOS_GRADIUM_LLM_MODEL=gpt-4.1-mini` (Energy's) |
 
 Every candidate (every row above) sets `"protocol": "json"` in its channel and
 `VAMOS_VOICE_FRAMING=json` in its `image.env`, together (both, or neither): with `binary` an agent that ends the call is
@@ -583,6 +664,13 @@ uv run ruff check . && uv run ruff format --check .
   voice agents' own protocol (Deepgram's `Settings` and audio held until `SettingsApplied`;
   ElevenLabs' per-call agent, always deleted, and its parameter descriptions; Fluxions' soul
   cap, full voice id, 16 kHz uplink and playback buffer), each with its hang-up timing.
+- `tests/test_cascade.py`: the shared in-pod cascade with scripted legs (`tests/cascade_fakes.py`):
+  callee first / agent first, rounds and tools, hang-up, barge-in (tools still run, history trimmed),
+  playout pacing; `SilenceEndpoint`; Silero on recorded speech (`tests/fixtures/caller_speech_24k.pcm`).
+- `tests/test_mistral.py`, `tests/test_huggingface.py`, `tests/test_grok_cascade.py`, `tests/test_gradium.py`:
+  each cascade's own legs (Voxtral frames and flush, Whisper/fal requests on `httpx.MockTransport`,
+  xAI STT/TTS frames and `text.clear`, the streamed `openai` round; gradbot via a fake `gradbot.run`:
+  re-issued tool calls answered once, the hang-up after the last words).
 - `tests/test_realtime_turns.py`: the Realtime call flow (nothing but the session at call start,
   vendor-native turn taking, a request refused for an active response).
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.

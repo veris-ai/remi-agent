@@ -65,6 +65,10 @@ def test_every_vendor_folder_is_covered_here() -> None:
         "deepgram",
         "elevenlabs",
         "fluxions",
+        "mistral",
+        "huggingface",
+        "grok_cascade",
+        "gradium",
     }
 
 
@@ -83,6 +87,10 @@ STANDARD_KEYS = {
     "deepgram": ("DEEPGRAM_API_KEY",),
     "elevenlabs": ("ELEVENLABS_API_KEY",),
     "fluxions": ("FLUXIONS_API_KEY",),
+    "mistral": ("MISTRAL_API_KEY",),
+    "huggingface": ("HF_TOKEN",),
+    "grok_cascade": ("XAI_API_KEY",),  # plus OPENAI_API_KEY for its default LLM (checked in from_env)
+    "gradium": ("GRADIUM_API_KEY", "OPENAI_API_KEY"),
 }
 
 
@@ -107,6 +115,7 @@ def test_provider_metadata(name: str) -> None:
         "deepgram-voice-agent",
         "elevenlabs-convai",
         "fluxions-realtime",
+        "gradbot",
     }
 
 
@@ -846,3 +855,236 @@ def test_pipecat_pipeline_assembles_against_the_pinned_pipecat(agent: str) -> No
     call.line.websocket = MagicMock()
     worker = provider.build_worker(call, provider.build_context(call.setup))
     assert type(worker).__name__ == "PipelineWorker"
+
+
+# --- in-pod cascades: what the chat model receives, through the shared cascade ------------------
+
+
+def mistral_provider() -> Any:
+    from vamos_voice.providers.mistral import MistralConfig, MistralProvider
+
+    return MistralProvider(MistralConfig(api_key="mistral-test"))
+
+
+def huggingface_provider() -> Any:
+    from vamos_voice.providers.huggingface import HuggingFaceConfig, HuggingFaceProvider
+
+    return HuggingFaceProvider(HuggingFaceConfig(token="hf-test"))
+
+
+def grok_cascade_provider() -> Any:
+    from vamos_voice.providers.grok_cascade import GrokCascadeConfig, GrokCascadeProvider
+
+    return GrokCascadeProvider(GrokCascadeConfig(xai_api_key="xai-test", llm_api_key="sk-test"))
+
+
+CASCADE_VENDORS = {
+    "mistral": mistral_provider,
+    "huggingface": huggingface_provider,
+    "grok_cascade": grok_cascade_provider,
+}
+
+
+def _tools_of(request_tools: list[dict[str, Any]]) -> dict[str, tuple[set[str], set[str]]]:
+    return {
+        t["function"]["name"]: (
+            set(t["function"]["parameters"]["properties"]),
+            set(t["function"]["parameters"]["required"]),
+        )
+        for t in request_tools
+    }
+
+
+@pytest.mark.parametrize("agent", CALLEE_FIRST_CASES)
+@pytest.mark.parametrize("name", sorted(CASCADE_VENDORS))
+async def test_cascade_vendor_waits_for_the_callee(name: str, agent: str) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    from .cascade_fakes import FakeLLM, tool, wait_until, with_fake_legs
+
+    case = CASES[agent]
+    llm = FakeLLM(["Hi, this is the agent.", tool("end_call")])
+    provider = CASCADE_VENDORS[name]()
+    stt, _ = with_fake_legs(provider, llm)
+    line, session = FakeLine(), ScriptedSession()
+    call = runtime(case, line, session)
+    task = asyncio.create_task(provider.run_call(call))
+
+    await line.incoming.put(HELLO)  # the callee answers: straight to STT, nothing asks the model
+    await wait_until(lambda: stt.fed)
+    await asyncio.sleep(0.05)
+    assert llm.requests == [] and line.sent == []
+
+    await stt.turns.put("Hello?")
+    await asyncio.wait_for(task, 3)
+    ((messages, tools),) = llm.requests
+    assert messages == [
+        {"role": "system", "content": case.setup().instructions},
+        {"role": "user", "content": "Hello?"},
+    ]
+    assert _tools_of(tools) == case.expected_tools()
+    assert line.sent and line.closed
+    assert [c for c, _ in session.calls] == ["end_call"]
+
+
+@pytest.mark.parametrize("name", sorted(CASCADE_VENDORS))
+async def test_cascade_vendor_starts_with_remis_screen_pop(name: str) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    from .cascade_fakes import FakeLLM, tool, wait_until, with_fake_legs
+
+    events: list[str] = []
+
+    class RecordingLLM(FakeLLM):
+        async def reply(self, messages, tools):
+            events.append("llm")
+            async for part in super().reply(messages, tools):
+                yield part
+
+    llm = RecordingLLM(["Hi.", tool("take_payment")])
+    provider = CASCADE_VENDORS[name]()
+    stt, _ = with_fake_legs(provider, llm)
+    line = FakeLine(events)
+    call = await remi_screen_pop_runtime(events, line)
+    task = asyncio.create_task(provider.run_call(call))
+    await stt.turns.put("Hello?")
+    await wait_until(lambda: call.session.results)  # type: ignore[attr-defined]
+
+    system = llm.requests[0][0][0]
+    assert system == {"role": "system", "content": call.setup.instructions}
+    assert (
+        "# Account on screen" in system["content"] and "You are calling Marcus Sokolov" in system["content"]
+    )
+    for secret in REMI_SECRETS:
+        assert secret not in system["content"]
+    reads = [i for i, e in enumerate(events) if e.startswith("sql:")]
+    assert {events[i] for i in reads} >= {"sql:accounts", "sql:phones", "sql:contact_attempts"}
+    assert max(reads) < events.index("llm") < events.index("agent audio")
+    ((tool_name, refusal),) = call.session.results  # type: ignore[attr-defined]
+    assert tool_name == "take_payment" and refusal["error"].startswith("Confirm the right party first")
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("agent", AGENT_FIRST_CASES)
+@pytest.mark.parametrize("name", sorted(CASCADE_VENDORS))
+async def test_cascade_vendor_lets_an_inbound_agent_speak_first(name: str, agent: str) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    from .cascade_fakes import FakeLLM, tool, wait_until, with_fake_legs
+
+    case = CASES[agent]
+    llm = FakeLLM(["Thanks for calling."], [tool("verify_caller", "{}")], ["Bye.", tool("end_call")])
+    provider = CASCADE_VENDORS[name]()
+    stt, _ = with_fake_legs(provider, llm)
+    line, session = FakeLine(), ScriptedSession()
+    call = runtime(case, line, session)
+    task = asyncio.create_task(provider.run_call(call))
+
+    await wait_until(lambda: line.sent)  # the greeting, before the caller has said anything
+    opening = llm.requests[0][0]
+    assert opening == [
+        {"role": "system", "content": case.setup().instructions},
+        {"role": "system", "content": case.policy.opening_instruction},
+    ]
+    assert _tools_of(llm.requests[0][1]) == case.expected_tools()
+    await stt.turns.put("My account is ACME-1.")
+    await asyncio.wait_for(task, 3)
+    assert line.closed
+    assert [c for c, _ in session.calls] == ["verify_caller", "end_call"]
+
+
+# --- gradium: the session gradbot is started with -----------------------------------------
+
+
+def _gradbot_tools(config: Any) -> dict[str, tuple[set[str], set[str]]]:
+    import json
+
+    out = {}
+    for t in config.tools:
+        params = json.loads(t.parameters_json)
+        out[t.name] = (set(params["properties"]), set(params["required"]))
+    return out
+
+
+@pytest.mark.parametrize("agent", CALLEE_FIRST_CASES)
+async def test_gradium_waits_for_the_callee(agent: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not installed("gradium"):
+        pytest.skip("gradium extra not installed")
+    from vamos_voice.providers.gradium import GradiumConfig, GradiumProvider
+
+    from .cascade_fakes import wait_until
+    from .gradbot_fakes import AUDIO_48K, FakeGradbot
+
+    case = CASES[agent]
+    gradbot = FakeGradbot().install(monkeypatch)
+    line, session = FakeLine(), ScriptedSession()
+    call = runtime(case, line, session)
+    task = asyncio.create_task(GradiumProvider(GradiumConfig("grad-test", "sk-test")).run_call(call))
+    await gradbot.started.wait()
+    config = gradbot.config
+    assert config.instructions == case.setup().instructions
+    assert _gradbot_tools(config) == case.expected_tools()
+    assert config.assistant_speaks_first is False and config.silence_timeout_s == 0.0
+    assert gradbot.kwargs["llm_model_name"] == "gpt-4.1-mini"
+
+    await line.incoming.put(HELLO)
+    await wait_until(lambda: gradbot.caller_audio)
+    assert gradbot.caller_audio == [HELLO], "caller audio reaches gradbot untouched"
+    gradbot.audio()  # anything before the callee is heard is dropped
+    await asyncio.sleep(0.05)
+    assert line.sent == []
+    gradbot.stt("Hello?")
+    gradbot.audio()
+    await wait_until(lambda: line.sent)
+    assert len(line.sent[0]) == len(AUDIO_48K) // 2, "48 kHz out becomes 24 kHz"
+
+    gradbot.tool_call("end_call")
+    gradbot.event("end_tts_audio")
+    await asyncio.wait_for(task, 3)
+    assert line.closed and gradbot.closed
+    assert [c for c, _ in session.calls] == ["end_call"]
+
+
+async def test_gradium_starts_with_remis_screen_pop(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not installed("gradium"):
+        pytest.skip("gradium extra not installed")
+    from vamos_voice.providers.gradium import GradiumConfig, GradiumProvider
+
+    from .gradbot_fakes import FakeGradbot
+
+    events: list[str] = []
+    gradbot = FakeGradbot().install(monkeypatch)
+    call = await remi_screen_pop_runtime(events, FakeLine(events))
+    task = asyncio.create_task(GradiumProvider(GradiumConfig("grad-test", "sk-test")).run_call(call))
+    await gradbot.started.wait()
+    instructions = gradbot.config.instructions
+    assert instructions == call.setup.instructions and "# Account on screen" in instructions
+    assert not any(secret in instructions for secret in REMI_SECRETS)
+    assert {"sql:accounts", "sql:phones", "sql:contact_attempts"} <= set(events)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("agent", AGENT_FIRST_CASES)
+async def test_gradium_lets_an_inbound_agent_speak_first(agent: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not installed("gradium"):
+        pytest.skip("gradium extra not installed")
+    from vamos_voice.providers.gradium import GradiumConfig, GradiumProvider
+
+    from .cascade_fakes import wait_until
+    from .gradbot_fakes import FakeGradbot
+
+    case = CASES[agent]
+    gradbot = FakeGradbot().install(monkeypatch)
+    line = FakeLine()
+    call = runtime(case, line, ScriptedSession())
+    task = asyncio.create_task(GradiumProvider(GradiumConfig("grad-test", "sk-test")).run_call(call))
+    await gradbot.started.wait()
+    config = gradbot.config
+    assert config.assistant_speaks_first is True
+    assert config.instructions == f"{case.setup().instructions}\n\n{case.policy.opening_instruction}"
+    gradbot.audio()  # the greeting reaches the caller before they speak
+    await wait_until(lambda: line.sent)
+    gradbot.end()
+    await asyncio.wait_for(task, 3)

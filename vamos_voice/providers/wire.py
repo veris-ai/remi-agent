@@ -10,6 +10,7 @@ from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any
 
 import websockets
+import websockets.asyncio.client
 
 if TYPE_CHECKING:
     from ..session import CallSession
