@@ -105,8 +105,11 @@ async def test_stt_sends_the_callers_audio_unchanged_and_only_utterance_finals_a
         }
     )
     sock.inbox.put_nowait(None)  # xAI closes
-    await stt.run(on_turn)
+    interim: list[str] = []
+    await stt.run(on_turn, interim.append)
     assert turns == ["447 129"]
+    assert interim == ["four four", "four four seven"], "partials feed barge-in, never a turn"
+    assert GrokSTT.interim_text
 
 
 async def test_stt_must_open_with_transcript_created() -> None:

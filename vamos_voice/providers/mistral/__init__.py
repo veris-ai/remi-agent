@@ -47,6 +47,7 @@ from vamos_voice.providers.base import CallRuntime
 from vamos_voice.providers.cascade import (
     CascadeProvider,
     ChatModel,
+    InterimSink,
     Message,
     SilenceEndpoint,
     SpeechToText,
@@ -117,6 +118,8 @@ class MistralChat(ChatModel):
 class VoxtralRealtime(SpeechToText):
     """Voxtral Realtime transcription, with the turn ended locally by a flush after silence."""
 
+    interim_text = True  # transcription.text.delta
+
     def __init__(self, ws: Any, silence_ms: int) -> None:
         self.ws = ws
         self.endpoint = SilenceEndpoint(silence_ms)
@@ -138,7 +141,7 @@ class VoxtralRealtime(SpeechToText):
         if self.endpoint.push(len(pcm), speaking):
             await self.ws.send(json.dumps({"type": "input_audio.flush"}))
 
-    async def run(self, on_turn: TurnSink) -> None:
+    async def run(self, on_turn: TurnSink, on_interim: InterimSink) -> None:
         while True:
             try:
                 event = json.loads(await self.ws.recv())
@@ -146,7 +149,9 @@ class VoxtralRealtime(SpeechToText):
                 logger.info("Voxtral Realtime closed: %s", closed)
                 return
             kind = event.get("type")
-            if kind == "transcription.done":
+            if kind == "transcription.text.delta":
+                on_interim(event.get("text") or "")
+            elif kind == "transcription.done":
                 await on_turn(event.get("text") or "")
             elif kind == "error":
                 raise RuntimeError(f"Voxtral Realtime error: {event.get('error')}")

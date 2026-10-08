@@ -19,6 +19,7 @@ from vamos_voice.providers.base import SessionSetup
 from vamos_voice.providers.cascade import (
     CascadeProvider,
     ChatModel,
+    InterimSink,
     Message,
     SpeechToText,
     TextToSpeech,
@@ -36,14 +37,17 @@ class ScriptedVad:
 
 
 class FakeSTT(SpeechToText):
-    def __init__(self) -> None:
+    def __init__(self, interim_text: bool = False) -> None:
+        self.interim_text = interim_text  # type: ignore[misc]
+        self.on_interim: InterimSink | None = None
         self.fed: list[tuple[bytes, bool]] = []
         self.turns: asyncio.Queue[str] = asyncio.Queue()
 
     async def feed(self, pcm: bytes, speaking: bool) -> None:
         self.fed.append((pcm, speaking))
 
-    async def run(self, on_turn: TurnSink) -> None:
+    async def run(self, on_turn: TurnSink, on_interim: InterimSink) -> None:
+        self.on_interim = on_interim
         while True:
             await on_turn(await self.turns.get())
 
