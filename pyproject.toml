@@ -56,6 +56,24 @@ grok_cascade = [
 gradium = [
     "gradbot>=0.2,<0.3",
 ]
+# Hosted orchestrators: the vendor runs STT -> LLM -> TTS; the pod relays audio and answers tools.
+vapi = [
+    "httpx>=0.28,<0.29",
+]
+cartesia = [
+    "httpx>=0.28,<0.29",
+]
+# LiveKit Agents in-process, in a room on the image's own livekit-server (see the Dockerfile).
+livekit = [
+    "aiohttp>=3.10,<4",
+    "livekit>=1.1,<1.2",
+    "livekit-api>=1.2,<1.3",
+    "livekit-agents>=1.8,<1.9",
+    "livekit-plugins-openai>=1.8,<1.9",
+    "livekit-plugins-deepgram>=1.8,<1.9",
+    "livekit-plugins-elevenlabs>=1.8,<1.9",
+    "livekit-plugins-silero>=1.8,<1.9",
+]
 
 [dependency-groups]
 dev = [
@@ -91,4 +109,14 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests", "vamos_agents"]
 markers = [
     "postgres: needs a real Postgres (docker or REMI_TEST_DATABASE_URL); Remi's tests",
+]
+
+[tool.uv]
+# An image installs one vendor extra, so vendor extras may pin incompatible versions of a shared
+# library. LiveKit Agents needs openai<3; the extras that use the openai SDK pin openai>=3 (pipecat,
+# huggingface, grok_cascade). Each is locked in its own fork against livekit.
+conflicts = [
+    [{ extra = "pipecat" }, { extra = "livekit" }],
+    [{ extra = "huggingface" }, { extra = "livekit" }],
+    [{ extra = "grok-cascade" }, { extra = "livekit" }],
 ]

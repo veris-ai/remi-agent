@@ -30,6 +30,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, Self
 
+from fastapi import APIRouter
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from ..audio import pcm_ms
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 #: Longest the agent waits for its last words to play before closing the line.
 MAX_DRAIN_S = 15.0
+#: Where a provider's own HTTP routes are mounted: ``/vendor/<provider name>/...``.
+VENDOR_ROUTE_PREFIX = "/vendor"
 
 
 @dataclass(frozen=True)
@@ -174,6 +177,7 @@ class OutboundAudio:
         self._start = start
         self._monotonic = monotonic
         self._playout_until = 0.0
+        self._last_sent_at: float | None = None
         self._items: dict[str, _Item] = {}
         self.dropped_bytes = 0
         self.sent_bytes = 0
@@ -192,6 +196,8 @@ class OutboundAudio:
         item.n_bytes += len(pcm)
         self._playout_until = max(now, self._playout_until) + pcm_ms(len(pcm)) / 1000
         self.sent_bytes += len(pcm)
+        if pcm.strip(b"\x00"):  # a vendor that streams digital silence (Vapi) is still quiet
+            self._last_sent_at = now
         await self._line.send(pcm)
         return True
 
@@ -217,6 +223,19 @@ class OutboundAudio:
         remaining = min(MAX_DRAIN_S, self._playout_until - self._monotonic())
         if remaining > 0:
             await asyncio.sleep(remaining)
+
+    async def wait_until_quiet(self, quiet_s: float, max_wait_s: float, poll_s: float = 0.05) -> None:
+        """Wait until no audible agent audio has arrived for ``quiet_s`` (giving up after ``max_wait_s``).
+
+        For vendors that run the model on their side and may still be sending the last words
+        when the agent's hang-up tool returns: the hang-up waits for the vendor to stop
+        sending audio, then ``drain`` lets that audio play.
+        """
+        start = self._monotonic()
+        while (now := self._monotonic()) - start < max_wait_s:
+            if now - max(start, self._last_sent_at or start) >= quiet_s:
+                return
+            await asyncio.sleep(poll_s)
 
 
 @dataclass
@@ -250,6 +269,9 @@ class VoiceProvider(abc.ABC):
     trace_adapter: ClassVar[str | None]
     #: Environment variables the provider cannot start without (checked at startup).
     required_env: ClassVar[tuple[str, ...]]
+    #: Can the vendor be asked for an opening turn (``agent_first``)? A vendor that cannot
+    #: (Cartesia Managed Agents) refuses an agent that speaks first at startup.
+    opens_calls: ClassVar[bool] = True
 
     @classmethod
     @abc.abstractmethod
@@ -262,6 +284,23 @@ class VoiceProvider(abc.ABC):
 
     async def warm_up(self) -> None:  # noqa: B027 - optional hook, deliberately empty
         """Load anything slow (models, VAD) before /health reports ready."""
+
+    async def close(self) -> None:  # noqa: B027 - optional hook, deliberately empty
+        """Release what ``warm_up`` started (a sidecar process); runs when the server stops."""
+
+    def router(self) -> APIRouter | None:
+        """HTTP routes the vendor calls back on (a hosted orchestrator's tool webhook), or None.
+
+        The server mounts them at ``/vendor/<name>`` (``vendor_route_path``). Every route must
+        authenticate its caller itself (a per-call secret the provider handed the vendor) and
+        must run tools only through the live call's ``CallSession.dispatch``.
+        """
+        return None
+
+
+def vendor_route_path(provider_name: str, path: str) -> str:
+    """The server path of one of a provider's routes: ``/vendor/<name><path>``."""
+    return f"{VENDOR_ROUTE_PREFIX}/{provider_name}{path}"
 
 
 def missing_env(provider: type[VoiceProvider], env: Mapping[str, str]) -> list[str]:

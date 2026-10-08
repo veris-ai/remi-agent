@@ -147,10 +147,27 @@ details):
 | `elevenlabs` (`remi-elevenlabs`) | `trace_adapter: elevenlabs-convai`; candidate-env `ELEVENLABS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json` (+ optional `VAMOS_ELEVENLABS_LLM`, default `gpt-4.1-mini`) | A stored agent is created per call with Remi's instructions (screen pop included) and deleted after it: about 2 s between `/voice` connecting and the vendor hearing the callee (their "Hello?" is buffered, not lost). Parameters Remi leaves undescribed get their own name as description (ElevenLabs requires one). Checked against the live API, agents cleaned up. |
 | `fluxions` (`remi-fluxions`) | `trace_adapter: fluxions-realtime`; candidate-env `FLUXIONS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json`; no `public_endpoint` | **Remi cannot run on `api.fluxions.ai` today:** its instructions are ~14,300 characters with the screen pop and that host keeps 4,000 of the soul (silently). The provider refuses such a call before connecting rather than run Remi on a third of its policy. It needs a Fluxions host with a larger `max_soul_chars` (`VAMOS_FLUXIONS_BASE_URL`). The protocol itself was checked live with a cut prompt (callee first, tool calls, paced playback). |
 
+## Vendors
+
+Remi runs on every vendor in `vamos_voice/providers/` (image
+`bench-e2e/remi-<vendor>`); the candidate settings are in AGENTS.md section 13.
+On the hosted orchestrators and LiveKit:
+
+- **Vapi**: the candidate needs `"public_endpoint": true` (Vapi calls the tools
+  back on the pod). Callee first is Vapi's `assistant-waits-for-user`.
+- **Cartesia**: tools run over the agent's own socket (client tools), so no
+  public endpoint. Cartesia reserves the name `end_call`, so Remi's `end_call`
+  is declared as `end_call_` there and mapped back; its gate (the call must be
+  logged first) is unchanged. Cartesia accepts only `type`, `description`,
+  `enum` and `items` in a parameter schema, so bounds and formats (amounts,
+  dates) are not shown to its model; Remi's argument validation still refuses
+  an out-of-range value with a message the model can act on.
+- **LiveKit**: the image runs its own `livekit-server`; nothing extra on the bench.
+
 ## Tests
 
 ```bash
-uv run --all-extras pytest -q vamos_agents/remi
+uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
 ```
 
 - `tests/test_tools.py`: every flow against a real Postgres loaded with the

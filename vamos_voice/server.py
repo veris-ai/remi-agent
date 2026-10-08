@@ -6,7 +6,9 @@ Anything missing fails the process at startup with a message naming it, so a
 misconfigured candidate never reaches a call. ``/health`` stays 503 until the
 agent's world clients are connected and the provider has warmed up.
 
-``/voice`` takes exactly one call per pod (the bench's contract): it builds
+A provider may contribute HTTP routes (``VoiceProvider.router``: a hosted
+orchestrator's tool webhook); they are mounted at ``/vendor/<name>`` and
+authenticate their caller themselves. ``/voice`` takes exactly one call per pod (the bench's contract): it builds
 the call's ``CallSession``, runs the agent's screen pop (its connect-time
 reads, before any vendor session opens: ``vamos_voice.screen_pop``), builds
 the ``CallRuntime`` and hands it to the provider. Whatever happens, the
@@ -38,6 +40,7 @@ from .providers.base import (
     TurnTaking,
     VoiceProvider,
     missing_env,
+    vendor_route_path,
 )
 from .registry import load_agent
 from .screen_pop import ScreenPop, run_screen_pop, with_screen_pop
@@ -97,9 +100,14 @@ def create_app(
         try:
             yield
         finally:
-            await agent.close()
+            try:
+                await provider.close()
+            finally:
+                await agent.close()
 
     app = FastAPI(title=f"vamos-agents: {agent.name}", lifespan=lifespan)
+    if (router := provider.router()) is not None:
+        app.include_router(router, prefix=vendor_route_path(provider.name, ""))
 
     @app.get("/health")
     async def health() -> JSONResponse:
@@ -182,6 +190,10 @@ def build_app_from_env(env: Mapping[str, str]) -> FastAPI:
         provider_cls = load_provider(env[VENDOR_ENV])
         if absent := missing_env(provider_cls, env):
             raise ConfigError(f"{provider_cls.name} needs {', '.join(absent)}")
+        if agent_cls.call_start.agent_opens and not provider_cls.opens_calls:
+            raise ConfigError(
+                f"{provider_cls.name} cannot open a call, and agent {agent_cls.name} speaks first"
+            )
         provider = provider_cls.from_env(env)
     except (ValueError, LookupError) as err:  # ContextError, ConfigError, Unknown{Agent,Vendor}
         raise ConfigError(str(err)) from err

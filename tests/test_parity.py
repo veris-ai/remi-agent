@@ -69,6 +69,9 @@ def test_every_vendor_folder_is_covered_here() -> None:
         "huggingface",
         "grok_cascade",
         "gradium",
+        "vapi",
+        "cartesia",
+        "livekit",
     }
 
 
@@ -116,6 +119,8 @@ def test_provider_metadata(name: str) -> None:
         "elevenlabs-convai",
         "fluxions-realtime",
         "gradbot",
+        "vapi",
+        "cartesia",
     }
 
 
@@ -1088,3 +1093,75 @@ async def test_gradium_lets_an_inbound_agent_speak_first(agent: str, monkeypatch
     await wait_until(lambda: line.sent)
     gradbot.end()
     await asyncio.wait_for(task, 3)
+
+
+# --- hosted orchestrators and LiveKit: what each vendor is handed ----------------------------
+# (their scripted calls, webhook and resource lifecycles are in tests/test_hosted_vendors.py)
+
+
+def _vapi_handed(case: AgentCase) -> dict[str, Any]:
+    from vamos_voice.providers.vapi import VapiProvider
+
+    assistant = VapiProvider("vapi-test", "https://pod.example")
+    model = assistant.assistant(case.setup(), "s3cret")["model"]
+    tools = model["tools"]
+    assert {t["server"]["url"] for t in tools} == {"https://pod.example/vendor/vapi/tool"}
+    return {
+        "instructions": model["messages"][0]["content"],
+        "tools": {
+            t["function"]["name"]: (
+                set(t["function"]["parameters"]["properties"]),
+                set(t["function"]["parameters"]["required"]),
+            )
+            for t in tools
+        },
+    }
+
+
+def _cartesia_handed(case: AgentCase) -> dict[str, Any]:
+    from vamos_voice.providers.cartesia import CartesiaProvider, tool_name
+
+    provider = CartesiaProvider("ct-test")
+    setup = case.setup()
+    definitions = provider.tool_format.convert(setup.tools)
+    return {
+        "instructions": provider.agent_config(setup, [])["instructions"],
+        "tools": {
+            tool_name(d["name"]): (set(d["parameters"]["properties"]), set(d["parameters"]["required"]))
+            for d in definitions
+        },
+    }
+
+
+def _livekit_handed(case: AgentCase) -> dict[str, Any]:
+    import asyncio as _asyncio
+
+    from livekit.agents.llm.tool_context import get_raw_function_info
+
+    from vamos_voice.providers.livekit import LiveKitConfig, LiveKitProvider
+
+    provider = LiveKitProvider(LiveKitConfig("sk-test", "dg-test", "el-test"))
+    agent = provider.build_agent(runtime(case), _asyncio.Event())
+    raw = [get_raw_function_info(t).raw_schema for t in agent.tools]
+    return {
+        "instructions": agent.instructions,
+        "tools": {
+            r["name"]: (set(r["parameters"]["properties"]), set(r["parameters"]["required"])) for r in raw
+        },
+    }
+
+
+HANDED = {"vapi": _vapi_handed, "cartesia": _cartesia_handed, "livekit": _livekit_handed}
+
+
+@pytest.mark.parametrize("agent", sorted(CASES))
+@pytest.mark.parametrize("name", sorted(HANDED))
+def test_hosted_and_livekit_vendors_get_the_same_instructions_and_tools(name: str, agent: str) -> None:
+    if not installed(name):
+        pytest.skip(f"{name} extra not installed")
+    case = CASES[agent]
+    if case.policy.agent_opens and not load_provider(name).opens_calls:
+        pytest.skip(f"{name} cannot open a call (refused at startup)")
+    handed = HANDED[name](case)
+    assert handed["instructions"] == case.setup().instructions
+    assert handed["tools"] == case.expected_tools()

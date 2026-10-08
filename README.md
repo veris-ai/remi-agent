@@ -8,13 +8,13 @@ under `vamos_agents/` that supplies its prompt, tools, rules and world clients.
 
 | Agent | Benchmark | Calls | Vendors |
 |---|---|---|---|
-| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Grok Voice, GPT-Live, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS), Mistral (Voxtral cascade), Hugging Face (Whisper → gpt-oss → Kokoro), Grok STT + TTS cascade, Gradium (gradbot) |
+| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Grok Voice, GPT-Live, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS), Mistral (Voxtral cascade), Hugging Face (Whisper → gpt-oss → Kokoro), Grok STT + TTS cascade, Gradium (gradbot), Vapi, Cartesia, LiveKit |
 
 ## Quickstart
 
 ```bash
-uv sync --all-extras
-uv run --all-extras pytest -q                      # Remi's tool tests need docker (Postgres 16)
+uv run --all-extras --no-extra livekit pytest -q   # Remi's tool tests need docker (Postgres 16)
+uv run --all-extras --no-extra pipecat --no-extra huggingface --no-extra grok-cascade pytest -q   # LiveKit pins openai<3: separate forks
 uv run ruff check . && uv run ruff format --check .
 
 docker build --platform linux/amd64 --build-arg AGENT=remi --build-arg VENDOR=openai_realtime \
@@ -30,7 +30,8 @@ curl localhost:8008/health
 `grok_voice` (xAI, key `XAI_API_KEY`), `gpt_live` (OpenAI GPT-Live),
 `gemini_live`, `pipecat`, and the cascades `mistral` (`MISTRAL_API_KEY`), `huggingface`
 (`HF_TOKEN`), `grok_cascade` (`XAI_API_KEY`, plus `OPENAI_API_KEY` for its default
-`gpt-4.1-mini`) and `gradium` (`GRADIUM_API_KEY`, `OPENAI_API_KEY`). Vendors differ in what they support (barge-in
+`gpt-4.1-mini`) and `gradium` (`GRADIUM_API_KEY`, `OPENAI_API_KEY`). `vapi` and `cartesia`
+(hosted orchestrators), `livekit` (LiveKit Agents; the image runs its own LiveKit server). Vendors differ in what they support (barge-in
 truncation, VAD settings); what the agent knows when the call connects does
 not: the agent's own screen pop puts it in every vendor's instructions
 (AGENTS.md section 6). AGENTS.md section 10 lists the

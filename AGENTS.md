@@ -46,13 +46,15 @@ vamos_voice/                      # the framework: never imports an agent
   session/engine.py               # CallSession: the one dispatch path (gates, redaction, never raises)
   session/gates.py                # Gates protocol + GateLadder (ordered state machine)
   providers/                      # the vendor seam and the vendors
-    base.py realtime_protocol.py wire.py
+    base.py realtime_protocol.py wire.py hosted.py
     openai_realtime/  grok_voice/     # Realtime protocol: OpenAI natively, Grok as a dialect
     gemini_live/  gpt_live/  pipecat/
     deepgram/  elevenlabs/  fluxions/ # managed voice agents: the vendor runs STT+LLM+TTS, tools client-side
     cascade.py silero.py openai_chat.py data/   # the in-pod cascade (STT -> LLM -> TTS) and its Silero VAD
     mistral/  huggingface/  grok_cascade/       # cascades: the vendor's legs on cascade.py
     gradium/                                    # gradbot: Gradium's engine runs the cascade itself
+    vapi/  cartesia/                  # hosted orchestrators (the vendor runs STT, LLM, TTS)
+    livekit/                          # LiveKit Agents in a room on the image's own livekit-server
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
     agent.py ... tests/           # world clients (db; payments via the World's gateway), and its own tests
@@ -73,6 +75,8 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 │ WS  /voice   one call per pod: clock, CallSession, agent.screen_pop() (connect reads, │
 │              before any vendor session), CallRuntime → provider.run_call()            │
 │              → agent state's finalize()                                               │
+│ POST /vendor/<name>/...  only a provider's own router (Vapi's tool webhook), each      │
+│              route authenticated by a per-call secret, dispatching via CallSession    │
 └───────────────────────────────────────────────────────────────────────────────────────┘
       │ CallRuntime: setup (instructions + screen pop, tool specs, TurnTaking, CallStartPolicy)
       │              start (CallStart)  inbound (caller audio)  outbound (gated)
@@ -91,6 +95,10 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 │ grok_cascade    → CascadeProvider: xAI STT → gpt-4.1-mini/Grok →   │
 │                   xAI TTS                                          │
 │ gradium         → gradbot engine: Gradium STT → LLM → Gradium TTS  │
+│ vapi            → hosted: inline assistant, server tools (webhook) │
+│ cartesia        → hosted: managed agent, client tools on its WS    │
+│ livekit         → LiveKit Agents (Deepgram, OpenAI, ElevenLabs) in │
+│                   a room on the image's own livekit-server         │
 └─────────────────────────────────────────────────────────────────────┘
       │ every tool call: session.dispatch(name, args) → dict ({"error": ...} on refusal)
       ▼
@@ -429,6 +437,47 @@ on Energy.
 | Forced tool choice | never (`tool_choice="auto"`) | same | same | not exposed |
 | Callee-spoke signal | first finished turn | same | same | first `stt_text` |
 | `TurnTaking` mapping | `silence_ms`, `vad_threshold` (Silero start) | same | `vad_threshold` (barge-in only) | none: gradbot's defaults |
+The hosted orchestrators and LiveKit (the vendor, or LiveKit Agents, runs the
+whole STT → LLM → TTS loop and its turn taking):
+
+| Capability | vapi | cartesia | livekit |
+|---|---|---|---|
+| What runs where | Vapi: Deepgram `nova-3`, OpenAI `gpt-4.1-mini`, ElevenLabs `eleven_flash_v2` | Cartesia: Ink STT, `gpt-4.1` (its catalog has no `gpt-4.1-mini`), Sonic TTS | this process: LiveKit Agents `AgentSession` (Deepgram `nova-3-general`, `gpt-4.1-mini`, ElevenLabs `eleven_flash_v2`, Silero VAD) in a room on the image's own `livekit-server` |
+| Per-call vendor resources | an inline assistant on the call (nothing stored but the call record) | a managed agent, **deleted at the end of the call**; client tools are shared account resources, reused when identical (an account holds 100) | a room, deleted at the end of the call |
+| Tools reach `CallSession.dispatch` via | Vapi POSTs `tool-calls` to `POST /vendor/vapi/tool` (needs `PUBLIC_BASE_URL`; per-call secret in `X-Vamos-Tool-Secret`, and the message must name the live Vapi call) | `client_tool_call` / `client_tool_result` on the agent's own WebSocket (no webhook, no public endpoint) | raw-schema function tools in-process |
+| Tool schema | the shared JSON schema | cut to `type`/`description`/`enum`/`items` (Cartesia rejects every other keyword); names Cartesia reserves (`end_call`, `send_dtmf`, `voicemail_detection`, `transfer_to_number`) get a trailing `_` on the wire and are mapped back | the shared JSON schema; one tool call per step, up to 10 steps a turn |
+| Callee first | `firstMessageMode: assistant-waits-for-user` | `initial_message: null` | nothing is generated before a user turn |
+| Agent first | `assistant-speaks-first-with-model-generated-message` + the opening instruction as a second system message | **no**: no way to request a turn; `opens_calls = False`, startup refuses an agent that speaks first | `generate_reply(instructions=opening_instruction)` |
+| `TurnTaking` mapping | `startSpeakingPlan` (`waitSeconds` = silence, transcription endpointing as the Energy candidate) | none exposed (Cartesia defaults) | Silero silence/prefix/threshold + endpointing `min_delay` |
+| Callee-spoke signal | first user `transcript` | first user `turn_ended` with text | first `user_input_transcribed` |
+| Agent hang-up | after the tool: wait for Vapi's audio to stop (`OutboundAudio.wait_until_quiet`, digital silence counts as quiet: Vapi streams it), drain, close the line, send Vapi `end-call` | same wait, then close (the agent is deleted) | `wait_for_playout()` of the words before the tool, `StopResponse` (no reply), close |
+
+### Providers that are called back (webhooks)
+
+A hosted vendor that executes tools by calling a URL (Vapi) contributes HTTP
+routes with `VoiceProvider.router()`; the server mounts them at
+`/vendor/<name>` (nothing else is ever mounted). The rules:
+
+- **Authenticated, always.** The platform adds no auth (below), so the provider
+  mints a secret per call, hands it to the vendor only inside that call's
+  configuration, and refuses (401) any request without it, and (404) any that
+  names a call other than the live one. After the call the route refuses everything.
+- **One dispatch path.** A webhook runs tools only through the live call's
+  `CallSession.dispatch` (gates, validation, redaction), one at a time; never
+  a parallel path.
+- **The public address.** Veris Bench gives an image candidate whose `image`
+  block has `"public_endpoint": true` the env var
+  `PUBLIC_BASE_URL=https://<voice host>/hooks/<attempt id>` (set before the
+  process starts; it overrides any user value). Its gateway strips
+  `/hooks/<attempt id>` and forwards every path, method and header (it adds
+  `X-Attempt-Id`) to the pod's `port` (or `public_endpoint_port`), for the
+  attempt's lifetime. Before the actor dials, the engine probes
+  `PUBLIC_BASE_URL` + `health_path` and fails the attempt
+  (`public_endpoint_unreachable`) if it does not answer. The attempt id is the
+  only secret in the URL, which is why the routes authenticate themselves
+  (veris-sandbox `attempt-engine/app/candidate.py`, `webhook-gateway/`).
+- Prefer a vendor's socket-borne tools when it has them (Cartesia's client
+  tools): no public endpoint at all.
 
 ## 11. Config contract (environment)
 
@@ -475,6 +524,16 @@ Vendors:
 | `VAMOS_GROK_STT_MODEL` / `VAMOS_GROK_VOICE` | grok_cascade | Defaults `grok-voice-transcribe-2.0` / `carina` (the cascade's default voice differs from `grok_voice`'s). |
 | `GRADIUM_API_KEY` / `OPENAI_API_KEY` | gradium | Both required: Gradium STT/TTS, and the LLM gradbot calls. |
 | `VAMOS_GRADIUM_LLM_MODEL` / `VAMOS_GRADIUM_VOICE_ID` | gradium | Defaults `gpt-4.1-mini` (Energy's) / `4SZHfMpw-p46Ywgs` (Gradium's "Harper"). |
+| `VAPI_API_KEY` | vapi | Vapi **private** key. Required. |
+| `PUBLIC_BASE_URL` | vapi | The pod's public https URL; set by Veris Bench when the candidate has `"public_endpoint": true`. Required. |
+| `VAMOS_VAPI_MODEL` / `VAMOS_VAPI_MODEL_PROVIDER` | vapi | Defaults `gpt-4.1-mini` / `openai`. |
+| `VAMOS_VAPI_TRANSCRIBER_MODEL` / `VAMOS_VAPI_TRANSCRIBER_PROVIDER` | vapi | Defaults `nova-3` / `deepgram` (keep a transcriber without its own end-of-turn model, or Vapi ignores `startSpeakingPlan`). |
+| `VAMOS_VAPI_VOICE_ID` / `VAMOS_VAPI_VOICE_MODEL` / `VAMOS_VAPI_VOICE_PROVIDER` | vapi | Defaults `EXAVITQu4vr4xnSDxMaL` / `eleven_flash_v2` / `11labs`. |
+| `CARTESIA_API_KEY` | cartesia | Required. No agent id: the provider creates one per call. |
+| `VAMOS_CARTESIA_MODEL` / `VAMOS_CARTESIA_VOICE_ID` | cartesia | Defaults `gpt-4.1` / `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4` ("Skylar"). |
+| `OPENAI_API_KEY` / `DEEPGRAM_API_KEY` / `ELEVENLABS_API_KEY` | livekit | All required. |
+| `VAMOS_LIVEKIT_LLM_MODEL` / `VAMOS_LIVEKIT_STT_MODEL` / `VAMOS_LIVEKIT_TTS_VOICE_ID` / `VAMOS_LIVEKIT_TTS_MODEL` | livekit | Defaults `gpt-4.1-mini` / `nova-3-general` / `EXAVITQu4vr4xnSDxMaL` / `eleven_flash_v2`. |
+| `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | livekit | Optional. Default: the image's own server at `ws://localhost:7880`, started on loopback with credentials minted per process. Point `LIVEKIT_URL` elsewhere (with its key and secret) to use another server; then none is started. |
 
 Agents:
 
@@ -495,7 +554,9 @@ Veris Bench allows these exact names (veris-sandbox
 the platform and to the coding-agent harnesses it runs (their CLIs keep their
 own workspace key), and a bench-wide value there would re-route them. That is
 why every other vendor setting here is `VAMOS_*`; a new variable must not use a
-reserved prefix (`tests/test_parity.py` pins the key names).
+reserved prefix (`tests/test_parity.py` pins the key names). `VAPI_API_KEY`,
+`CARTESIA_API_KEY`, `DEEPGRAM_API_KEY` and `ELEVENLABS_API_KEY` are standard
+names too, allowed in candidate-env, and shared with the VAmoS Energy candidates.
 
 ## 12. Traces per vendor (what the judge sees)
 
@@ -518,6 +579,9 @@ the trace shows the reads' results in the session instructions.
 | `huggingface`, `grok_cascade` | none (omit) | Same: every round is one `openai` SDK call (`openai_chat.OpenAIChat`). | Keep LLM calls on the `openai` SDK. |
 | `mistral` | none (omit) | Every round is one `mistralai` SDK `chat.complete_async`, which the bundle instruments (`MistralAIInstrumentor`). | Keep LLM calls on the `mistralai` SDK (2.x, as on Energy). |
 | `gradium` | `gradbot` | The model is called from gradbot's Rust core, so no SDK span exists; the adapter wraps `gradbot.run` and reads messages and tool answers off the handles. | Call `gradbot.run` by attribute, keywords only, at call time. |
+| `vapi` | `vapi` | Hooks the `websockets` client and reads what Vapi sends on the transport socket: `transcript` (final), `speech-update`, `tool-calls`, `tool-calls-result`, `conversation-update` (system prompt and tool results), `status-update`. It does not call Vapi's API. | Those types in the assistant's `clientMessages`; the socket on `wire.connect_websocket`. |
+| `cartesia` | `cartesia` | Same hook on the agent WebSocket: `client_tool_call`, `turn_output_text_delta`, `turn_ended` received; `client_tool_result` sent. | Client tools (their calls and results cross this socket); `wire.connect_websocket`. |
+| `livekit` | none (omit; the bench has no `livekit` adapter) | As Pipecat: LiveKit's OpenAI plugin calls the `openai` SDK in this process. | Keep the LLM on the OpenAI plugin. |
 
 ## 13. Build, push, register on the bench
 
@@ -525,7 +589,7 @@ Images: `us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e/
 with the vendor's underscores as dashes (the registry's convention, e.g.
 `riley-gemini-live`): `remi-openai-realtime`, `remi-gemini-live`, `remi-grok-voice`,
 `remi-gpt-live`, `remi-pipecat`, `remi-deepgram`, `remi-elevenlabs`, `remi-fluxions`, `remi-mistral`,
-`remi-huggingface`, `remi-grok-cascade`, `remi-gradium`.
+`remi-huggingface`, `remi-grok-cascade`, `remi-gradium`, `remi-vapi`, `remi-cartesia`, `remi-livekit`.
 
 ```bash
 REPO=us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e
@@ -587,12 +651,21 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | `grok_cascade` (GPT-4.1 mini) | omit | `XAI_API_KEY`, `OPENAI_API_KEY` | none needed (`VAMOS_GROK_CASCADE_LLM` defaults to `gpt-4.1-mini`) |
 | `grok_cascade` (Grok 4.3) | omit | `XAI_API_KEY` | `VAMOS_GROK_CASCADE_LLM=grok-4.3` (same image as the row above) |
 | `gradium` | `gradbot` | `GRADIUM_API_KEY`, `OPENAI_API_KEY` | `VAMOS_GRADIUM_LLM_MODEL=gpt-4.1-mini` (Energy's) |
+| `vapi` | `vapi` | `VAPI_API_KEY` (private key) | `VAMOS_VAPI_MODEL` (`gpt-4.1-mini`, as Rory "Vapi"); **and `"public_endpoint": true` in the `image` block** |
+| `cartesia` | `cartesia` | `CARTESIA_API_KEY` | optional `VAMOS_CARTESIA_MODEL` (`gpt-4.1`), `VAMOS_CARTESIA_VOICE_ID`; no public endpoint |
+| `livekit` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | optional `VAMOS_LIVEKIT_LLM_MODEL` (`gpt-4.1-mini`); no `LIVEKIT_*` (the image's own server) |
 
 Every candidate (every row above) sets `"protocol": "json"` in its channel and
 `VAMOS_VOICE_FRAMING=json` in its `image.env`, together (both, or neither): with `binary` an agent that ends the call is
 recorded as `voice_ws_disconnect` and the attempt fails ungraded (section 3,
 "Framing"). A mismatch breaks the call outright: each side ignores the other's
 frames.
+
+The Vapi candidate's `image` block also carries `"public_endpoint": true`
+(not top level; `port` must not be 80), so the pod gets `PUBLIC_BASE_URL` and
+Vapi can reach `/vendor/vapi/tool` (section 10, "Providers that are called
+back"). The LiveKit image runs `livekit-server` as a second process, started by
+the provider before `/health` turns ready; allow it a few seconds more readiness.
 
 `wait_for_callee_first` is about the bench actor: `false` for an outbound
 agent (the actor, as callee, speaks first). An inbound agent's candidate is
@@ -608,7 +681,7 @@ configured so the actor waits for the agent's greeting.
 | Vendor behaviour drift (barge-in truncation, VAD thresholds, date injection) | `TurnTaking` mapped into each VAD; `OutboundAudio.played_ms` drives truncation; the date is rendered into one prompt. Parity tests assert the frames each vendor sends. |
 | Parity tests that only checked module attributes | `tests/test_parity.py` runs each provider through scripted calls, agents x vendors. |
 | 73 unbounded `>=` deps, `uv:latest` | Every dependency bounded; `uv` and Python images pinned; `uv.lock` committed; `uv sync --locked`. |
-| Unauthenticated inbound webhooks / tunnels for hosted vendors | No webhooks: only `/health` and `/voice`. |
+| Unauthenticated inbound webhooks / tunnels for hosted vendors | No tunnels. Only a provider's own `/vendor/<name>` routes, authenticated with a per-call secret and checked against the live call, dispatching through `CallSession`; Cartesia needs none (client tools on its socket). |
 | Full tool args logged (card data) | `redact` on the declaration; `CallSession.dispatch` logs `[redacted]`; tests assert card data is in no log, row or result. |
 | Process-global clock that never adds elapsed time, falling back to wall time | `CallClock` per call: `call_time` + monotonic elapsed; AST guards ban wall-clock calls and SQL `now()`. |
 | Module-global Stripe/Fineract config, created lazily | World clients built per agent in `from_env`, opened in `connect()`, injected into the call state. |
@@ -633,7 +706,7 @@ on paper; it fits without framework changes, and the test-only
 | Stripe via module globals; Fineract via `httpx` Basic auth + `Fineract-Platform-TenantId` (`FINERACT_API_BASE`, `_USER`, `_PASSWORD`, `_TENANT`) | `required_env = ("STRIPE_API_KEY", "FINERACT_API_BASE")`; `from_env` builds a `StripeClient` instance and a Fineract client; `connect()` checks both |
 | Prompt `agent_desc.txt` + `today_context()` | `instructions(clock)`: the prompt plus the date from `clock` |
 | Per-call `CallSession` with `account`, `failed_attempts`; no `end_call` | `open_call(clock)` returns that state; add an `end_call` tool so providers can hang up (or rely on the caller hanging up; `ended` stays False) |
-| Vapi/PolyAI/Cartesia hosted vendors calling back over HTTP | Out of scope for the framework (no inbound endpoints); such a vendor would be a provider with its own authenticated callback, a framework decision to make then |
+| Vapi/PolyAI/Cartesia hosted vendors calling back over HTTP | `vapi` and `cartesia` providers exist (section 10); a callback is a provider route under `/vendor/<name>` with its own per-call authentication |
 
 Migration path (optional, later): move `rory_tools/` into `vamos_agents/rory/` as the
 pack above; port vendors one at a time into `vamos_voice/providers/` only where
@@ -646,8 +719,10 @@ from their own repos.
 ## 16. Testing
 
 ```bash
-uv sync --all-extras                 # every agent's and vendor's deps
-uv run --all-extras pytest -q        # framework, parity matrix, every pack (needs docker for Remi's Postgres)
+# LiveKit Agents needs openai<3 and the pipecat extra pins openai>=3, so the two extras are locked
+# as separate forks ([tool.uv] conflicts) and the suite runs twice; --all-extras alone is refused.
+uv run --all-extras --no-extra livekit pytest -q   # framework, parity matrix, every pack, every vendor but LiveKit
+uv run --all-extras --no-extra pipecat --no-extra huggingface --no-extra grok-cascade pytest -q   # the same with LiveKit (those vendors skip)
 uv run ruff check . && uv run ruff format --check .
 ```
 
@@ -674,6 +749,12 @@ uv run ruff check . && uv run ruff format --check .
 - `tests/test_realtime_turns.py`: the Realtime call flow (nothing but the session at call start,
   vendor-native turn taking, a request refused for an active response).
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
+- `tests/test_hosted_vendors.py`: Vapi and Cartesia through scripted calls (fake socket,
+  `httpx.MockTransport` for their REST APIs): the call held for the callee, Vapi's webhook
+  refusing a wrong secret or call and dispatching through `CallSession`, Cartesia's client
+  tools and reserved names, tool reuse, the agent deleted however the call ends; LiveKit's
+  turn-taking mapping, loopback-only server, session assembly and tool handlers; provider
+  routes mounted under `/vendor/<name>`.
 - `tests/test_framing.py`: both framings, alone and through the real server (agent hang-up
   sends `end` before the 1000 close, a caller's `end` finalizes the call, binary unchanged),
   and Pipecat's serializer.
@@ -693,6 +774,6 @@ No test calls a paid API.
 - Every tool call goes through `CallSession.dispatch`; tools return `{"error": ...}`, never crash the call.
 - Every dependency bounded; `uv.lock` committed; base images pinned. No secrets in code or images.
 - One `Dockerfile`; one image per agent x vendor.
-- No inbound endpoints beyond `/health` and `/voice`.
+- No inbound endpoints beyond `/health`, `/voice` and a provider's own `/vendor/<name>` routes, each authenticated per call and dispatching only through `CallSession`.
 - Vendor traffic via `wire.connect_websocket` or an instrumented SDK, so the judge's trace exists.
 - Never import or copy a benchmark's grader into a pack.
