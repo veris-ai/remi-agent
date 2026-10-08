@@ -1,0 +1,1093 @@
+{
+ "accounts": {
+  "TAS-420101": {
+   "charge_off_balance_cents": 18500,
+   "charge_off_on": "2025-03-15",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420102": {
+   "charge_off_balance_cents": 24000,
+   "charge_off_on": "2025-03-22",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420103": {
+   "charge_off_balance_cents": 27500,
+   "charge_off_on": "2025-03-29",
+   "fees_since_charge_off_cents": 1800,
+   "interest_since_charge_off_cents": 2975,
+   "last_payment_on": "2025-06-27",
+   "paid_since_charge_off_cents": 1000
+  },
+  "TAS-420104": {
+   "charge_off_balance_cents": 42050,
+   "charge_off_on": "2025-04-05",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420105": {
+   "charge_off_balance_cents": 9875,
+   "charge_off_on": "2025-04-12",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420106": {
+   "charge_off_balance_cents": 56000,
+   "charge_off_on": "2025-04-19",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420107": {
+   "charge_off_balance_cents": 27330,
+   "charge_off_on": "2025-04-26",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420108": {
+   "charge_off_balance_cents": 15000,
+   "charge_off_on": "2025-05-03",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420109": {
+   "charge_off_balance_cents": 21000,
+   "charge_off_on": "2025-05-10",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420110": {
+   "charge_off_balance_cents": 34500,
+   "charge_off_on": "2025-05-17",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420111": {
+   "charge_off_balance_cents": 12640,
+   "charge_off_on": "2025-05-24",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420112": {
+   "charge_off_balance_cents": 47500,
+   "charge_off_on": "2025-05-31",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420113": {
+   "charge_off_balance_cents": 120000,
+   "charge_off_on": "2025-06-07",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420114": {
+   "charge_off_balance_cents": 240000,
+   "charge_off_on": "2025-06-14",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420115": {
+   "charge_off_balance_cents": 88000,
+   "charge_off_on": "2025-06-21",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420116": {
+   "charge_off_balance_cents": 150000,
+   "charge_off_on": "2025-06-28",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420117": {
+   "charge_off_balance_cents": 41000,
+   "charge_off_on": "2025-07-05",
+   "fees_since_charge_off_cents": 1500,
+   "interest_since_charge_off_cents": 2500,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420118": {
+   "charge_off_balance_cents": 200000,
+   "charge_off_on": "2025-07-12",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420119": {
+   "charge_off_balance_cents": 60000,
+   "charge_off_on": "2025-07-19",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420120": {
+   "charge_off_balance_cents": 125000,
+   "charge_off_on": "2025-07-26",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420121": {
+   "charge_off_balance_cents": 90000,
+   "charge_off_on": "2025-08-02",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420122": {
+   "charge_off_balance_cents": 180000,
+   "charge_off_on": "2025-08-09",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420123": {
+   "charge_off_balance_cents": 180000,
+   "charge_off_on": "2025-08-16",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420124": {
+   "charge_off_balance_cents": 60000,
+   "charge_off_on": "2025-08-23",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420125": {
+   "charge_off_balance_cents": 130000,
+   "charge_off_on": "2025-08-30",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420126": {
+   "charge_off_balance_cents": 90000,
+   "charge_off_on": "2025-09-06",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420127": {
+   "charge_off_balance_cents": 100000,
+   "charge_off_on": "2025-09-13",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420128": {
+   "charge_off_balance_cents": 190000,
+   "charge_off_on": "2025-09-20",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 10000,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420129": {
+   "charge_off_balance_cents": 150000,
+   "charge_off_on": "2025-09-27",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420130": {
+   "charge_off_balance_cents": 150000,
+   "charge_off_on": "2025-03-18",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420131": {
+   "charge_off_balance_cents": 100000,
+   "charge_off_on": "2025-03-25",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420132": {
+   "charge_off_balance_cents": 240000,
+   "charge_off_on": "2025-04-01",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420133": {
+   "charge_off_balance_cents": 150000,
+   "charge_off_on": "2025-04-08",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420134": {
+   "charge_off_balance_cents": 250000,
+   "charge_off_on": "2025-04-15",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420135": {
+   "charge_off_balance_cents": 120000,
+   "charge_off_on": "2025-04-22",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420136": {
+   "charge_off_balance_cents": 90000,
+   "charge_off_on": "2025-04-29",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420137": {
+   "charge_off_balance_cents": 40000,
+   "charge_off_on": "2025-05-06",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420138": {
+   "charge_off_balance_cents": 75000,
+   "charge_off_on": "2025-05-13",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420139": {
+   "charge_off_balance_cents": 52000,
+   "charge_off_on": "2025-05-20",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420140": {
+   "charge_off_balance_cents": 90000,
+   "charge_off_on": "2025-05-27",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420141": {
+   "charge_off_balance_cents": 62500,
+   "charge_off_on": "2025-06-03",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420142": {
+   "charge_off_balance_cents": 60000,
+   "charge_off_on": "2025-06-10",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420143": {
+   "charge_off_balance_cents": 96000,
+   "charge_off_on": "2025-06-17",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420144": {
+   "charge_off_balance_cents": 130000,
+   "charge_off_on": "2025-06-24",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420145": {
+   "charge_off_balance_cents": 30000,
+   "charge_off_on": "2025-07-01",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420146": {
+   "charge_off_balance_cents": 90000,
+   "charge_off_on": "2025-07-08",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420147": {
+   "charge_off_balance_cents": 40000,
+   "charge_off_on": "2025-07-15",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420148": {
+   "charge_off_balance_cents": 85000,
+   "charge_off_on": "2025-07-22",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420149": {
+   "charge_off_balance_cents": 48000,
+   "charge_off_on": "2025-07-29",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420150": {
+   "charge_off_balance_cents": 90000,
+   "charge_off_on": "2025-08-05",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420151": {
+   "charge_off_balance_cents": 78000,
+   "charge_off_on": "2025-08-12",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420152": {
+   "charge_off_balance_cents": 66000,
+   "charge_off_on": "2025-08-19",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420153": {
+   "charge_off_balance_cents": 143000,
+   "charge_off_on": "2025-08-26",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420154": {
+   "charge_off_balance_cents": 98500,
+   "charge_off_on": "2025-09-02",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420155": {
+   "charge_off_balance_cents": 54000,
+   "charge_off_on": "2025-09-09",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420156": {
+   "charge_off_balance_cents": 61000,
+   "charge_off_on": "2025-09-16",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420157": {
+   "charge_off_balance_cents": 212000,
+   "charge_off_on": "2025-09-23",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420158": {
+   "charge_off_balance_cents": 87000,
+   "charge_off_on": "2025-09-30",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420159": {
+   "charge_off_balance_cents": 72000,
+   "charge_off_on": "2025-03-21",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420160": {
+   "charge_off_balance_cents": 38000,
+   "charge_off_on": "2025-03-28",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420161": {
+   "charge_off_balance_cents": 46000,
+   "charge_off_on": "2025-04-04",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420162": {
+   "charge_off_balance_cents": 64000,
+   "charge_off_on": "2025-04-11",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420163": {
+   "charge_off_balance_cents": 35500,
+   "charge_off_on": "2025-04-18",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420164": {
+   "charge_off_balance_cents": 52000,
+   "charge_off_on": "2025-04-25",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420165": {
+   "charge_off_balance_cents": 29000,
+   "charge_off_on": "2025-05-02",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420166": {
+   "charge_off_balance_cents": 81000,
+   "charge_off_on": "2025-05-09",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420167": {
+   "charge_off_balance_cents": 260000,
+   "charge_off_on": "2025-05-16",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420168": {
+   "charge_off_balance_cents": 175000,
+   "charge_off_on": "2025-05-23",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420169": {
+   "charge_off_balance_cents": 92000,
+   "charge_off_on": "2025-05-30",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420170": {
+   "charge_off_balance_cents": 310000,
+   "charge_off_on": "2025-06-06",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420171": {
+   "charge_off_balance_cents": 158000,
+   "charge_off_on": "2025-06-13",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420172": {
+   "charge_off_balance_cents": 97000,
+   "charge_off_on": "2025-06-20",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420173": {
+   "charge_off_balance_cents": 56000,
+   "charge_off_on": "2025-06-27",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420174": {
+   "charge_off_balance_cents": 169000,
+   "charge_off_on": "2025-07-04",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420175": {
+   "charge_off_balance_cents": 102000,
+   "charge_off_on": "2025-07-11",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420176": {
+   "charge_off_balance_cents": 35000,
+   "charge_off_on": "2025-07-18",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420177": {
+   "charge_off_balance_cents": 148000,
+   "charge_off_on": "2025-07-25",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420178": {
+   "charge_off_balance_cents": 81000,
+   "charge_off_on": "2025-08-01",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420179": {
+   "charge_off_balance_cents": 194000,
+   "charge_off_on": "2025-08-08",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420180": {
+   "charge_off_balance_cents": 127000,
+   "charge_off_on": "2025-08-15",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420181": {
+   "charge_off_balance_cents": 60000,
+   "charge_off_on": "2025-08-22",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420182": {
+   "charge_off_balance_cents": 173000,
+   "charge_off_on": "2025-08-29",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420183": {
+   "charge_off_balance_cents": 106000,
+   "charge_off_on": "2025-09-05",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420184": {
+   "charge_off_balance_cents": 39000,
+   "charge_off_on": "2025-09-12",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420185": {
+   "charge_off_balance_cents": 152000,
+   "charge_off_on": "2025-09-19",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420186": {
+   "charge_off_balance_cents": 85000,
+   "charge_off_on": "2025-09-26",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420187": {
+   "charge_off_balance_cents": 198000,
+   "charge_off_on": "2025-03-17",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420188": {
+   "charge_off_balance_cents": 131000,
+   "charge_off_on": "2025-03-24",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420189": {
+   "charge_off_balance_cents": 64000,
+   "charge_off_on": "2025-03-31",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420190": {
+   "charge_off_balance_cents": 72000,
+   "charge_off_on": "2022-06-08",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420191": {
+   "charge_off_balance_cents": 115000,
+   "charge_off_on": "2022-06-09",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420192": {
+   "charge_off_balance_cents": 160000,
+   "charge_off_on": "2022-06-10",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420193": {
+   "charge_off_balance_cents": 88000,
+   "charge_off_on": "2022-06-11",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420194": {
+   "charge_off_balance_cents": 93000,
+   "charge_off_on": "2022-06-12",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420195": {
+   "charge_off_balance_cents": 64000,
+   "charge_off_on": "2025-05-12",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420196": {
+   "charge_off_balance_cents": 23500,
+   "charge_off_on": "2025-05-19",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420197": {
+   "charge_off_balance_cents": 57000,
+   "charge_off_on": "2025-05-26",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420198": {
+   "charge_off_balance_cents": 140000,
+   "charge_off_on": "2025-06-02",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420199": {
+   "charge_off_balance_cents": 66000,
+   "charge_off_on": "2025-06-09",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420200": {
+   "charge_off_balance_cents": 186000,
+   "charge_off_on": "2025-06-16",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420201": {
+   "charge_off_balance_cents": 94000,
+   "charge_off_on": "2025-06-23",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420202": {
+   "charge_off_balance_cents": 54000,
+   "charge_off_on": "2025-06-30",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420203": {
+   "charge_off_balance_cents": 26000,
+   "charge_off_on": "2025-07-07",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420204": {
+   "charge_off_balance_cents": 139000,
+   "charge_off_on": "2025-07-14",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420205": {
+   "charge_off_balance_cents": 72000,
+   "charge_off_on": "2025-07-21",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420206": {
+   "charge_off_balance_cents": 185000,
+   "charge_off_on": "2025-07-28",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420207": {
+   "charge_off_balance_cents": 118000,
+   "charge_off_on": "2025-08-04",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420208": {
+   "charge_off_balance_cents": 51000,
+   "charge_off_on": "2025-08-11",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420209": {
+   "charge_off_balance_cents": 164000,
+   "charge_off_on": "2025-08-18",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420210": {
+   "charge_off_balance_cents": 97000,
+   "charge_off_on": "2025-08-25",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420211": {
+   "charge_off_balance_cents": 30000,
+   "charge_off_on": "2025-09-01",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420212": {
+   "charge_off_balance_cents": 143000,
+   "charge_off_on": "2025-09-08",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420213": {
+   "charge_off_balance_cents": 128400,
+   "charge_off_on": "2025-09-15",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420214": {
+   "charge_off_balance_cents": 41500,
+   "charge_off_on": "2025-09-22",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420215": {
+   "charge_off_balance_cents": 96000,
+   "charge_off_on": "2025-09-29",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420216": {
+   "charge_off_balance_cents": 35000,
+   "charge_off_on": "2025-03-20",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420217": {
+   "charge_off_balance_cents": 79000,
+   "charge_off_on": "2025-03-27",
+   "fees_since_charge_off_cents": 3000,
+   "interest_since_charge_off_cents": 6450,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420218": {
+   "charge_off_balance_cents": 134000,
+   "charge_off_on": "2025-04-03",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420219": {
+   "charge_off_balance_cents": 49900,
+   "charge_off_on": "2025-04-10",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420220": {
+   "charge_off_balance_cents": 27800,
+   "charge_off_on": "2025-04-17",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420221": {
+   "charge_off_balance_cents": 80000,
+   "charge_off_on": "2025-04-24",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420222": {
+   "charge_off_balance_cents": 193000,
+   "charge_off_on": "2025-05-01",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420223": {
+   "charge_off_balance_cents": 126000,
+   "charge_off_on": "2025-05-08",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420224": {
+   "charge_off_balance_cents": 59000,
+   "charge_off_on": "2025-05-15",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420225": {
+   "charge_off_balance_cents": 172000,
+   "charge_off_on": "2025-05-22",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420226": {
+   "charge_off_balance_cents": 105000,
+   "charge_off_on": "2025-05-29",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420227": {
+   "charge_off_balance_cents": 38000,
+   "charge_off_on": "2025-06-05",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420228": {
+   "charge_off_balance_cents": 151000,
+   "charge_off_on": "2025-06-12",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420229": {
+   "charge_off_balance_cents": 84000,
+   "charge_off_on": "2025-06-19",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420230": {
+   "charge_off_balance_cents": 197000,
+   "charge_off_on": "2025-06-26",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420231": {
+   "charge_off_balance_cents": 130000,
+   "charge_off_on": "2025-07-03",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420232": {
+   "charge_off_balance_cents": 63000,
+   "charge_off_on": "2025-07-10",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420233": {
+   "charge_off_balance_cents": 176000,
+   "charge_off_on": "2025-07-17",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420234": {
+   "charge_off_balance_cents": 109000,
+   "charge_off_on": "2025-07-24",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420235": {
+   "charge_off_balance_cents": 42000,
+   "charge_off_on": "2025-07-31",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420236": {
+   "charge_off_balance_cents": 155000,
+   "charge_off_on": "2025-08-07",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  }
+ },
+ "source": "veris-ai/utility-bench @ a43805a639c2cc0c107cb6a7a13b0c8f444995cd: collections_bench/generated/manifest.json"
+}

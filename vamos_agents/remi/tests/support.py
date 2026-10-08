@@ -6,7 +6,10 @@ neither available the database tests are skipped with that reason; there is
 no fake database and no fake gateway (the SQL is the thing under test).
 
 The World's SQL is vendored in ``fixtures/collections_world.sql`` (its header
-names the utility-bench commit). The DSN the fixtures hand out is the owner's,
+names the utility-bench commit), and every account's money, which the World
+keeps in its Fineract ledger, in ``fixtures/collections_ledger.json``: seeding
+also rebuilds ``LEDGER``, the in-memory ledger (``fake_ledger.FakeLedger``) a
+test's calls post to. The DSN the fixtures hand out is the owner's,
 for seeding and inspecting; Remi itself connects as ``APP_ROLE``, a login that
 owns nothing, so the gateway's write guards bind: a direct write to
 ``payment_methods`` or ``payments``, or any read of the processor's vault,
@@ -29,7 +32,14 @@ import psycopg
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 
-WORLD_SQL = (Path(__file__).parent / "fixtures" / "collections_world.sql").read_text()
+from .fake_ledger import FakeLedger
+
+FIXTURES = Path(__file__).parent / "fixtures"
+WORLD_SQL = (FIXTURES / "collections_world.sql").read_text()
+#: Every account's money as the World's ledger holds it (account id -> the FakeLedger.add_account arguments).
+LEDGER_ACCOUNTS: dict[str, dict[str, Any]] = json.loads((FIXTURES / "collections_ledger.json").read_text())[
+    "accounts"
+]
 ROWS_MARKER = "-- ===== collections_bench/generated/world/rows.sql ====="
 #: The schema and the gateway (the database), and the World's ~110 accounts (its rows).
 DATABASE_SQL, ROWS_SQL = WORLD_SQL.split(ROWS_MARKER)
@@ -111,13 +121,6 @@ ACCOUNT = {
     "creditor_id": "cr_ashcombe",
     "original_account_last4": "4001",
     "placed_on": date(2027, 1, 4),
-    "charge_off_on": date(2025, 3, 15),
-    "charge_off_balance_cents": 18500,
-    "interest_since_charge_off_cents": 0,
-    "fees_since_charge_off_cents": 0,
-    "paid_since_charge_off_cents": 0,
-    "current_balance_cents": 18500,
-    "last_payment_on": None,
     "sol_expires_on": date(2028, 3, 15),
     "validation_notice_mailed_on": date(2027, 1, 5),
     "time_barred_notice_mailed_on": None,
@@ -126,6 +129,18 @@ ACCOUNT = {
     "min_instalment_cents": 2500,
     "status": "active",
 }
+#: TAS-420101's money, in the ledger: what ``seed_world``'s ``account`` overrides of these keys change.
+MONEY = {
+    "charge_off_on": date(2025, 3, 15),
+    "charge_off_balance_cents": 18500,
+    "interest_since_charge_off_cents": 0,
+    "fees_since_charge_off_cents": 0,
+    "paid_since_charge_off_cents": 0,
+    "last_payment_on": None,
+}
+#: The ledger every call in a test reaches; rebuilt by each seed.
+LEDGER = FakeLedger()
+
 CONSUMER = {
     "consumer_id": "con_420101",
     "first_name": "Aaliyah",
@@ -185,7 +200,13 @@ def seed_world(
     creditor_kind: str = "bank_card",
 ) -> None:
     """Reset the database (schema and gateway) and seed one agency, one creditor and one account
-    (TAS-420101 by default, as the World has it), with the given overrides."""
+    (TAS-420101 by default, as the World has it), with the given overrides; the overrides of ``MONEY``'s
+    keys (and a ``current_balance_cents``, as a charge-off balance with nothing else) seed the ledger."""
+    overrides = dict(account or {})
+    money = {**MONEY, **{k: overrides.pop(k) for k in list(overrides) if k in MONEY}}
+    if "current_balance_cents" in overrides:
+        money["charge_off_balance_cents"] = overrides.pop("current_balance_cents")
+    _reset_ledger({(ACCOUNT | overrides)["account_id"]: money})
     with psycopg.connect(dsn, autocommit=True) as conn:
         _reset(conn)
         _insert(
@@ -211,18 +232,36 @@ def seed_world(
         )
         _insert(conn, "consumers", {**CONSUMER, **(consumer or {})})
         _insert(conn, "phones", {**PHONE, **(phone or {})})
-        _insert(conn, "accounts", {**ACCOUNT, **(account or {})})
+        _insert(conn, "accounts", {**ACCOUNT, **overrides})
         for row in LETTER_HISTORY if history is None else history:
             _insert(conn, "contact_attempts", row)
         _grant_app(conn)
 
 
 def seed_full_world(dsn: str) -> None:
-    """Reset and load the whole World as the bench seeds it: schema, gateway, every row."""
+    """Reset and load the whole World as the bench seeds it: schema, gateway, every row, and every
+    account's money in the ledger."""
+    _reset_ledger(
+        {
+            account_id: {
+                **money,
+                "charge_off_on": date.fromisoformat(money["charge_off_on"]),
+                "last_payment_on": money["last_payment_on"] and date.fromisoformat(money["last_payment_on"]),
+            }
+            for account_id, money in LEDGER_ACCOUNTS.items()
+        }
+    )
     with psycopg.connect(dsn, autocommit=True) as conn:
         _reset(conn)
         conn.execute(ROWS_SQL)
         _grant_app(conn)
+
+
+def _reset_ledger(accounts: dict[str, dict[str, Any]]) -> None:
+    global LEDGER
+    LEDGER = FakeLedger()
+    for account_id, money in accounts.items():
+        LEDGER.add_account(account_id, **money)
 
 
 def _reset(conn: psycopg.Connection) -> None:

@@ -9,7 +9,7 @@ gateway functions.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import date, datetime
+from datetime import datetime
 
 import psycopg
 import pytest
@@ -65,7 +65,7 @@ async def charge(db: Database, method_id: str, amount_cents: int = 5000):
         return await PaymentGateway(tx).charge(method_id=method_id, amount_cents=amount_cents, at=AT)
 
 
-async def test_approved_card_is_saved_charged_and_applied_to_the_balance(db, pg_dsn) -> None:
+async def test_approved_card_is_saved_and_charged_and_the_account_is_left_to_the_ledger(db, pg_dsn) -> None:
     saved = await tokenize_card(db, GOOD_CARD, exp=(12, 30))
     assert (saved.kind, saved.last4, saved.brand) == ("card", "4242", "visa")
     assert saved.method_id.startswith("pm_")
@@ -85,9 +85,8 @@ async def test_approved_card_is_saved_charged_and_applied_to_the_balance(db, pg_
         5000,
         AT,
     )
-    account = rows(pg_dsn, "accounts")[0]
-    assert (account["current_balance_cents"], account["paid_since_charge_off_cents"]) == (13500, 5000)
-    assert (account["last_payment_on"], account["status"]) == (date(2027, 2, 10), "active")
+    # A processor does not know the agency's balance: posting the charge is the ledger's (ledger.py).
+    assert rows(pg_dsn, "accounts")[0]["status"] == "active"
 
 
 @pytest.mark.parametrize(
@@ -104,9 +103,7 @@ async def test_each_declining_card(db, pg_dsn, number: str, decline_code: str) -
     assert (result.status, result.decline_code, result.approved) == ("declined", decline_code, False)
     (payment,) = rows(pg_dsn, "payments")
     assert (payment["status"], payment["decline_code"]) == ("declined", decline_code)
-    account = rows(pg_dsn, "accounts")[0]
-    assert (account["current_balance_cents"], account["paid_since_charge_off_cents"]) == (18500, 0)
-    assert account["last_payment_on"] is None
+    assert rows(pg_dsn, "accounts")[0]["status"] == "active"
 
 
 async def test_ach_approves_and_declines(db, pg_dsn) -> None:
@@ -122,7 +119,6 @@ async def test_ach_approves_and_declines(db, pg_dsn) -> None:
         ("approved", None),
         ("declined", "insufficient_funds"),
     ]
-    assert rows(pg_dsn, "accounts")[0]["current_balance_cents"] == 17500
 
 
 @pytest.mark.parametrize(
@@ -148,12 +144,11 @@ async def test_invalid_instruments_are_refused_in_the_gateways_words(db, pg_dsn,
 
 async def test_charge_errors_write_nothing(db, pg_dsn) -> None:
     saved = await tokenize_card(db, GOOD_CARD)
-    with pytest.raises(PaymentError, match="more than the account's current balance of 18500 cents"):
-        await charge(db, saved.method_id, 18501)
+    with pytest.raises(PaymentError, match="the amount must be more than zero"):
+        await charge(db, saved.method_id, 0)
     with pytest.raises(PaymentError, match="no payment method pm_nope"):
         await charge(db, "pm_nope")
     assert rows(pg_dsn, "payments") == []
-    assert rows(pg_dsn, "accounts")[0]["current_balance_cents"] == 18500
 
 
 async def test_card_data_is_never_stored_and_never_in_a_repr(db, pg_dsn) -> None:

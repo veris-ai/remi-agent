@@ -26,7 +26,14 @@ from vamos_voice.framing import Framing
 from vamos_voice.providers.base import CallRuntime, VoiceProvider
 from vamos_voice.server import ConfigError, build_app_from_env, create_app
 
+from . import support
 from .support import CONTEXT_JSON, app_dsn, changes, seed_full_world, snapshot
+
+
+async def _ledger() -> support.FakeLedger:
+    """The World's ledger as the last seed left it (the calls here never reach the debt)."""
+    return support.LEDGER
+
 
 HELLO = b"\x01\x00" * 4800  # 200 ms of PCM16 at 24 kHz: stands in for "Hello?"
 
@@ -96,7 +103,9 @@ class ListeningProvider(FakeProvider):
 def app(pg_dsn: str):
     seed_full_world(pg_dsn)
     agent = RemiAgent(
-        CallContext.from_json(CONTEXT_JSON), connect_db=lambda: Database.connect(app_dsn(pg_dsn))
+        CallContext.from_json(CONTEXT_JSON),
+        connect_db=lambda: Database.connect(app_dsn(pg_dsn)),
+        connect_ledger=_ledger,
     )
     return create_app(agent, FakeProvider())
 
@@ -126,17 +135,31 @@ def test_voice_call_end_to_end(app, pg_dsn: str) -> None:
 
 def test_startup_fails_loudly_on_missing_config() -> None:
     names = {"VAMOS_AGENT": "remi", "VAMOS_VENDOR": "openai_realtime"}
-    world = {"DATABASE_URL": "postgresql://x"}
+    ledger = {
+        "FINERACT_API_BASE": "https://fineract.example",
+        "FINERACT_USER": "u",
+        "FINERACT_PASSWORD": "p",
+        "FINERACT_TENANT": "default",
+    }
+    world = {"DATABASE_URL": "postgresql://x", **ledger}
     with pytest.raises(ConfigError, match="DATABASE_URL") as missing:
         build_app_from_env(names)
     assert "STRIPE" not in str(missing.value)  # payments go through the World's database now
-    with pytest.raises(ConfigError, match="DATABASE_URL"):
-        build_app_from_env({**names, "STRIPE_API_KEY": "sk_test_x"})
+    for name in ledger:  # the money is the ledger's: no Fineract, no Remi
+        assert name in str(missing.value)
+    with pytest.raises(ConfigError, match="FINERACT_PASSWORD"):
+        build_app_from_env(
+            {
+                **names,
+                "DATABASE_URL": "postgresql://x",
+                **{k: v for k, v in ledger.items() if k != "FINERACT_PASSWORD"},
+            }
+        )
     with pytest.raises(ConfigError, match="VERIS_AGENT_CONTEXT"):
         build_app_from_env({**names, **world})
     base = {
         "VERIS_AGENT_CONTEXT": CONTEXT_JSON,
-        "DATABASE_URL": "postgresql://x",
+        **world,
         "VAMOS_AGENT": "remi",
     }
     with pytest.raises(ConfigError, match="VAMOS_VENDOR"):
@@ -155,7 +178,9 @@ def test_json_framing_agent_hang_up_sends_end(pg_dsn: str) -> None:
     so the actor records a normal end (client_end) rather than a dropped socket."""
     seed_full_world(pg_dsn)
     agent = RemiAgent(
-        CallContext.from_json(CONTEXT_JSON), connect_db=lambda: Database.connect(app_dsn(pg_dsn))
+        CallContext.from_json(CONTEXT_JSON),
+        connect_db=lambda: Database.connect(app_dsn(pg_dsn)),
+        connect_ledger=_ledger,
     )
     app = create_app(agent, FakeProvider(), framing=Framing.JSON)
     with TestClient(app) as client, client.websocket_connect("/voice") as ws:
@@ -171,7 +196,9 @@ def test_json_framing_callee_end_still_logs_the_contact_attempt(pg_dsn: str) -> 
     """The callee hangs up in-band before Remi logs the call: finalize() writes the fallback row, as on a drop."""
     seed_full_world(pg_dsn)
     agent = RemiAgent(
-        CallContext.from_json(CONTEXT_JSON), connect_db=lambda: Database.connect(app_dsn(pg_dsn))
+        CallContext.from_json(CONTEXT_JSON),
+        connect_db=lambda: Database.connect(app_dsn(pg_dsn)),
+        connect_ledger=_ledger,
     )
     before = snapshot(pg_dsn)
     with (

@@ -6,7 +6,7 @@ Account Services, LLC, places **outbound** calls to consumers in New York
 City, and must apply the benchmark's policy against the benchmark's world:
 
 - Policy: [`collections_bench/RULES.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/RULES.md) (veris-ai/utility-bench)
-- World: [`collections_bench/WORLD.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/WORLD.md): one Postgres collections database, with the payment gateway inside it (no Stripe: Stripe does not serve debt collection agencies)
+- World: [`collections_bench/WORLD.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/WORLD.md): a Postgres collections database, with the payment gateway inside it (no Stripe: Stripe does not serve debt collection agencies), and a Fineract ledger holding every account's money
 
 Remi reads those documents' rules into its own code (`policy.py`, the gates,
 the prompt). It never imports or copies the benchmark's grader.
@@ -27,7 +27,7 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 | `tools` | 18 tools (below) | `tools/` |
 | `gates` | `Gate` ladder NONE → ASSESSED → PROCEEDING → VERIFIED → DEBT_UNLOCKED, plus a collection stop on tools tagged `collection` | `gates.py`, `call.py` |
 | per-call state | `RemiCall`: connect reads, assessment, verification, outcomes; the call's one `contact_attempts` row, written once when the call ends (`end_call`, or `finalize()` the moment the caller hangs up) | `call.py` |
-| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; `PaymentGateway`, the client for the World's gateway functions, on that same database | `db.py`, `payments.py` |
+| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; `PaymentGateway`, the client for the World's gateway functions, on that same database; `FineractLedger` (async httpx, timeouts) from `FINERACT_API_BASE` and its credentials, for the money | `db.py`, `payments.py`, `ledger.py` |
 | rules | RULES.md's numbers and calendar as pure functions | `policy.py` |
 
 ## The opening, enforced
@@ -105,11 +105,11 @@ cease on file) and still says nothing it may not.
 | `report_wrong_number` | proceeding (unverified only) | The number is not the consumer's: phone `status` `wrong_number` at once; consent revoked only with `asked_to_stop_calling` (the person asked to stop, not merely "wrong number"). Disposition `wrong_number`; verification is refused afterwards. |
 | `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone and records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`); after `report_wrong_number` it only revokes the consent (no flag). Never touches the account's status; verification is refused afterwards. |
 | `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
-| `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits, every amount in dollars (`"$1,430.00"`). |
+| `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits, every amount in dollars (`"$1,430.00"`). The balance and itemization are the ledger's, read now (the account's Fineract loan and its `tas_itemization` row). |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
-| `take_payment` | debt unlocked, `collection` | `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: Remi sets `status` `paid`/`settled` (the gateway already moved the balance), and the result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
-| `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan / settlement_instalments, equal monthly instalments, charged to a `method_id` saved this call. |
-| `record_promise` | debt unlocked, `collection` | Exact amount and date ≤14 days out. |
+| `take_payment` | debt unlocked, `collection` | Checked against the ledger's balance, then `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: the charge is posted to the account's loan (a repayment carrying the gateway's `payment_id`, so a retry posts once) and a settlement's rest is written off; no `accounts` row changes. The result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`), and, if the ledger could not be reached after two tries, that the payment was taken but not posted (logged). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
+| `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan: the loan is re-aged to the plan (`reAge`) and the agreement is recorded with the ledger's own schedule (equal to the cent, the last instalment absorbing the difference); if the agreement cannot be recorded the re-age is undone. settlement_instalments: the agreement only (the ledger writes the rest off when the last instalment is paid). Charged to a `method_id` saved this call. |
+| `record_promise` | debt unlocked, `collection` | Exact amount and date ≤14 days out, at most the ledger's balance. |
 | `schedule_callback` | verified | 8 a.m.–<9 p.m. ET. |
 | `queue_letter` | verified | Idempotent per call. |
 | `transfer_to_human` | proceeding | Disposition `transferred` (by WORLD.md's precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
@@ -159,14 +159,15 @@ verbatim, so a hint that is a sentence becomes a scripted line
 (`tests/test_tools.py` scans the tool sources for speech scripts). Money
 crosses the tool boundary in dollars both ways: arguments are numbers in
 dollars (`amount: 250.00`), results are strings (`"$250.00"`). The World's
-rows and the gateway calls stay in cents; which rows are written is unchanged.
+rows and the gateway calls stay in cents, and the ledger's wire takes dollars
+(converted in `ledger.py` only).
 
 ## Payments
 
 The World's payment gateway is three SQL functions in the collections database
 (WORLD.md, "The payment gateway"); `payments.PaymentGateway` is Remi's one client
-for them, called inside the tool's own transaction so a charge and the status or
-arrangement that depends on it land together.
+for them. The gateway decides approve or decline and writes `payments`; it does
+not know the balance. The money is the ledger's (below).
 
 - Remi never writes `payment_methods` or `payments` (they are not in `db.WRITABLE`),
   never reads or writes the processor's `processor_vault` or `processor_*`
@@ -181,12 +182,39 @@ arrangement that depends on it land together.
 - Card number, expiry, security code and bank account number pass only into the
   gateway call; they are redacted in logs and never stored or returned.
 
+## The ledger
+
+Each placed account's money is a Fineract loan in the World (WORLD.md, "Money: the
+Fineract ledger"): `externalId` = the account id, principal = the placed balance,
+the itemization in its `tas_itemization` datatable row, payments as repayments,
+and the balance its `totalOutstanding`. `ledger.FineractLedger` is Remi's one
+client for it (`ledger.Ledger` is the protocol; the tests use an in-memory one
+that keeps the measured refusals, `tests/fake_ledger.py`).
+
+- Read when the debt is (`get_debt_details`), and again before each money tool,
+  so every amount is checked against the balance as the ledger holds it. The
+  screen pop and every call that never reaches the debt make no ledger request.
+- An approved charge is posted with `transactionDate` = the call's date (the
+  ledger's business date is the World's day and it refuses a later one),
+  `externalId` = the gateway's `payment_id`, `receiptNumber` = its
+  `processor_ref`, and the Card or ACH payment type. A settlement's rest is then
+  written off. Paid and settled are the loan's state: Remi writes neither as an
+  account status.
+- A plan re-ages the loan; the agreement's instalments are the schedule the
+  ledger computed. Fineract takes one re-age a day per loan.
+- A refusal (`LedgerRefused`, Fineract's own code) is a tool error the model can
+  act on; an unreachable ledger (`LedgerUnavailable`) is never hidden: reading the
+  debt answers that the balance cannot be read, and posting an approved charge
+  says the payment was taken but not posted, and logs it.
+
 ## Config
 
 | Variable | Set by | Meaning |
 |---|---|---|
 | `VERIS_AGENT_CONTEXT` | bench, per attempt | `{"account_id","call_time","phone_id"}`. Required. |
-| `DATABASE_URL` | bench (world) | Collections twin DSN, payments included. Required; the only world variable. |
+| `DATABASE_URL` | bench (world) | Collections twin DSN, the payment gateway included. Required. |
+| `FINERACT_API_BASE` | bench (world) | The Fineract twin's host; the API root `/fineract-provider/api/v1` is beneath it. Required. |
+| `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | bench candidate-env | Fineract's Basic pair and tenant header (the World's published `mifos`/`password`/`default`). Required; no defaults in code. |
 
 Plus the framework's and the vendor's variables (AGENTS.md section 11).
 
@@ -237,7 +265,10 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   imports utility-bench. The tests seed as the owner and connect Remi as a login
   that owns nothing, so the gateway's write guards bind.
 - `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
-- `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, balance effects, no direct writes.
+- `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, no account change, no direct writes.
+- `tests/fixtures/collections_ledger.json`: every account's money from the same utility-bench commit, loaded into the in-memory ledger by `seed_full_world` (`resync_world.sh` writes both fixtures).
+- `tests/test_ledger.py`: `FineractLedger` on the wire (`httpx.MockTransport`): the requests it sends, the debt it reads, idempotent posting, refusals vs an unreachable ledger.
+- `tests/test_ledger_live.py`: the same client against a real Fineract seeded as the World (opt-in: `REMI_TEST_FINERACT_URL`).
 - `tests/test_tools.py` also runs the screen pop against that Postgres: reads done, gates past them, no secrets in the section, the should-not-call case.
 - `tests/test_smoke.py`: the real server running Remi over `/voice` with a fake provider (the screen pop has run before the provider starts); startup config errors.
 

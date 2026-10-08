@@ -271,17 +271,19 @@ async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str
         )
         if given
     )
+    debt = await session.read_debt()
+    item = debt.itemization
     usd = policy.dollars
     result: dict[str, Any] = {
         "creditor": creditor.name,
         "original_account_last4": account.original_account_last4,
-        "current_balance": usd(account.current_balance_cents),
+        "current_balance": usd(debt.balance_cents),
         "itemization": {
-            "charge_off_balance": usd(account.charge_off_balance_cents),
-            "interest_since_charge_off": usd(account.interest_since_charge_off_cents),
-            "fees_since_charge_off": usd(account.fees_since_charge_off_cents),
-            "paid_since_charge_off": usd(account.paid_since_charge_off_cents),
-            "charge_off_on": account.charge_off_on.isoformat(),
+            "charge_off_balance": usd(item.charge_off_balance_cents),
+            "interest_since_charge_off": usd(item.interest_since_charge_off_cents),
+            "fees_since_charge_off": usd(item.fees_since_charge_off_cents),
+            "paid_since_charge_off": usd(debt.paid_cents),
+            "charge_off_on": item.charge_off_on.isoformat(),
         },
         "validation_notice_mailed_on": account.validation_notice_mailed_on.isoformat(),
         "medical_debt": creditor.kind == "medical",
@@ -290,8 +292,8 @@ async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str
     if consumer:
         today = session.clock.today()
         result["limits"] = {
-            "settlement_one_payment_min": usd(policy.settlement_floor_cents(account, 1)),
-            "settlement_instalments_min": usd(policy.settlement_floor_cents(account, 2)),
+            "settlement_one_payment_min": usd(policy.settlement_floor_cents(account, debt.balance_cents, 1)),
+            "settlement_instalments_min": usd(policy.settlement_floor_cents(account, debt.balance_cents, 2)),
             "settlement_max_instalments": policy.SETTLEMENT_INSTALMENTS_MAX,
             "plan_months": [policy.PLAN_MIN_MONTHS, account.max_plan_months],
             "plan_min_instalment": usd(account.min_instalment_cents),

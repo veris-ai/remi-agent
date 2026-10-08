@@ -16,6 +16,7 @@ import math
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from functools import cache
 
 from .context import EASTERN
@@ -229,10 +230,10 @@ def pct_of(balance_cents: int, pct: int) -> int:
     return math.ceil(balance_cents * pct / 100)
 
 
-def settlement_floor_cents(account: Account, instalments: int) -> int:
+def settlement_floor_cents(account: Account, balance_cents: int, instalments: int) -> int:
     """The least a settlement may total: the floor for one payment, ten points more in instalments."""
     premium = 0 if instalments == 1 else SETTLEMENT_INSTALMENTS_PREMIUM_PTS
-    return pct_of(account.current_balance_cents, account.settlement_floor_pct + premium)
+    return pct_of(balance_cents, account.settlement_floor_pct + premium)
 
 
 def add_months(start: date, months: int) -> date:
@@ -242,15 +243,19 @@ def add_months(start: date, months: int) -> date:
     return date(year, month, min(start.day, monthrange(year, month)[1]))
 
 
+def instalment_cents(total_cents: int, count: int) -> list[int]:
+    """Equal instalments the way the ledger spreads a balance (RULES.md): each is the total divided by the
+    count, rounded half up to the cent, and the last absorbs the difference ($265.00 in 6: five of $44.17
+    and one of $44.15)."""
+    each = int((Decimal(total_cents) / count).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    return [each] * (count - 1) + [total_cents - each * (count - 1)]
+
+
 def monthly_instalments(total_cents: int, count: int, first_due_on: date) -> list[dict[str, object]]:
-    """Equal monthly instalments on the same day each month; any remainder cent goes on the last."""
-    base, remainder = divmod(total_cents, count)
+    """Equal monthly instalments on the same day each month, rounded as ``instalment_cents``."""
     return [
-        {
-            "due_on": add_months(first_due_on, i).isoformat(),
-            "amount_cents": base + (remainder if i == count - 1 else 0),
-        }
-        for i in range(count)
+        {"due_on": add_months(first_due_on, i).isoformat(), "amount_cents": amount}
+        for i, amount in enumerate(instalment_cents(total_cents, count))
     ]
 
 
@@ -266,9 +271,8 @@ class Refusal:
 
 
 def plan_refusal(
-    account: Account, months: int, first_due_on: date, today: date, *, hardship: bool
+    account: Account, balance: int, months: int, first_due_on: date, today: date, *, hardship: bool
 ) -> Refusal | None:
-    balance = account.current_balance_cents
     max_months = HARDSHIP_MAX_MONTHS if hardship else account.max_plan_months
     minimum = HARDSHIP_MIN_INSTALMENT_CENTS if hardship else account.min_instalment_cents
     if months < PLAN_MIN_MONTHS:
@@ -289,18 +293,18 @@ def first_due_refusal(first_due_on: date, today: date) -> Refusal | None:
     return None
 
 
-def settlement_refusal(account: Account, total_cents: int, instalments: int) -> Refusal | None:
+def settlement_refusal(account: Account, balance: int, total_cents: int, instalments: int) -> Refusal | None:
     if instalments > SETTLEMENT_INSTALMENTS_MAX:
         return Refusal(
             "too_many_settlement_instalments",
             f"a settlement is at most {SETTLEMENT_INSTALMENTS_MAX} payments",
         )
-    floor = settlement_floor_cents(account, instalments)
+    floor = settlement_floor_cents(account, balance, instalments)
     if total_cents < floor:
         return Refusal(
             "below_floor", f"this settlement must total at least {dollars(floor)}; a person must handle less"
         )
-    if total_cents >= account.current_balance_cents:
+    if total_cents >= balance:
         return Refusal("not_a_settlement", "that is the full balance: use pay in full or a payment plan")
     return None
 
