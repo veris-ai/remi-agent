@@ -229,18 +229,19 @@ class FakeVendorSocket:
 
     def __init__(self, events: list[str] | None = None) -> None:
         self.sent: list[dict[str, Any]] = []
-        self.inbox: asyncio.Queue[str | None] = asyncio.Queue()
+        self.inbox: asyncio.Queue[str | bytes | None] = asyncio.Queue()
         self._sent_event = asyncio.Event()
         self.events = events
 
-    async def send(self, message: str) -> None:
-        frame = json.loads(message)
+    async def send(self, message: str | bytes) -> None:
+        # Binary frames (audio on mixed sockets: Deepgram, Fluxions) are recorded as {"binary": data}.
+        frame = {"binary": message} if isinstance(message, bytes) else json.loads(message)
         self.sent.append(frame)
         if self.events is not None:
             self.events.append(f"vendor:{frame.get('type') or next(iter(frame))}")
         self._sent_event.set()
 
-    async def recv(self) -> str:
+    async def recv(self) -> str | bytes:
         message = await self.inbox.get()
         if message is None:
             import websockets
@@ -250,6 +251,9 @@ class FakeVendorSocket:
 
     def push(self, event: dict[str, Any]) -> None:
         self.inbox.put_nowait(json.dumps(event))
+
+    def push_binary(self, data: bytes) -> None:
+        self.inbox.put_nowait(data)
 
     async def wait_for(self, predicate, within: float = 3.0) -> dict[str, Any]:
         """The first sent frame matching ``predicate``, waiting for it if needed."""

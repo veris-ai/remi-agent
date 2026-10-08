@@ -49,6 +49,7 @@ vamos_voice/                      # the framework: never imports an agent
     base.py realtime_protocol.py wire.py
     openai_realtime/  grok_voice/     # Realtime protocol: OpenAI natively, Grok as a dialect
     gemini_live/  gpt_live/  pipecat/
+    deepgram/  elevenlabs/  fluxions/ # managed voice agents: the vendor runs STT+LLM+TTS, tools client-side
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
     agent.py ... tests/           # world clients (db; payments via the World's gateway), and its own tests
@@ -79,6 +80,9 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 │ gemini_live     → raw Gemini Live protocol                         │
 │ gpt_live        → GPT-Live live sessions + Responses delegation    │
 │ pipecat         → Pipecat STT → OpenAI LLM → TTS                   │
+│ deepgram        → Deepgram Voice Agent (nova-3, managed LLM, aura) │
+│ elevenlabs      → ElevenLabs ConvAI (a stored agent per call)      │
+│ fluxions        → Fluxions realtime (bring-your-own tools)         │
 └─────────────────────────────────────────────────────────────────────┘
       │ every tool call: session.dispatch(name, args) → dict ({"error": ...} on refusal)
       ▼
@@ -248,6 +252,9 @@ on every vendor; turn taking stays each vendor's own.
 | Gemini Live | nothing is requested | a user-role text turn labelled `[Call system note, not the person on the line]` carrying the opening (the Live API has no other way to ask for a turn) |
 | GPT-Live | nothing is requested | `session.instructions.append` with `opening_instruction`, after `session.started` |
 | Pipecat | the LLM runs only on a user turn | `LLMMessagesAppendFrame(opening, run_llm=True)` when the caller's socket connects |
+| Deepgram Voice Agent | no `greeting` in `Settings`; nothing is requested | `InjectUserMessage` carrying the labelled `opening_note` (no other way to ask for an LLM turn) |
+| ElevenLabs ConvAI | the per-call agent has no `first_message`; nothing is requested | `user_message` carrying the labelled `opening_note` |
+| Fluxions | `greet: false`; nothing is requested | `greet: true`: Fluxions' own opening, generated from the soul. No message asks for a turn (`user.text` is ignored on `/v1/realtime`), so `opening_instruction` itself is not sent |
 
 ### After the call start: turns (Realtime protocol)
 
@@ -344,6 +351,20 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 | Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat |
 | Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
 
+Managed voice agents (the vendor runs STT, the LLM and TTS; tools are
+client-side over the same socket):
+
+| Capability | deepgram | elevenlabs | fluxions |
+|---|---|---|---|
+| Where the instructions and tools go | `Settings` (`agent.think.prompt` / `.functions`), per call | a stored agent **created per call** (REST) and deleted after it; the prompt also rides `conversation_initiation_client_data` (for the trace) | `session.update` `soul` / `tools`, per call. **The host caps the soul** (`GET /config` `max_soul_chars`, 4,000 on `api.fluxions.ai`) and silently truncates: a call over the cap fails before connecting |
+| Tool schema changes | none | every parameter needs a `description`; an undescribed one gets its own name | none |
+| Barge-in truncation | **no**: Deepgram stops itself on `UserStartedSpeaking` | **no**: ElevenLabs stops itself (`interruption`) | the client is the playback buffer: audio arrives ~6x real time, is released at most 1 s ahead, `audio.flush` drops the rest, `playback.pos` reports what was heard |
+| Caller transcription | `ConversationText` (role `user`) | `user_transcript` | `user.transcript` |
+| `TurnTaking` mapping | **none** (`nova-3` has no endpointing setting) | **none** (a learned turn model; `turn_eagerness: normal`) | **none** (an adaptive end-of-utterance model with no knob) |
+| Callee-spoke signal | first user `ConversationText` | first non-empty `user_transcript` | first non-empty `user.transcript` |
+| Audio | linear16 24 kHz both ways (binary frames) | `pcm_24000` both ways (base64 JSON) | binary; 16 kHz up (resampled), 24 kHz down |
+| Hang-up after `end_call` | at `AgentAudioDone` if the agent is speaking, else at once | once the agent's audio has been quiet 0.6 s (max 10 s): no end-of-audio event | at `agent.done` if a turn is in progress, else at once |
+
 `RealtimeProtocolProvider` exposes the hook dialects differ on:
 `truncates_on_barge_in` (default `True`).
 
@@ -377,6 +398,12 @@ Vendors:
 | `DEEPGRAM_API_KEY` / `VAMOS_DEEPGRAM_MODEL` | pipecat + deepgram | Key required; model default `nova-3-general`. |
 | `VAMOS_OPENAI_STT_MODEL` / `VAMOS_OPENAI_TTS_MODEL` | pipecat | Defaults `gpt-4o-transcribe` / `gpt-4o-mini-tts` (voice `VAMOS_OPENAI_VOICE`). |
 | `CARTESIA_API_KEY` / `VAMOS_CARTESIA_VOICE_ID` | pipecat + cartesia | Both required with `VAMOS_PIPECAT_TTS=cartesia`. |
+| `DEEPGRAM_API_KEY` | deepgram | Required; the only credential (the LLM runs on Deepgram's managed OpenAI access). |
+| `VAMOS_DEEPGRAM_LISTEN_MODEL` / `VAMOS_DEEPGRAM_LLM_MODEL` / `VAMOS_DEEPGRAM_VOICE` | deepgram | Defaults `nova-3` / `gpt-4.1-mini` / `aura-2-thalia-en` (the VAmoS Energy Deepgram candidate). |
+| `ELEVENLABS_API_KEY` | elevenlabs | Required; needs ConvAI agent create/delete permission. |
+| `VAMOS_ELEVENLABS_LLM` / `VAMOS_ELEVENLABS_TTS_MODEL` / `VAMOS_ELEVENLABS_VOICE_ID` | elevenlabs | Defaults `gpt-4.1-mini` (Energy's `ELEVENLABS_LLM`) / `eleven_flash_v2` / `EXAVITQu4vr4xnSDxMaL`. |
+| `FLUXIONS_API_KEY` | fluxions | Required; sent bare in the handshake's `Authorization` header. |
+| `VAMOS_FLUXIONS_BASE_URL` / `VAMOS_FLUXIONS_VOICE` | fluxions | Defaults `https://api.fluxions.ai/vui` (the socket is `<base>/v1/realtime`, `wss`) / `maeve` (resolved to its full `voice_id` at startup). |
 
 Agents:
 
@@ -413,13 +440,16 @@ the trace shows the reads' results in the session instructions.
 | `gpt_live` | `gpt-live` | Same hook: system and model from `session.start`, tools from `session.delegation.responses.tools`, tool calls from nested `response.output_item.done`, results from `response.item.create`, both speakers from timed transcript deltas. | Tools only on the delegation backend; results only via `response.item.create`. An opening instruction is `session.instructions.append` and never appears as the caller. |
 | `gemini_live` | `gemini-live` | Same hook; camelCase setup/toolCall/toolResponse frames. | **Developer API only** (function calls carry `id`s; Vertex omits them). Opening notes appear as labelled `user` turns. |
 | `pipecat` | none (omit) | The LLM runs in-process through the `openai` SDK, which the bundle instruments (OpenInference `OpenAIInstrumentor`): each completion is an LLM span with tool calls; results arrive in the next request. | Keep LLM calls on the `openai` SDK. |
+| `deepgram` | `deepgram-voice-agent` | Same hook: system, tools and model from `Settings`, speech from `ConversationText`, calls from `FunctionCallRequest`, results from `FunctionCallResponse`. | Keep the raw protocol on `wire.connect_websocket`. |
+| `elevenlabs` | `elevenlabs-convai` | Same hook: the system prompt from the `conversation_initiation_client_data` override (tools live on the stored agent, so the trace has no tool schemas), `user_transcript`, `agent_response`, `client_tool_call` / `client_tool_result`. | The raw protocol (not the SDK); the prompt override is always sent. |
+| `fluxions` | `fluxions-realtime` | Same hook: `session.update` soul and tools, `session.created` model, `user.transcript`, `agent.sentence`, `tool.call` / `tool.result`, `agent.done`. | Keep the raw protocol on `wire.connect_websocket`. |
 
 ## 13. Build, push, register on the bench
 
 Images: `us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e/<agent>-<vendor>`,
 with the vendor's underscores as dashes (the registry's convention, e.g.
 `riley-gemini-live`): `remi-openai-realtime`, `remi-gemini-live`, `remi-grok-voice`,
-`remi-gpt-live`, `remi-pipecat`.
+`remi-gpt-live`, `remi-pipecat`, `remi-deepgram`, `remi-elevenlabs`, `remi-fluxions`.
 
 ```bash
 REPO=us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e
@@ -473,6 +503,9 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | `grok_voice` | `openai-realtime` | `XAI_API_KEY` | `VAMOS_GROK_MODEL` (e.g. `grok-voice-think-fast-2.0`, as Riley "Grok Voice"), optional `VAMOS_GROK_VOICE` |
 | `gpt_live` | `gpt-live` | `OPENAI_API_KEY` (a project with GPT-Live access) | `VAMOS_GPT_LIVE_MODEL` (`gpt-live-1`), `VAMOS_GPT_LIVE_BACKEND_MODEL` (e.g. `gpt-5.6-terra`, as Rory "OpenAI GPT-Live 1"), optional `VAMOS_GPT_LIVE_VOICE` |
 | `pipecat` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY` (plus `CARTESIA_API_KEY` for Cartesia) | `VAMOS_PIPECAT_TTS`, `VAMOS_CARTESIA_VOICE_ID` when using Cartesia |
+| `deepgram` | `deepgram-voice-agent` | `DEEPGRAM_API_KEY` | `VAMOS_DEEPGRAM_LLM_MODEL` (`gpt-4.1-mini`, as Rory "Deepgram"; also the default) |
+| `elevenlabs` | `elevenlabs-convai` | `ELEVENLABS_API_KEY` | `VAMOS_ELEVENLABS_LLM` (`gpt-4.1-mini`, as Rory "ElevenLabs"; also the default) |
+| `fluxions` | `fluxions-realtime` | `FLUXIONS_API_KEY` | optional `VAMOS_FLUXIONS_BASE_URL`, `VAMOS_FLUXIONS_VOICE`. No `public_endpoint`: nothing calls back (the Energy candidate's `public_endpoint: true` is unused by its code) |
 
 Every candidate (every row above) sets `"protocol": "json"` in its channel and
 `VAMOS_VOICE_FRAMING=json` in its `image.env`, together (both, or neither): with `binary` an agent that ends the call is
@@ -546,6 +579,10 @@ uv run ruff check . && uv run ruff format --check .
 - `tests/test_grok_voice.py`, `tests/test_gpt_live.py`: each vendor's own
   frame translation (session shape, the screen pop in both GPT-Live instruction sets,
   barge-in, end of call), pinned where it differs from OpenAI Realtime.
+- `tests/test_deepgram.py`, `tests/test_elevenlabs.py`, `tests/test_fluxions.py`: the managed
+  voice agents' own protocol (Deepgram's `Settings` and audio held until `SettingsApplied`;
+  ElevenLabs' per-call agent, always deleted, and its parameter descriptions; Fluxions' soul
+  cap, full voice id, 16 kHz uplink and playback buffer), each with its hang-up timing.
 - `tests/test_realtime_turns.py`: the Realtime call flow (nothing but the session at call start,
   vendor-native turn taking, a request refused for an active response).
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.

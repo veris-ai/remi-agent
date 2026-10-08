@@ -56,7 +56,16 @@ def installed(name: str) -> bool:
 
 
 def test_every_vendor_folder_is_covered_here() -> None:
-    assert set(vendor_names()) == {"openai_realtime", "gemini_live", "grok_voice", "gpt_live", "pipecat"}
+    assert set(vendor_names()) == {
+        "openai_realtime",
+        "gemini_live",
+        "grok_voice",
+        "gpt_live",
+        "pipecat",
+        "deepgram",
+        "elevenlabs",
+        "fluxions",
+    }
 
 
 def test_every_agent_pack_is_covered_here() -> None:
@@ -71,6 +80,9 @@ STANDARD_KEYS = {
     "gpt_live": ("OPENAI_API_KEY",),
     "gemini_live": ("GEMINI_API_KEY",),
     "grok_voice": ("XAI_API_KEY",),
+    "deepgram": ("DEEPGRAM_API_KEY",),
+    "elevenlabs": ("ELEVENLABS_API_KEY",),
+    "fluxions": ("FLUXIONS_API_KEY",),
 }
 
 
@@ -87,7 +99,15 @@ def test_provider_metadata(name: str) -> None:
         pytest.skip(f"{name} extra not installed")
     provider = load_provider(name)
     assert provider.name == name
-    assert provider.trace_adapter in {None, "openai-realtime", "gemini-live", "gpt-live"}
+    assert provider.trace_adapter in {
+        None,
+        "openai-realtime",
+        "gemini-live",
+        "gpt-live",
+        "deepgram-voice-agent",
+        "elevenlabs-convai",
+        "fluxions-realtime",
+    }
 
 
 # --- realtime-protocol vendors: a scripted vendor socket --------------------------------------
@@ -351,11 +371,240 @@ def gemini_call(sock: FakeVendorSocket) -> dict[str, Any]:
     return {"provider": provider}
 
 
+AGENT_AUDIO = b"\x00\x01" * 240
+
+
+def _flat_tools(tools: list[dict[str, Any]]) -> dict[str, tuple[set[str], set[str]]]:
+    return {t["name"]: (set(t["parameters"]["properties"]), set(t["parameters"]["required"])) for t in tools}
+
+
+class DeepgramScript:
+    """Server events in the Deepgram Voice Agent protocol: JSON text frames, binary audio."""
+
+    expected_vad = (None, None)  # nova-3 exposes no endpointing setting in Settings
+
+    def __init__(self, sock: FakeVendorSocket) -> None:
+        self.sock, self.n = sock, 0
+
+    def ready(self) -> None:
+        self.sock.push({"type": "Welcome", "request_id": "req_1"})
+        self.sock.push({"type": "SettingsApplied"})
+
+    def tool_calls(self, *names: str) -> None:
+        self.n += 1
+        functions = [
+            {"id": f"fn_{self.n}_{i}", "name": n, "arguments": "{}", "client_side": True}
+            for i, n in enumerate(names)
+        ]
+        self.sock.push({"type": "FunctionCallRequest", "functions": functions})
+        self.sock.push({"type": "AgentAudioDone"})
+
+    def audio(self) -> None:
+        self.sock.push_binary(AGENT_AUDIO)
+
+    def callee_spoke(self) -> None:
+        self.sock.push({"type": "ConversationText", "role": "user", "content": "Hello?"})
+
+    @staticmethod
+    def setup(frame: dict[str, Any]) -> dict[str, Any]:
+        think = frame["agent"]["think"]
+        assert "greeting" not in frame["agent"], "Deepgram would speak a greeting before anyone asked"
+        assert frame["audio"]["input"]["sample_rate"] == frame["audio"]["output"]["sample_rate"] == 24_000
+        return {
+            "instructions": think["prompt"],
+            "tools": _flat_tools(think["functions"]),
+            "silence_ms": None,
+            "prefix_ms": None,
+            "transcribes_caller": bool(frame["agent"]["listen"]["provider"]["model"]),
+        }
+
+    is_setup = staticmethod(lambda f: f.get("type") == "Settings")
+    is_request = staticmethod(lambda f: f.get("type") in ("InjectUserMessage", "InjectAgentMessage"))
+    is_caller_audio = staticmethod(lambda f: "binary" in f)
+
+    @staticmethod
+    def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame == {"type": "InjectUserMessage", "content": case.policy.opening_note}
+
+
+def deepgram_call(sock: FakeVendorSocket) -> dict[str, Any]:
+    from vamos_voice.providers.deepgram import DeepgramProvider
+
+    provider = DeepgramProvider("dg-test", "nova-3", "gpt-4.1-mini", "aura-2-thalia-en")
+    provider.connect = sock.connector()
+    return {"provider": provider}
+
+
+class FakeAgentStore:
+    """ElevenLabs' agents API: records each per-call agent on the socket (``sock.agents``)."""
+
+    def __init__(self, sock: FakeVendorSocket) -> None:
+        self.sock = sock
+        sock.agents, sock.deleted = [], []
+
+    async def create(self, body: dict[str, Any]) -> str:
+        self.sock.agents.append(body)
+        return f"agent_{len(self.sock.agents)}"
+
+    async def delete(self, agent_id: str) -> None:
+        self.sock.deleted.append(agent_id)
+
+
+class ElevenLabsScript:
+    """Server events in the ElevenLabs ConvAI protocol; the tools live on the per-call agent."""
+
+    expected_vad = (None, None)  # a learned turn model: no silence threshold to map
+
+    def __init__(self, sock: FakeVendorSocket) -> None:
+        self.sock, self.n = sock, 0
+
+    def ready(self) -> None:
+        self.sock.push(
+            {
+                "type": "conversation_initiation_metadata",
+                "conversation_initiation_metadata_event": {
+                    "conversation_id": "conv_1",
+                    "agent_output_audio_format": "pcm_24000",
+                    "user_input_audio_format": "pcm_24000",
+                },
+            }
+        )
+
+    def tool_calls(self, *names: str) -> None:
+        for i, name in enumerate(names):
+            self.n += 1
+            self.sock.push(
+                {
+                    "type": "client_tool_call",
+                    "client_tool_call": {
+                        "tool_name": name,
+                        "tool_call_id": f"tc_{self.n}_{i}",
+                        "parameters": {},
+                    },
+                }
+            )
+
+    def audio(self) -> None:
+        self.sock.push(
+            {
+                "type": "audio",
+                "audio_event": {"audio_base_64": base64.b64encode(AGENT_AUDIO).decode(), "event_id": 1},
+            }
+        )
+
+    def callee_spoke(self) -> None:
+        self.sock.push({"type": "user_transcript", "user_transcription_event": {"user_transcript": "Hello?"}})
+
+    def setup(self, frame: dict[str, Any]) -> dict[str, Any]:
+        (agent,) = self.sock.agents
+        config = agent["conversation_config"]
+        prompt = config["agent"]["prompt"]
+        override = frame["conversation_config_override"]["agent"]
+        assert override["prompt"]["prompt"] == prompt["prompt"], "the trace's prompt is the agent's"
+        assert config["agent"]["first_message"] == override["first_message"] == ""
+        assert all(t["type"] == "client" for t in prompt["tools"])
+        return {
+            "instructions": prompt["prompt"],
+            "tools": _flat_tools(prompt["tools"]),
+            "silence_ms": None,
+            "prefix_ms": None,
+            "transcribes_caller": True,  # ASR is the platform's; user_transcript always streams
+        }
+
+    is_setup = staticmethod(lambda f: f.get("type") == "conversation_initiation_client_data")
+    is_request = staticmethod(lambda f: f.get("type") in ("user_message", "contextual_update"))
+    is_caller_audio = staticmethod(lambda f: "user_audio_chunk" in f)
+
+    @staticmethod
+    def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame == {"type": "user_message", "text": case.policy.opening_note}
+
+
+def elevenlabs_call(sock: FakeVendorSocket) -> dict[str, Any]:
+    from vamos_voice.providers.elevenlabs import ElevenLabsProvider
+
+    provider = ElevenLabsProvider("el-test", "gpt-4.1-mini", "eleven_flash_v2", "voice")
+    provider.connect = sock.connector()
+    provider.agents = FakeAgentStore(sock)
+    return {"provider": provider}
+
+
+class FluxionsScript:
+    """Server events in the Fluxions realtime protocol: JSON text frames, binary audio."""
+
+    expected_vad = (None, None)  # an adaptive end-of-utterance model with no knob
+
+    def __init__(self, sock: FakeVendorSocket) -> None:
+        self.sock, self.n = sock, 0
+
+    def ready(self) -> None:
+        update = next(f for f in self.sock.sent if f.get("type") == "session.update")
+        self.sock.push(
+            {
+                "type": "session.created",
+                "session_id": "s1",
+                "model": "vllm:test",
+                "mic_sample_rate": 16_000,
+                "audio_sample_rate": 24_000,
+                "soul": update["soul"],
+                "client_tools": [t["name"] for t in update["tools"]],
+                "client_tools_rejected": [],
+                "denied": [],
+            }
+        )
+
+    def tool_calls(self, *names: str) -> None:
+        for i, name in enumerate(names):
+            self.n += 1
+            self.sock.push(
+                {"type": "tool.call", "call_id": f"call_{self.n}_{i}", "name": name, "arguments": {}}
+            )
+        self.sock.push({"type": "agent.done", "cancelled": False})
+
+    def audio(self) -> None:
+        self.sock.push_binary(AGENT_AUDIO)
+
+    def callee_spoke(self) -> None:
+        self.sock.push({"type": "user.transcript", "text": "Hello?"})
+
+    @staticmethod
+    def setup(frame: dict[str, Any]) -> dict[str, Any]:
+        assert frame["allow_hangup"] is False
+        return {
+            "instructions": frame["soul"],
+            "tools": _flat_tools(frame["tools"]),
+            "silence_ms": None,
+            "prefix_ms": None,
+            "transcribes_caller": True,  # user.transcript always streams
+        }
+
+    is_setup = staticmethod(lambda f: f.get("type") == "session.update")
+    #: The opening is Fluxions' own greet turn, asked for in the setup (no turn request exists).
+    is_request = staticmethod(lambda f: f.get("type") == "session.update" and f["greet"])
+    is_caller_audio = staticmethod(lambda f: "binary" in f)
+    opens_in_setup = True
+
+    @staticmethod
+    def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame["type"] == "session.update" and frame["greet"] is True
+
+
+def fluxions_call(sock: FakeVendorSocket) -> dict[str, Any]:
+    from vamos_voice.providers.fluxions import FluxionsProvider
+
+    provider = FluxionsProvider("fx-test", "https://fluxions.test/vui", "maeve")
+    provider.connect = sock.connector()
+    return {"provider": provider}
+
+
 SOCKET_VENDORS = {
     "openai_realtime": (openai_call, OpenAIScript),
     "gemini_live": (gemini_call, GeminiScript),
     "grok_voice": (grok_call, GrokScript),
     "gpt_live": (gpt_live_call, GptLiveScript),
+    "deepgram": (deepgram_call, DeepgramScript),
+    "elevenlabs": (elevenlabs_call, ElevenLabsScript),
+    "fluxions": (fluxions_call, FluxionsScript),
 }
 
 
@@ -386,7 +635,7 @@ async def test_socket_vendor_waits_for_the_callee(name: str, agent: str) -> None
     assert sent_setup["tools"] == case.expected_tools()
     assert (sent_setup["silence_ms"], sent_setup["prefix_ms"]) == script.expected_vad
     assert sent_setup["transcribes_caller"]
-    assert "x-goog-api-key" in sock.headers or "Authorization" in sock.headers
+    assert {"x-goog-api-key", "Authorization", "xi-api-key"} & set(sock.headers)
     assert "key=" not in sock.url
 
     script.ready()
@@ -499,8 +748,9 @@ async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent:
     await asyncio.wait_for(task, 3)
     assert line.closed
     assert [c for c, _ in session.calls] == ["verify_caller", "end_call"]
-    first_after_setup = next(f for f in sock.sent if not script.is_setup(f))
-    script.check_opening(first_after_setup, case)
+    if not getattr(script, "opens_in_setup", False):
+        first_after_setup = next(f for f in sock.sent if not script.is_setup(f))
+        script.check_opening(first_after_setup, case)
 
 
 # --- pipecat: what the LLM receives ------------------------------------------------------

@@ -1044,6 +1044,12 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+elevenlabs = [
+    { name = "httpx" },
+]
+fluxions = [
+    { name = "httpx" },
+]
 pipecat = [
     { name = "openai" },
     { name = "pipecat-ai", extra = ["deepgram", "websocket"] },
@@ -1063,6 +1069,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.142,<0.143" },
+    { name = "httpx", marker = "extra == 'elevenlabs'", specifier = ">=0.28,<0.29" },
+    { name = "httpx", marker = "extra == 'fluxions'", specifier = ">=0.28,<0.29" },
     { name = "numpy", specifier = ">=2.3,<2.6" },
     { name = "openai", marker = "extra == 'pipecat'", specifier = ">=3.0,<4" },
     { name = "pipecat-ai", extras = ["deepgram", "cartesia", "openai", "silero", "websocket"], marker = "extra == 'pipecat'", specifier = ">=1.12,<1.13" },
@@ -1071,7 +1079,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54,<0.55" },
     { name = "websockets", specifier = ">=15,<18" },
 ]
-provides-extras = ["remi", "openai-realtime", "gemini-live", "grok-voice", "gpt-live", "pipecat"]
+provides-extras = ["remi", "openai-realtime", "gemini-live", "grok-voice", "gpt-live", "pipecat", "deepgram", "elevenlabs", "fluxions"]
 
 [package.metadata.requires-dev]
 dev = [
