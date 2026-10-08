@@ -57,7 +57,16 @@ DISPOSITION_PRECEDENCE = (
     "no_commitment",
 )
 DISPOSITIONS = frozenset(
-    {"should_not_call", "failed_verification", "wrong_number", "voicemail", "third_party", "deceased"}
+    {
+        "should_not_call",
+        "failed_verification",
+        "refused_verification",
+        "unverified_stop",
+        "wrong_number",
+        "voicemail",
+        "third_party",
+        "deceased",
+    }
     | set(DISPOSITION_PRECEDENCE)
 )
 

@@ -41,6 +41,13 @@ early with a message saying what must happen first:
    week, time-barred notice not yet 14 days old, outside 8 a.m.–9 p.m. ET).
 2. Right party: full name + two of date of birth / ZIP / SSN last four,
    compared server-side (the model never holds the secrets); 3 failures lock.
+   Before verification Remi says only RULES.md's permitted statements (its
+   name, the business, automated assistant, a personal matter for the named
+   consumer, the number on file, the callback number). A refusal to verify is
+   its own ending (`record_verification_refused` → `refused_verification`), and
+   an unverified "stop calling" stops the number, not the account
+   (`stop_calling_this_number` → consent revoked, `unverified_stop_request`
+   flag, `unverified_stop`).
 3. Disclosures: recording, mini-Miranda, and when due the time-barred
    disclosure and the alternative-format statement, attested as
    `get_debt_details` arguments (so they appear in the trace, in order).
@@ -55,8 +62,10 @@ early with a message saying what must happen first:
 |---|---|---|
 | `get_account`, `get_dialed_phone`, `get_contact_history` | none | Connect-time reads, one tool each so the trace shows each. No DOB, ZIP, SSN, street, balance or creditor in the result. |
 | `verify_right_party` | proceeding | Consumer (name + 2 factors) or `estate_rep` (name only, deceased consumer). |
-| `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. |
-| `log_dispute` | verified | dispute or medical financial assistance; collection stops. |
+| `record_verification_refused` | proceeding | The person declined to verify: no disclosure, and the call's disposition is `refused_verification` (`answered_by` null), not `failed_verification`. |
+| `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. A cease or opt-out from an unverified person is refused and pointed at `stop_calling_this_number`. |
+| `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone; records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`), or for a wrong number marks it `wrong_number`. Never touches the account's status; verification is refused afterwards. |
+| `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
 | `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits. |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
 | `take_payment` | debt unlocked, `collection` | `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: Remi sets `status` `paid`/`settled` (the gateway already moved the balance). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
