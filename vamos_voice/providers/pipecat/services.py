@@ -1,4 +1,7 @@
-"""Pipecat's speech services, chosen by env: one small factory per option, no branching elsewhere."""
+"""Pipecat's speech services, chosen by env: one small factory per option, no branching elsewhere.
+
+Every VAmoS call is in English, so each service that takes a language has it pinned to English
+(configuration, as the other providers do; OpenAI's speech endpoint takes none)."""
 
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.stt import OpenAISTTService
 from pipecat.services.openai.tts import OpenAITTSService
+from pipecat.transcriptions.language import Language
 
 from vamos_voice.audio import CHANNEL_RATE_HZ
 
@@ -63,13 +67,14 @@ def _deepgram(c: ServiceConfig) -> FrameProcessor:
     return DeepgramSTTService(
         api_key=c.deepgram_api_key,
         sample_rate=CHANNEL_RATE_HZ,
-        settings=DeepgramSTTService.Settings(model=c.deepgram_model),
+        settings=DeepgramSTTService.Settings(model=c.deepgram_model, language=Language.EN),
     )
 
 
 def _openai_stt(c: ServiceConfig) -> FrameProcessor:
     return OpenAISTTService(
-        api_key=c.openai_api_key, settings=OpenAISTTService.Settings(model=c.openai_stt_model)
+        api_key=c.openai_api_key,
+        settings=OpenAISTTService.Settings(model=c.openai_stt_model, language=Language.EN),
     )
 
 
@@ -86,7 +91,7 @@ def _cartesia(c: ServiceConfig) -> FrameProcessor:
     return CartesiaTTSService(
         api_key=c.cartesia_api_key,
         sample_rate=CHANNEL_RATE_HZ,
-        settings=CartesiaTTSService.Settings(voice=c.cartesia_voice_id),
+        settings=CartesiaTTSService.Settings(voice=c.cartesia_voice_id, language=Language.EN),
     )
 
 

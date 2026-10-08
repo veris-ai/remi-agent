@@ -12,7 +12,10 @@ authenticate their caller themselves. ``/voice`` takes exactly one call per pod 
 the call's ``CallSession``, runs the agent's screen pop (its connect-time
 reads, before any vendor session opens: ``vamos_voice.screen_pop``), builds
 the ``CallRuntime`` and hands it to the provider. Whatever happens, the
-agent's ``finalize()`` runs at the end.
+agent's ``finalize()`` runs, once: the moment the caller hangs up or the
+socket drops (``CallSession.caller_gone``, before the provider's teardown),
+otherwise when the provider returns, and at the latest when the server shuts
+down (a pod being stopped mid-call), before the agent's world clients close.
 ``VAMOS_VOICE_FRAMING`` picks the socket's framing (``vamos_voice.framing``).
 """
 
@@ -21,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
@@ -79,6 +82,7 @@ def session_setup(
 class _Pod:
     ready: bool = False
     busy: bool = False
+    calls: set[CallSession] = field(default_factory=set)
 
 
 def create_app(
@@ -101,6 +105,8 @@ def create_app(
             yield
         finally:
             try:
+                for session in list(pod.calls):  # a pod stopped mid-call still leaves the call's record
+                    await _finalize(agent, session)
                 await provider.close()
             finally:
                 await agent.close()
@@ -122,7 +128,7 @@ def create_app(
             return
         pod.busy = True
         await websocket.accept()
-        await run_call(agent, provider, turns, websocket, framing)
+        await run_call(agent, provider, turns, websocket, framing, pod.calls)
 
     return app
 
@@ -133,30 +139,48 @@ async def run_call(
     turns: TurnTaking,
     websocket: WebSocket,
     framing: Framing = Framing.BINARY,
+    calls: set[CallSession] | None = None,
 ) -> None:
     """One call on the ``/voice`` socket, in the candidate's framing (see ``serve_call``)."""
-    await serve_call(agent, provider, turns, CallerLine(websocket, framing))
+    await serve_call(agent, provider, turns, CallerLine(websocket, framing), calls)
 
 
-async def serve_call(agent: AgentSpec, provider: VoiceProvider, turns: TurnTaking, line: CallerLine) -> None:
-    """One call, start to finish. However it ends, the agent finalizes and the line hangs up
-    through ``CallerLine.close`` (in ``json`` framing: ``{"type": "end"}``, then close 1000)."""
+async def serve_call(
+    agent: AgentSpec,
+    provider: VoiceProvider,
+    turns: TurnTaking,
+    line: CallerLine,
+    calls: set[CallSession] | None = None,
+) -> None:
+    """One call, start to finish. However it ends, the agent finalizes (at once when the caller
+    hangs up) and the line hangs up through ``CallerLine.close`` (in ``json`` framing:
+    ``{"type": "end"}``, then close 1000). ``calls`` holds the live session while the call runs,
+    so a server shutting down can finalize it."""
     clock = CallClock(agent.call_time())
     clock.start()
     session = CallSession(agent.open_call(clock), agent.tools, agent.gates)
+    line.on_caller_gone = session.caller_gone
+    if calls is not None:
+        calls.add(session)
     try:
         await provider.run_call(await call_runtime(agent, session, clock, turns, line))
     except Exception:
         logger.exception("call failed in provider %s", provider.name)
     finally:
-        try:
-            await session.finalize()
-        except Exception:
-            logger.exception("agent %s could not finalize the call", agent.name)
+        await _finalize(agent, session)
+        if calls is not None:
+            calls.discard(session)
         await line.close()
         logger.info(
             "call over after %.1fs; tools: %s", clock.elapsed.total_seconds(), ", ".join(session.tool_log)
         )
+
+
+async def _finalize(agent: AgentSpec, session: CallSession) -> None:
+    try:
+        await session.finalize()
+    except Exception:
+        logger.exception("agent %s could not finalize the call", agent.name)
 
 
 async def call_runtime(

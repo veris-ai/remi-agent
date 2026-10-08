@@ -1,20 +1,23 @@
 """Closing the call: callbacks, letters, transfers, the contact log, hanging up.
 
 Every call ends with exactly one contact-attempt row (NYC § 2-193).
-``log_contact_attempt`` writes it with the duration from ``CallClock`` and the
-disposition derived from what the session recorded (WORLD.md's precedence), so
-the model supplies only who answered and a plain-language summary. The stored
-summary leads with the facts the session recorded (disposition, who answered,
-whether the debt was read and after which attested disclosures, outcomes), so
-the row stays true even when the model's notes describe what it meant to say
-rather than what it said; the notes follow, labelled as Remi's. If the
-other side hangs up first, ``RemiCall.finalize`` writes the row instead.
-``end_call`` is refused until the call is logged.
+``log_contact_attempt`` records the model's part of it, who answered and a
+plain-language summary, before its goodbye; the row itself is written once,
+when the call ends: by ``end_call``, or by ``RemiCall.finalize`` the moment the
+other side hangs up (or the socket drops) first. So the goodbye can never race
+the record, and an outcome recorded after the log still counts. The row's
+duration comes from ``CallClock`` and its disposition from what the session
+recorded (WORLD.md's precedence). The stored summary leads with the facts the
+session recorded (disposition, who answered, whether the debt was read and
+after which attested disclosures, outcomes, a transfer), so the row stays true
+even when the model's notes describe what it meant to say rather than what it
+said; the notes follow, labelled as Remi's. ``end_call`` is refused until the
+call is logged, and both wait for a transfer once SCRA was recorded.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -22,9 +25,9 @@ from pydantic import BaseModel, Field
 from vamos_voice.tools import ToolError
 
 from .. import policy
-from ..call import RemiCall, new_id
+from ..call import ContactNote, RemiCall, new_id
 from ..context import EASTERN
-from ..gates import Gate
+from ..gates import CLOSING, Gate
 from .catalog import REGISTRY
 
 
@@ -130,12 +133,13 @@ class ContactLogArgs(BaseModel):
     )
 
 
-@REGISTRY.tool(ContactLogArgs, requires=Gate.ASSESSED)
+@REGISTRY.tool(ContactLogArgs, requires=Gate.ASSESSED, tags=(CLOSING,))
 async def log_contact_attempt(session: RemiCall, args: ContactLogArgs) -> dict[str, Any]:
-    """Write this call's one contact record, after your last words and before end_call. The time, duration and
-    disposition are filled in for you from what was recorded on the call."""
-    if session.contact_logged:
-        raise ToolError("This call is already logged. Call end_call.")
+    """Log this call's one contact record once the call is wrapping up, before your goodbye: who answered and
+    what happened. The record is written when the call ends, with the time, duration and disposition filled in
+    from everything recorded on the call. Calling it again replaces your summary."""
+    if session.contact_disposition is not None:
+        raise ToolError("This call's record is already written.")
     answered_by: str | None = None if args.answered_by == "none" else args.answered_by
     assert session.assessment is not None
     if not session.assessment.proceed:
@@ -144,15 +148,12 @@ async def log_contact_attempt(session: RemiCall, args: ContactLogArgs) -> dict[s
         raise ToolError(
             f"answered_by '{answered_by}' needs a verified {answered_by}. Use third_party or none."
         )
-    elif answered_by is None and session.verified_as is not None:
-        answered_by = session.verified_as
-    disposition = await session.write_contact_attempt(
-        answered_by=answered_by, notes=args.summary.strip(), number_is_wrong=args.number_is_wrong
-    )
+    session.contact_note = ContactNote(answered_by, args.summary.strip(), args.number_is_wrong)
     return {
         "logged": True,
-        "disposition": disposition,
-        "duration_s": int(session.clock.elapsed / timedelta(seconds=1)),
+        "disposition": session.disposition_for(session.recorded_answerer(answered_by)),
+        "allowed_now": "The record is written when the call ends; what is recorded before then still counts. "
+        "Next: your goodbye, then end_call.",
     }
 
 
@@ -160,11 +161,12 @@ class NoArgs(BaseModel):
     pass
 
 
-@REGISTRY.tool(NoArgs, requires=Gate.ASSESSED)
+@REGISTRY.tool(NoArgs, requires=Gate.ASSESSED, tags=(CLOSING,))
 async def end_call(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """Hang up. Say your goodbye first; the line closes once your last words have played. Requires
-    log_contact_attempt first."""
+    log_contact_attempt first; writes the call's contact record."""
     if not session.contact_logged:
         raise ToolError("Call log_contact_attempt first.")
+    disposition = await session.write_contact_record()
     session.ended = True
-    return {"ended": True, "allowed_now": "Nothing more is said."}
+    return {"ended": True, "disposition": disposition, "allowed_now": "Nothing more is said."}

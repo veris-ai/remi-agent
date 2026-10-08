@@ -6,10 +6,14 @@ encoded, and the hang-up matches ``CallerLine.close``. When the pipeline ends
 (``EndFrame`` after the agent's hang-up tool, or ``CancelFrame``) the transport
 writes that frame through here, then closes the socket with 1000: in ``json``
 framing the frame becomes ``{"type": "end"}``, unless the caller hung up first.
-A caller's ``end`` cancels the pipeline, as a dropped socket does.
+A caller's ``end`` cancels the pipeline, as a dropped socket does, and is
+reported at once (``on_caller_end``: the line's ``caller_gone``) so the call
+finalizes without waiting for the pipeline to wind down.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -28,10 +32,11 @@ from vamos_voice.framing import Framing
 class LineSerializer(FrameSerializer):
     """Audio in and out in the line's framing; the hang-up as the framing's end message; nothing else crosses."""
 
-    def __init__(self, framing: Framing) -> None:
+    def __init__(self, framing: Framing, on_caller_end: Callable[[], None] | None = None) -> None:
         super().__init__()
         self.framing = framing
         self.caller_ended = False
+        self._on_caller_end = on_caller_end
 
     async def serialize(self, frame: Frame) -> bytes | str | None:
         if isinstance(frame, OutputAudioRawFrame):
@@ -46,5 +51,7 @@ class LineSerializer(FrameSerializer):
             return None
         if message.end:
             self.caller_ended = True
+            if self._on_caller_end is not None:
+                self._on_caller_end()
             return CancelWorkerFrame(reason="caller hung up")
         return InputAudioRawFrame(audio=message.audio, sample_rate=CHANNEL_RATE_HZ, num_channels=1)

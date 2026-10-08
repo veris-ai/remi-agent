@@ -127,8 +127,8 @@ def _with_assessment(session: RemiCall, result: dict[str, Any]) -> dict[str, Any
             "is asked for by first name. Nothing about the debt before verification."
             if a.proceed
             else "This call should not have been placed. Allowed when the person speaks: your name, the "
-            "business name and that you are an automated assistant, then a courteous goodbye; no purpose, no "
-            "debt, no verification questions. Then log_contact_attempt with answered_by 'none' and end_call."
+            "business name and that you are an automated assistant, then log_contact_attempt with answered_by "
+            "'none', a courteous goodbye and end_call; no purpose, no debt, no verification questions."
         ),
     }
     return result

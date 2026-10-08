@@ -87,7 +87,11 @@ class CallerLine:
         self.closed = False
         #: The caller hung up in-band (``{"type": "end"}``), as opposed to dropping the socket.
         self.caller_ended = False
+        #: Called once, at once, when the caller hangs up or the socket drops (the server points it
+        #: at ``CallSession.caller_gone``, so the agent's record never waits for vendor teardown).
+        self.on_caller_gone: Callable[[], None] | None = None
         self._hung_up = False
+        self._gone_reported = False
 
     async def receive(self) -> bytes | None:
         """The next audio frame, or None once the caller hangs up."""
@@ -107,8 +111,17 @@ class CallerLine:
                 self.caller_ended = True
                 break
             return decoded.audio
-        self.closed = True
+        self.caller_gone()
         return None
+
+    def caller_gone(self) -> None:
+        """The caller is no longer on the line (an ``end`` message, or the socket closed). For a
+        provider whose framework reads the socket itself (Pipecat), its transport calls this."""
+        self.closed = True
+        if not self._gone_reported:
+            self._gone_reported = True
+            if self.on_caller_gone is not None:
+                self.on_caller_gone()
 
     def _connected(self) -> bool:
         return (

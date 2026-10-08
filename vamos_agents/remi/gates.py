@@ -4,7 +4,8 @@
 whose level the call has not reached (``RemiCall.refusal_for`` says what must
 happen first), and refuses every tool tagged ``COLLECTION`` once something on
 the call (a dispute, cease, attorney, bankruptcy, death, SCRA) stopped
-collection.
+collection. Once SCRA is recorded the transfer is mandatory (RULES.md, "Active
+military duty"), so the tools tagged ``CLOSING`` wait for ``transfer_to_human``.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
 
 #: Tag on tools that state an amount, make an offer or take money.
 COLLECTION = "collection"
+#: Tag on the tools that close the call (log it, hang up): they wait for steps a rule makes mandatory.
+CLOSING = "closing"
 
 
 class Gate(enum.IntEnum):
@@ -33,7 +36,7 @@ class Gate(enum.IntEnum):
 
 
 class RemiGates:
-    """The opening-order ladder, then the collection stop."""
+    """The opening-order ladder, then the collection stop, then the steps a closing must wait for."""
 
     def __init__(self) -> None:
         self._ladder: GateLadder[RemiCall] = GateLadder(
@@ -48,6 +51,11 @@ class RemiGates:
             return (
                 f"Collection stopped on this call ({call.collection_stopped_by.replace('_', ' ')}). "
                 "No amount, offer or payment request is allowed for the rest of the call."
+            )
+        if CLOSING in tool.tags and call.scra_recorded and not call.transferred:
+            return (
+                "Active military duty was recorded: the call goes to a person before it is logged or "
+                "ended (transfer_to_human, reason scra)."
             )
         return None
 

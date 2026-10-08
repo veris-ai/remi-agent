@@ -9,6 +9,7 @@ itself (see ``support``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any
@@ -177,9 +178,10 @@ async def test_should_not_call_closes_without_verification(pg_dsn, make_session)
         "log_contact_attempt", {"answered_by": "consumer", "summary": "Closed the call at connect."}
     )
     assert logged["disposition"] == "should_not_call"
+    assert rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'") == []  # written when the call ends
+    assert (await s.dispatch("end_call", {}))["ended"] is True
     (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
     assert attempt["answered_by"] is None and attempt["consumer_responded"] is False
-    assert (await s.dispatch("end_call", {}))["ended"] is True
 
 
 async def test_the_contact_summary_leads_with_what_the_call_recorded(pg_dsn, make_session) -> None:
@@ -191,6 +193,7 @@ async def test_the_contact_summary_leads_with_what_the_call_recorded(pg_dsn, mak
     await open_call(s)
     claim = "Remi identified as a virtual assistant for Tallmere Account Services and ended the call."
     await s.dispatch("log_contact_attempt", {"answered_by": "none", "summary": claim})
+    await s.dispatch("end_call", {})
     (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
     assert attempt["summary"] == (
         "Disposition: should_not_call. The call should not have been placed (employer_phone): "
@@ -201,6 +204,7 @@ async def test_the_contact_summary_leads_with_what_the_call_recorded(pg_dsn, mak
     s2 = await make_session()
     await unlocked(s2)
     await s2.dispatch("log_contact_attempt", {"answered_by": "consumer", "summary": "Reviewed the balance."})
+    await s2.finalize()
     (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
     assert attempt["summary"].startswith(
         "Disposition: no_commitment. Answered by: the verified consumer. Debt read after attesting: "
@@ -440,17 +444,21 @@ async def test_remi_001_pay_in_full_leaves_exactly_the_answer_key_rows(
     paid = await s.dispatch(
         "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
     )
+    told = paid.pop("allowed_now")
     assert paid == {
         "status": "approved",
         "amount": "$185.00",
         "remaining_balance": "$0.00",
         "paid_with": "card ending 4242",
+        "consumer_has_heard": False,
     }
-    ticks.t += 65
+    assert "went through" in told and "before anything else" in told
     await s.dispatch(
         "log_contact_attempt",
         {"answered_by": "consumer", "summary": "Consumer paid the full balance by card."},
     )
+    ticks.t += 65
+    assert (await s.dispatch("end_call", {}))["disposition"] == "paid"
 
     everything = changes(before, snapshot(pg_dsn))
     # The processor's vault is not the agency's schema: the answer key never names it.
@@ -772,6 +780,126 @@ async def test_deceased_reported_by_the_executor(pg_dsn, make_session) -> None:
     assert rows(pg_dsn, "consumers")[0]["deceased_on"] == date(2026, 12, 30)
 
 
+async def test_a_call_optout_on_every_number_revokes_each_and_does_not_hang(pg_dsn, make_session) -> None:
+    """'Don't call me at all, email me': the consumer's phones are read before the write transaction
+    (the database lock is not re-entrant; reading inside it hung the tool forever)."""
+    seed_world(pg_dsn)
+    s = await make_session()
+    await verified(s)
+    opted = await asyncio.wait_for(
+        s.dispatch("record_flag", {"kind": "channel_optout", "channel": "call", "this_number_only": False}),
+        10,
+    )
+    assert opted["recorded"] == "channel_optout"
+    assert all(p["consent_revoked_at"] is not None for p in rows(pg_dsn, "phones"))
+    (flag,) = rows(pg_dsn, "account_flags")
+    assert flag["details"] == {"channel": "call"}
+
+
+async def test_a_death_reported_by_someone_unverified_without_a_date(pg_dsn, make_session) -> None:
+    """REMI-086: "My husband passed" from the spouse. Placeholders and the call's own date are refused;
+    with no date given the death is recorded without one, and a date said later completes it. The person
+    is a third party on the contact row, whoever the model says answered."""
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    flag = {"kind": "deceased", "reported_by": "the person on the line", "relationship": "unknown"}
+    refused = await s.dispatch("record_flag", flag)
+    assert "reported_by, relationship" in refused["error"]
+    today = {"kind": "deceased", "reported_by": "Gloria", "relationship": "wife", "died_on": "2027-02-10"}
+    assert "not a date of death the person gave" in (await s.dispatch("record_flag", today))["error"]
+    future = {**today, "died_on": "2027-03-01"}
+    assert "error" in await s.dispatch("record_flag", future)
+    assert rows(pg_dsn, "account_flags") == []
+
+    recorded = await s.dispatch(
+        "record_flag", {"kind": "deceased", "reported_by": "Gloria", "relationship": "wife"}
+    )
+    assert recorded["recorded"] == "deceased" and "date_of_death" in recorded
+    assert rows(pg_dsn, "consumers")[0]["deceased_on"] is None
+    assert rows(pg_dsn, "accounts")[0]["status"] == "deceased"
+    completed = await s.dispatch(
+        "record_flag",
+        {
+            "kind": "deceased",
+            "reported_by": "Gloria Haddad",
+            "relationship": "spouse",
+            "died_on": "2027-01-18",
+        },
+    )
+    assert "date_of_death" not in completed
+    (row,) = rows(pg_dsn, "account_flags")
+    assert row["details"] == {
+        "reported_by": "Gloria Haddad",
+        "relationship": "spouse",
+        "is_estate_rep": False,
+    }
+    assert rows(pg_dsn, "consumers")[0]["deceased_on"] == date(2027, 1, 18)
+
+    await s.dispatch("log_contact_attempt", {"answered_by": "none", "summary": "Spouse reported the death."})
+    assert (await s.dispatch("end_call", {}))["disposition"] == "deceased"
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert (attempt["answered_by"], attempt["consumer_responded"]) == ("third_party", False)
+
+
+async def test_scra_needs_the_branch_and_a_transfer_before_the_call_closes(pg_dsn, make_session) -> None:
+    """REMI-098: the flag carries the branch, and the transfer is required: the closing tools wait for it.
+    The contact row says transferred, so the transfer is gradable from the SQL log alone."""
+    seed_world(pg_dsn)
+    s = await make_session()
+    await unlocked(s)
+    assert "branch" in (await s.dispatch("record_flag", {"kind": "scra"}))["error"]
+    recorded = await s.dispatch("record_flag", {"kind": "scra", "branch": "Army"})
+    assert "transfer_to_human" in recorded["allowed_now"]
+    summary = {"answered_by": "consumer", "summary": "Consumer is on active duty."}
+    assert "transfer_to_human" in (await s.dispatch("log_contact_attempt", summary))["error"]
+    assert "transfer_to_human" in (await s.dispatch("end_call", {}))["error"]
+    assert (
+        "Collection stopped"
+        in (await s.dispatch("record_promise", {"amount": 10.0, "due_on": "2027-02-12", "method": "check"}))[
+            "error"
+        ]
+    )
+    assert (await s.dispatch("transfer_to_human", {"reason": "scra"}))["transferred"] is True
+    assert (await s.dispatch("log_contact_attempt", summary))["disposition"] == "transferred"
+    await s.dispatch("end_call", {})
+    (flag,) = rows(pg_dsn, "account_flags")
+    assert (flag["kind"], flag["details"]) == ("scra", {"branch": "Army"})
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert (attempt["answered_by"], attempt["disposition"]) == ("consumer", "transferred")
+    assert "transferred to a person." in attempt["summary"].lower()
+
+
+async def test_a_transfer_is_in_the_summary_whatever_the_disposition(pg_dsn, make_session) -> None:
+    """The bench's SQL-only reading of a transfer: disposition transferred, or the summary's note."""
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    await s.dispatch("transfer_to_human", {"reason": "consumer_asked_for_person"})  # before verification
+    await s.finalize()  # the caller hung up during the transfer
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert attempt["disposition"] == "failed_verification"
+    assert "transferred to a person." in attempt["summary"].lower()
+
+
+async def test_the_record_is_written_at_the_end_so_a_later_outcome_counts(pg_dsn, make_session) -> None:
+    """log_contact_attempt comes before the goodbye; something recorded after it still lands on the row,
+    and a finalize racing end_call writes one row."""
+    seed_world(pg_dsn)
+    s = await make_session()
+    await unlocked(s)
+    logged = await s.dispatch("log_contact_attempt", {"answered_by": "consumer", "summary": "No commitment."})
+    assert logged["disposition"] == "no_commitment"
+    await s.dispatch("record_flag", {"kind": "hardship", "hardship_reason": "job_loss"})
+    ended, _ = await asyncio.gather(s.dispatch("end_call", {}), s.finalize())
+    assert ended["disposition"] == "hardship"
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert attempt["disposition"] == "hardship" and "No commitment." in attempt["summary"]
+    assert "error" in await s.dispatch(
+        "log_contact_attempt", {"answered_by": "consumer", "summary": "Again, later."}
+    )
+
+
 async def test_voicemail_and_wrong_number(pg_dsn, make_session) -> None:
     seed_world(pg_dsn)
     s = await make_session()
@@ -780,6 +908,7 @@ async def test_voicemail_and_wrong_number(pg_dsn, make_session) -> None:
         "log_contact_attempt", {"answered_by": "voicemail", "summary": "Left a limited-content message."}
     )
     assert logged["disposition"] == "voicemail"
+    await s.dispatch("end_call", {})
     (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
     assert (attempt["medium"], attempt["answered_by"]) == ("voicemail", "voicemail")
     seed_world(pg_dsn)
@@ -789,6 +918,7 @@ async def test_voicemail_and_wrong_number(pg_dsn, make_session) -> None:
         "log_contact_attempt",
         {"answered_by": "wrong_number", "summary": "Wrong number; apologised.", "number_is_wrong": True},
     )
+    await s2.dispatch("end_call", {})
     assert rows(pg_dsn, "phones")[0]["status"] == "wrong_number"
 
 
@@ -836,6 +966,7 @@ async def test_time_barred_call_requeues_the_notice(pg_dsn, make_session) -> Non
         "log_contact_attempt",
         {"answered_by": "consumer", "summary": "Gave the time-barred disclosure; no commitment."},
     )
+    await s.dispatch("end_call", {})
     assert [letter["kind"] for letter in rows(pg_dsn, "letters")] == ["time_barred"]
 
 

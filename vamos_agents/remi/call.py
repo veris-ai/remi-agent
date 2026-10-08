@@ -18,9 +18,11 @@ into ``{"error": ...}`` (see ``vamos_voice.session``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from vamos_voice.context import CallClock
@@ -46,6 +48,10 @@ WHO_ANSWERED = {
     "voicemail": "voicemail",
     "wrong_number": "a wrong number",
 }
+#: The summary's transfer line. The bench reads a transfer from a contact row whose disposition is
+#: ``transferred`` or whose summary says "transferred to a person." (for a candidate without a trace),
+#: so the line is there whenever the call was transferred, whatever the disposition's precedence.
+TRANSFER_NOTE = "Transferred to a person."
 
 
 def new_id(prefix: str) -> str:
@@ -63,6 +69,15 @@ class Assessment:
     @property
     def proceed(self) -> bool:
         return not self.should_not_call_reasons
+
+
+@dataclass(frozen=True)
+class ContactNote:
+    """What log_contact_attempt recorded for the call's one contact row (the row is written at the end)."""
+
+    answered_by: str | None  # as the model established it, already checked against the call
+    notes: str
+    number_is_wrong: bool
 
 
 @dataclass
@@ -97,14 +112,23 @@ class RemiCall:
     transferred: bool = False
     hardship_recorded: bool = False
     deceased_flag_id: str | None = None
-    #: An unverified person asked the agency to stop calling this number: "unverified" (a flag for
-    #: review, disposition unverified_stop) or "wrong_number" (the number is not the consumer's).
+    deceased_details: dict[str, Any] | None = None  # the death flag's details as last written
+    deceased_on: date | None = None  # the date of death written on this call
+    #: An unverified person asked the agency to stop calling this number, or said it is not the
+    #: consumer's: "unverified" (a flag for review, disposition unverified_stop) or "wrong_number".
     number_stop: str | None = None
+    phone_marked_wrong: bool = False  # the dialed phone's status is already wrong_number
+    consent_revoked: set[str] = field(default_factory=set)  # phone ids whose consent this call revoked
+    scra_recorded: bool = False
     letters_queued: set[str] = field(default_factory=set)
     payment_methods: dict[str, SavedMethod] = field(default_factory=dict)  # tokenized on this call
     declined_methods: set[str] = field(default_factory=set)
-    contact_logged: bool = False
+    #: log_contact_attempt's note; the row itself is written once, when the call ends.
+    contact_note: ContactNote | None = None
+    #: The written row's disposition, once it is written (end_call, or finalize).
+    contact_disposition: str | None = None
     ended: bool = False
+    _contact_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     # --- the gate ------------------------------------------------------------------------
 
@@ -202,9 +226,12 @@ class RemiCall:
         return flag_id
 
     async def revoke_consent(self, tx: Transaction, phones: list[Phone]) -> None:
+        """Revoke each phone's artificial-voice consent once: not if the World already had it revoked,
+        and not twice on one call (a wrong number that then says stop, an opt-out then a cease)."""
         for phone in phones:
-            if phone.consent_revoked_at is None:
+            if phone.consent_revoked_at is None and phone.phone_id not in self.consent_revoked:
                 await tx.update("phones", phone.phone_id, {"consent_revoked_at": self.clock.now()})
+                self.consent_revoked.add(phone.phone_id)
 
     def disposition_for(self, answered_by: str | None) -> str:
         """WORLD.md's disposition: who answered first, then the first outcome in precedence."""
@@ -224,15 +251,18 @@ class RemiCall:
 
     def recorded_answerer(self, claimed: str | None) -> str | None:
         """``answered_by`` as WORLD.md defines it: what the call established, whatever the model claims.
-        Null when nobody was confirmed: a refusal to verify, or a stop request from someone unverified."""
+        Null when nobody was confirmed: a refusal to verify, or a stop request from someone unverified.
+        Someone unverified who reported the consumer's death is a third party."""
         if self.assessment is not None and not self.assessment.proceed:
             return None
         if self.verified_as is not None:
-            return claimed or self.verified_as
+            return self.verified_as
         if self.number_stop == "wrong_number":
             return "wrong_number"
         if self.number_stop == "unverified" or self.verification_refused:
             return None
+        if self.deceased_flag_id is not None:
+            return "third_party"
         return claimed
 
     def recorded_facts(self, answered_by: str | None, disposition: str) -> str:
@@ -254,56 +284,70 @@ class RemiCall:
         if self.outcomes:
             facts.append(f"Recorded outcomes: {', '.join(sorted(self.outcomes))}.")
         if self.transferred:
-            facts.append("Transferred to a person.")
+            facts.append(TRANSFER_NOTE)
         return " ".join(facts)
 
-    async def write_contact_attempt(
-        self, *, answered_by: str | None, notes: str | None, number_is_wrong: bool = False
-    ) -> str:
-        """The call's one contact_attempts row (NYC § 2-193), plus its end-of-call effects.
+    @property
+    def contact_logged(self) -> bool:
+        """log_contact_attempt has run (the row is written when the call ends)."""
+        return self.contact_note is not None
 
-        Its summary is the recorded facts, then the model's ``notes`` (None: it never logged the call)."""
-        if self.account is None or self.phone is None:
-            raise ToolError("The connect-time reads come first.")
-        answered_by = self.recorded_answerer(answered_by)
-        number_is_wrong = number_is_wrong or self.number_stop == "wrong_number"
-        disposition = self.disposition_for(answered_by)
-        facts = self.recorded_facts(answered_by, disposition)
-        summary = (
-            f"{facts} Remi's notes: {notes}" if notes else f"{facts} The call ended before Remi logged it."
-        )
-        async with self.db.transaction() as tx:
-            await tx.insert(
-                "contact_attempts",
-                {
-                    "attempt_id": new_id("att"),
-                    "account_id": self.context.account_id,
-                    "phone_id": self.context.phone_id,
-                    "at": self.context.call_time,
-                    "medium": "voicemail" if answered_by == "voicemail" else "call",
-                    "direction": "outbound",
-                    "answered_by": answered_by,
-                    "consumer_responded": answered_by == "consumer",
-                    "duration_s": max(1, round(self.clock.elapsed.total_seconds())),
-                    "disposition": disposition,
-                    "summary": summary,
-                    "agent_name": AGENT_NAME,
-                },
+    async def write_contact_record(self) -> str:
+        """The call's one contact_attempts row (NYC § 2-193), plus its end-of-call effects; once.
+
+        Written when the call ends (end_call, or ``finalize`` when the other side hangs up first), from
+        everything the call recorded, so an outcome after log_contact_attempt still counts. Its summary
+        is the recorded facts, then the model's notes (none: it never logged the call)."""
+        async with self._contact_lock:
+            if self.contact_disposition is not None:
+                return self.contact_disposition
+            if self.account is None or self.phone is None:
+                raise ToolError("The connect-time reads come first.")
+            note = self.contact_note
+            answered_by = self.recorded_answerer(note.answered_by if note else self.verified_as)
+            mark_wrong = not self.phone_marked_wrong and (
+                answered_by == "wrong_number" or (note is not None and note.number_is_wrong)
             )
-            if number_is_wrong:
-                await tx.update("phones", self.context.phone_id, {"status": "wrong_number"})
-            if answered_by == "consumer" and policy.time_barred_notice_requeue(
-                self.account, self.clock.today()
-            ):
-                await self.queue_letters(tx, "time_barred")
-        self.contact_logged = True
-        return disposition
+            disposition = self.disposition_for(answered_by)
+            facts = self.recorded_facts(answered_by, disposition)
+            summary = (
+                f"{facts} Remi's notes: {note.notes}"
+                if note
+                else f"{facts} The call ended before Remi logged it."
+            )
+            async with self.db.transaction() as tx:
+                await tx.insert(
+                    "contact_attempts",
+                    {
+                        "attempt_id": new_id("att"),
+                        "account_id": self.context.account_id,
+                        "phone_id": self.context.phone_id,
+                        "at": self.context.call_time,
+                        "medium": "voicemail" if answered_by == "voicemail" else "call",
+                        "direction": "outbound",
+                        "answered_by": answered_by,
+                        "consumer_responded": answered_by == "consumer",
+                        "duration_s": max(1, round(self.clock.elapsed.total_seconds())),
+                        "disposition": disposition,
+                        "summary": summary,
+                        "agent_name": AGENT_NAME,
+                    },
+                )
+                if mark_wrong:
+                    await tx.update("phones", self.context.phone_id, {"status": "wrong_number"})
+                if answered_by == "consumer" and policy.time_barred_notice_requeue(
+                    self.account, self.clock.today()
+                ):
+                    await self.queue_letters(tx, "time_barred")
+            self.phone_marked_wrong = self.phone_marked_wrong or mark_wrong
+            self.contact_disposition = disposition
+            return disposition
 
     async def finalize(self) -> None:
-        """The voice connection closed. If the model never logged the call, log it now:
-        every call must leave exactly one contact-attempt row (NYC § 2-193)."""
-        if self.contact_logged or self.assessment is None:
+        """The voice connection closed (or the caller hung up). Every call leaves exactly one
+        contact-attempt row (NYC § 2-193): write it now if end_call has not."""
+        if self.contact_disposition is not None or self.assessment is None:
             return
-        answered_by = self.verified_as if self.assessment.proceed else None
-        disposition = await self.write_contact_attempt(answered_by=answered_by, notes=None)
-        logger.warning("call closed without log_contact_attempt; logged it as %s", disposition)
+        disposition = await self.write_contact_record()
+        if self.contact_note is None:
+            logger.warning("call closed without log_contact_attempt; logged it as %s", disposition)

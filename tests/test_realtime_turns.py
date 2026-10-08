@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 from typing import Any
 
 import pytest
@@ -175,3 +176,30 @@ async def test_a_request_refused_for_an_active_response_is_sent_when_it_ends() -
     await settle()
     assert sum(is_reply(f) for f in sock.sent) == 2, "the refused request is asked for again"
     await stop(task)
+
+
+def test_openai_realtime_pins_the_callers_transcription_to_english() -> None:
+    """The VAmoS benches are English-only: the language is configuration where the vendor takes one."""
+    from vamos_voice.providers.openai_realtime import OpenAIRealtimeProvider
+
+    provider = OpenAIRealtimeProvider.from_env({"OPENAI_API_KEY": "sk-test"})
+    transcription = provider.session_config(REMI.setup())["audio"]["input"]["transcription"]
+    assert transcription["language"] == "en"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
+def test_pipecat_speech_services_are_pinned_to_english() -> None:
+    from pipecat.transcriptions.language import Language
+
+    from vamos_voice.providers.pipecat.services import STT_FACTORIES, TTS_FACTORIES, ServiceConfig
+
+    config = ServiceConfig.from_env(
+        {
+            "OPENAI_API_KEY": "sk-test",
+            "DEEPGRAM_API_KEY": "dg-test",
+            "CARTESIA_API_KEY": "ca-test",
+            "VAMOS_CARTESIA_VOICE_ID": "voice",
+        }
+    )
+    for factory in (STT_FACTORIES["deepgram"], STT_FACTORIES["openai"], TTS_FACTORIES["cartesia"]):
+        assert factory(config)._settings.language == Language.EN, factory.__name__

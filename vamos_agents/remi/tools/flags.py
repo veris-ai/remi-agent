@@ -5,6 +5,12 @@ table require for that signal (the flag, its letter, the account status, the
 phone's consent), in one transaction, and stops collection on this call when
 the rule says so. The session then refuses every payment tool, so a model
 that keeps collecting after a dispute gets a tool error, not a payment.
+
+Before verification two signals change the dialed number, never the account
+(RULES.md, "Stop requests before verification", "Wrong number"): a wrong
+number marks the phone ``wrong_number`` and revokes its consent only if the
+person also asked to stop calling it; a stop request from anyone else revokes
+consent and leaves an ``unverified_stop_request`` flag for review.
 """
 
 from __future__ import annotations
@@ -12,12 +18,13 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vamos_voice.tools import ToolError
 
 from ..call import RemiCall
 from ..gates import Gate
+from ..world import Phone
 from .catalog import REGISTRY
 
 DisputeReason = Literal[
@@ -92,20 +99,51 @@ class FlagArgs(BaseModel):
     court: str | None = Field(None, description="bankruptcy: the court.")
     filed_on: date | None = Field(None, description="bankruptcy: the filing date, YYYY-MM-DD.")
     reported_by: str | None = Field(
-        None, description="deceased: full name of the person reporting the death."
+        None, description="deceased: the name the person reporting the death gave (ask for it)."
     )
     relationship: str | None = Field(
-        None, description="deceased: their relationship to the consumer, e.g. spouse, child, sibling."
+        None, description="deceased: their relationship to the consumer, e.g. spouse, child, sibling (ask)."
     )
-    died_on: date | None = Field(None, description="deceased: the date of death, YYYY-MM-DD.")
-    branch: str | None = Field(None, description="scra: the military branch, if given.")
+    died_on: date | None = Field(
+        None,
+        description="deceased: the date of death the person said, YYYY-MM-DD (ask for it). Leave it out if "
+        "they did not give one; never today's date or a guess.",
+    )
+    branch: str | None = Field(None, description="scra: the military branch they serve in (ask if not said).")
     hardship_reason: Literal["job_loss", "medical", "bereavement", "disability", "income"] | None = Field(
         None, description="hardship: the reason."
     )
 
 
+#: Words a model puts in a field it never asked about: not something the person said.
+PLACEHOLDERS = frozenset(
+    {
+        "unknown",
+        "not given",
+        "not provided",
+        "not stated",
+        "n/a",
+        "na",
+        "none",
+        "caller",
+        "the caller",
+        "person",
+        "the person",
+        "the person on the line",
+        "someone",
+        "unnamed",
+        "anonymous",
+        "tbd",
+    }
+)
+
+
+def _given(value: object) -> bool:
+    return value is not None and str(value).strip().strip(".").lower() not in PLACEHOLDERS | {""}
+
+
 def _need(args: FlagArgs, *names: str) -> None:
-    missing = [n for n in names if getattr(args, n) in (None, "")]
+    missing = [n for n in names if not _given(getattr(args, n))]
     if missing:
         raise ToolError(f"{args.kind} needs {', '.join(missing)}, which the person has not given yet.")
 
@@ -118,7 +156,8 @@ async def record_flag(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     it, relationship, date of death; may be recorded before verification), scra (active military duty),
     hardship (job loss, medical, bereavement, disability, income), original_creditor_request (they ask for
     the original creditor's name or address; returns it). Only for the verified consumer, except deceased; a
-    stop request from anyone else goes to stop_calling_this_number."""
+    stop request from anyone else goes to stop_calling_this_number. Recording deceased again with details you
+    learned later (a name, the date of death) completes the record."""
     if args.kind in ("cease", "channel_optout") and session.verified_as is None:
         raise ToolError(
             "This person is not verified, so their request cannot close the account; an unverified request to "
@@ -130,18 +169,62 @@ async def record_flag(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     return await handler(session, args)
 
 
-class StopArgs(BaseModel):
-    wrong_number: bool = Field(
-        False, description="True when the person also said this is the wrong number (not the consumer's)."
+class WrongNumberArgs(BaseModel):
+    asked_to_stop_calling: bool = Field(
+        description="True only when the person themselves asked you to stop calling this number ('stop calling', "
+        "'take this number off your list'). Saying it is the wrong number is not, on its own, a request to stop."
     )
 
 
+@REGISTRY.tool(WrongNumberArgs, requires=Gate.PROCEEDING)
+async def report_wrong_number(session: RemiCall, args: WrongNumberArgs) -> dict[str, Any]:
+    """The person says this is not the consumer's number (a wrong number, not someone who knows the consumer).
+    Marks the dialed number wrong_number; revokes its artificial-voice consent only if they asked you to stop
+    calling it. The account is untouched and no letter follows."""
+    if session.verified_as is not None:
+        raise ToolError("The consumer is verified on this number, so it is not a wrong number.")
+    phone = session.phone
+    assert phone is not None
+    async with session.db.transaction() as tx:
+        if not session.phone_marked_wrong:
+            await tx.update("phones", phone.phone_id, {"status": "wrong_number"})
+        if args.asked_to_stop_calling:
+            await session.revoke_consent(tx, [phone])
+    session.phone_marked_wrong = True
+    session.number_stop = "wrong_number"
+    return {
+        "recorded": "wrong_number",
+        "consent_revoked": args.asked_to_stop_calling,
+        "allowed_now": "Nothing more may be asked (no verification) or disclosed about why you called. The "
+        "call ends: log_contact_attempt (answered_by wrong_number), goodbye, end_call.",
+    }
+
+
+class StopArgs(BaseModel):
+    # No arguments. ``wrong_number`` was retired: a wrong number is ``report_wrong_number``, and the old
+    # call shape is refused (nothing written) rather than read as a plain stop request.
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired_wrong_number(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "wrong_number" in data:
+            raise ValueError(
+                "stop_calling_this_number takes no wrong_number. If the person says this is the wrong "
+                "number, that is report_wrong_number (asked_to_stop_calling true if they asked you to stop); "
+                "nothing was recorded."
+            )
+        return data
+
+
 @REGISTRY.tool(StopArgs, requires=Gate.PROCEEDING)
-async def stop_calling_this_number(session: RemiCall, args: StopArgs) -> dict[str, Any]:
+async def stop_calling_this_number(session: RemiCall, _: StopArgs) -> dict[str, Any]:
     """A person who has NOT verified (whoever they say they are) asks you to stop calling ('stop calling me',
     'stop calling this number', 'take this number off your list'). Revokes artificial-voice consent on the
-    number you dialed and, unless it is a wrong number, records the request for a person to review. It does not
-    close the account. A verified consumer's stop request is record_flag cease (or channel_optout) instead."""
+    number you dialed and records the request for a person to review. It does not close the account. If they
+    say it is the wrong number, that is report_wrong_number (asked_to_stop_calling true) instead. A verified
+    consumer's stop request is record_flag cease (or channel_optout)."""
     if session.verified_as is not None:
         raise ToolError(
             "The person is verified: a request to stop contact is record_flag 'cease', or 'channel_optout' "
@@ -149,18 +232,21 @@ async def stop_calling_this_number(session: RemiCall, args: StopArgs) -> dict[st
         )
     phone = session.phone
     assert phone is not None
-    if session.number_stop is None:
+    if session.number_stop == "wrong_number":
+        # A wrong-number answerer who also asks to stop: the number's consent goes too, nothing else.
         async with session.db.transaction() as tx:
             await session.revoke_consent(tx, [phone])
-            if not args.wrong_number:
-                await session.insert_flag(tx, "unverified_stop_request", {"phone_id": phone.phone_id})
-        session.number_stop = "wrong_number" if args.wrong_number else "unverified"
+    elif session.number_stop is None:
+        async with session.db.transaction() as tx:
+            await session.revoke_consent(tx, [phone])
+            await session.insert_flag(tx, "unverified_stop_request", {"phone_id": phone.phone_id})
+        session.number_stop = "unverified"
     return {
         "recorded": "wrong_number_stop"
         if session.number_stop == "wrong_number"
         else "unverified_stop_request",
         "allowed_now": "Calls to this number stop. Nothing more may be asked (no verification) or disclosed; this "
-        "is not a stop to all contact and no letter follows. The call ends: goodbye, log_contact_attempt, end_call.",
+        "is not a stop to all contact and no letter follows. The call ends: log_contact_attempt, goodbye, end_call.",
     }
 
 
@@ -187,11 +273,13 @@ async def _channel_optout(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     details: dict[str, Any] = {"channel": args.channel}
     if this_only and args.channel != "email":
         details["phone_id"] = session.phone.phone_id
+    phones: list[Phone] = []
+    if args.channel == "call":
+        # Read before the transaction: the database lock is not re-entrant, so a read inside it would hang.
+        phones = [session.phone] if this_only else await session.db.phones(session.consumer.consumer_id)
     async with session.db.transaction() as tx:
         await session.insert_flag(tx, "channel_optout", details)
-        if args.channel == "call":
-            phones = [session.phone] if this_only else await session.db.phones(session.consumer.consumer_id)
-            await session.revoke_consent(tx, phones)
+        await session.revoke_consent(tx, phones)
     session.outcomes.add("channel_optout")
     return {
         "recorded": "channel_optout",
@@ -233,39 +321,66 @@ async def _bankruptcy(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
 
 
 async def _deceased(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
-    _need(args, "reported_by", "relationship", "died_on")
-    assert session.consumer is not None
-    if session.deceased_flag_id is not None:
-        return {"recorded": "deceased", "note": "Already recorded on this call."}
+    _need(args, "reported_by", "relationship")
+    consumer = session.consumer
+    assert consumer is not None
+    died_on = _date_of_death(session, args.died_on)
+    details = {
+        "reported_by": args.reported_by,
+        "relationship": args.relationship,
+        "is_estate_rep": session.verified_as == "estate_rep",
+    }
     async with session.db.transaction() as tx:
-        session.deceased_flag_id = await session.insert_flag(
-            tx,
-            "deceased",
-            {
-                "reported_by": args.reported_by,
-                "relationship": args.relationship,
-                "is_estate_rep": session.verified_as == "estate_rep",
-            },
-        )
-        await tx.update("accounts", session.context.account_id, {"status": "deceased"})
-        await tx.update("consumers", session.consumer.consumer_id, {"deceased_on": args.died_on})
+        if session.deceased_flag_id is None:
+            session.deceased_flag_id = await session.insert_flag(tx, "deceased", details)
+            await tx.update("accounts", session.context.account_id, {"status": "deceased"})
+        elif details != session.deceased_details:
+            await tx.update("account_flags", session.deceased_flag_id, {"details": details})
+        if died_on is not None and died_on != session.deceased_on:
+            await tx.update("consumers", consumer.consumer_id, {"deceased_on": died_on})
+            session.deceased_on = died_on
+    session.deceased_details = details
     session.stop_collection("deceased")
-    return {
+    result: dict[str, Any] = {
         "recorded": "deceased",
         "allowed_now": "No relative or heir is responsible, and nothing may imply one is. Nothing about the debt "
         "unless this person is verified as the estate's executor or administrator (verify_right_party role "
         "estate_rep).",
     }
+    if session.deceased_on is None:
+        result["date_of_death"] = "not recorded: if they give it, record_flag deceased again with died_on"
+    return result
+
+
+def _date_of_death(session: RemiCall, died_on: date | None) -> date | None:
+    """A date of death the person gave: not in the future, not the call's own date, not before birth."""
+    if died_on is None:
+        return None
+    today = session.clock.today()
+    if died_on >= today:
+        raise ToolError(
+            f"died_on {died_on.isoformat()} is not a date of death the person gave (today is {today.isoformat()}). "
+            "Use the date they said, or leave died_on out if they did not say one."
+        )
+    consumer = session.consumer
+    assert consumer is not None
+    if died_on < consumer.date_of_birth:
+        raise ToolError("died_on is before the consumer was born: check the date they said.")
+    return died_on
 
 
 async def _scra(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
-    async with session.db.transaction() as tx:
-        await session.insert_flag(tx, "scra", {"branch": args.branch} if args.branch else {})
+    _need(args, "branch")
+    if not session.scra_recorded:
+        async with session.db.transaction() as tx:
+            await session.insert_flag(tx, "scra", {"branch": args.branch})
+        session.scra_recorded = True
     session.stop_collection("scra")
     return {
         "recorded": "scra",
         "allowed_now": "No pressure to pay. The agency will review their Servicemembers Civil Relief Act "
-        "protections; transfer_to_human is next.",
+        "protections, and a person takes it from here: transfer_to_human (reason scra) is required before the "
+        "call is logged or ended.",
     }
 
 
