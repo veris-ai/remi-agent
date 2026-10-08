@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vamos_voice.tools import ToolError
 
@@ -201,7 +201,21 @@ async def report_wrong_number(session: RemiCall, args: WrongNumberArgs) -> dict[
 
 
 class StopArgs(BaseModel):
-    pass
+    # No arguments. ``wrong_number`` was retired: a wrong number is ``report_wrong_number``, and the old
+    # call shape is refused (nothing written) rather than read as a plain stop request.
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired_wrong_number(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "wrong_number" in data:
+            raise ValueError(
+                "stop_calling_this_number takes no wrong_number. If the person says this is the wrong "
+                "number, that is report_wrong_number (asked_to_stop_calling true if they asked you to stop); "
+                "nothing was recorded."
+            )
+        return data
 
 
 @REGISTRY.tool(StopArgs, requires=Gate.PROCEEDING)

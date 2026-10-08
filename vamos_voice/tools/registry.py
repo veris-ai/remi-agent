@@ -15,16 +15,26 @@ Metadata the session enforces lives on the declaration, not in the prompt:
 
 Handlers receive the agent's own per-call state object (``S``) and the parsed
 arguments; the framework never looks inside the state beyond ``CallState``.
+
+Unknown arguments: pydantic drops them silently, which turns a misnamed or
+retired argument into a call with that argument missing (a stop request
+handled as something else). So a tool that declares parameters refuses an
+argument it does not have, naming the ones it takes. A tool with no
+parameters ignores stray ones (models add a ``reason`` to a hang-up), logged,
+unless its model forbids extras.
 """
 
 from __future__ import annotations
 
 import enum
+import logging
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
+
+logger = logging.getLogger(__name__)
 
 #: ``async def handler(state, args) -> dict``: the state is the agent's per-call object.
 Handler = Callable[[Any, Any], Awaitable[dict[str, Any]]]
@@ -57,6 +67,15 @@ class Tool:
         return ToolSpec(self.name, self.description, json_schema(self.args_model))
 
     def parse(self, raw: dict[str, Any]) -> BaseModel:
+        fields = self.args_model.model_fields
+        if unknown := sorted(set(raw) - set(fields)):
+            if fields:
+                raise ToolError(
+                    f"invalid arguments for {self.name}: unknown {', '.join(unknown)}; "
+                    f"it takes {', '.join(fields)}."
+                )
+            if self.args_model.model_config.get("extra") != "forbid":
+                logger.warning("tool %s takes no arguments; ignored %s", self.name, ", ".join(unknown))
         try:
             return self.args_model.model_validate(raw)
         except ValidationError as err:
@@ -134,7 +153,9 @@ def json_schema(model: type[BaseModel]) -> dict[str, Any]:
             if len(branches) == 1:
                 merged = {**branches[0], **{k: v for k, v in node.items() if k not in ("anyOf", "default")}}
                 return simplify(merged)
-        return {k: simplify(v) for k, v in node.items() if k not in ("title", "$defs", "default")}
+        # ``additionalProperties`` is ours to enforce (``Tool.parse``), not every vendor's schema subset.
+        dropped = ("title", "$defs", "default", "additionalProperties")
+        return {k: simplify(v) for k, v in node.items() if k not in dropped}
 
     schema = simplify(raw)
     schema.setdefault("properties", {})

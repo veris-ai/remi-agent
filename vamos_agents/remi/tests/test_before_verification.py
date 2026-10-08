@@ -148,6 +148,24 @@ async def test_a_wrong_number_that_says_stop_also_revokes_consent(pg_dsn, make_s
     assert rows(pg_dsn, "account_flags") == []
 
 
+async def test_the_retired_wrong_number_argument_is_refused_and_writes_nothing(pg_dsn, make_session) -> None:
+    """The old call shape, stop_calling_this_number(wrong_number=true), must not run as a plain unverified
+    stop (consent revoked and a review flag, the phone never marked wrong_number): it is refused, pointing
+    at report_wrong_number."""
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    for args in ({"wrong_number": True}, {"wrong_number": False}):
+        refused = await s.dispatch("stop_calling_this_number", args)
+        assert "report_wrong_number" in refused["error"] and "nothing was recorded" in refused["error"]
+    assert "not permitted" in (await s.dispatch("stop_calling_this_number", {"reason": "asked"}))["error"]
+    phone = rows(pg_dsn, "phones")[0]
+    assert (phone["status"], phone["consent_revoked_at"]) == ("valid", None)
+    assert rows(pg_dsn, "account_flags") == []
+    assert s.state.number_stop is None
+    assert (await s.dispatch("stop_calling_this_number", {}))["recorded"] == "unverified_stop_request"
+
+
 async def test_each_phone_change_is_written_once(pg_dsn, make_session, monkeypatch) -> None:
     """The bench grades the SQL log: one consent revocation and one wrong_number mark, however the person
     put it (wrong number and stop, then stop again; the model's log also saying the number is wrong)."""

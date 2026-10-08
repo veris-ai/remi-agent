@@ -166,6 +166,20 @@ async def test_dispatch_gates_redacts_and_never_raises(caplog: pytest.LogCapture
     assert session.tool_log[0] == "balance"
 
 
+async def test_unknown_arguments_are_refused_by_a_tool_with_parameters(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pydantic would drop a misnamed or retired argument silently; the registry names it instead. A tool
+    without parameters still runs (models add a ``reason`` to a hang-up), and the stray argument is logged."""
+    session, state = tiny_session()
+    refused = await session.dispatch("verify", {"pin": "1234", "postcode": "11215"})
+    assert refused == {"error": "invalid arguments for verify: unknown postcode; it takes pin."}
+    assert not state.verified
+    caplog.set_level(logging.WARNING)
+    assert await session.dispatch("end_call", {"reason": "done"}) == {"ended": True}
+    assert "ignored reason" in caplog.text
+
+
 async def test_a_caller_hang_up_finalizes_once_after_running_tools_and_refuses_new_ones() -> None:
     session, state = tiny_session()
 
