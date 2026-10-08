@@ -64,14 +64,19 @@ def _names_match(said: str, record: str) -> bool:
 
 @REGISTRY.tool(VerifyArgs, requires=Gate.PROCEEDING)
 async def verify_right_party(session: RemiCall, args: VerifyArgs) -> dict[str, Any]:
-    """Check whether the person on the line is the consumer: pass the full name they gave and at least two of
-    date of birth, ZIP code and SSN last four, exactly as they said them. Ask for these; never say any value
+    """Check whether the person on the line is the consumer: pass the full name they gave and any two of
+    date of birth, ZIP code and SSN last four, exactly as they said them. The person chooses which two; you may
+    suggest ZIP code and date of birth, and never insist on SSN digits. Ask for these; never say any value
     yourself. For an estate executor or administrator use role 'estate_rep' with their full name. Never tell
     the person which detail did not match."""
     consumer = session.consumer
     assert consumer is not None
     if session.verified_as is not None:
         return {"verified": True, "answered_by": session.verified_as, "note": "Already verified."}
+    if session.number_stop is not None:
+        raise ToolError(
+            "This person asked you to stop calling this number: ask for no verification. Close the call."
+        )
     if session.verification_failures >= MAX_VERIFICATION_ATTEMPTS:
         raise ToolError(
             "Verification is locked after three failed attempts. Disclose nothing and end the call."
@@ -141,6 +146,29 @@ def _failed(session: RemiCall, message: str) -> dict[str, Any]:
             "with answered_by 'none' and end_call.",
         }
     return {"verified": False, "attempts_left": left, "next": message}
+
+
+class NoArgs(BaseModel):
+    pass
+
+
+@REGISTRY.tool(NoArgs, requires=Gate.PROCEEDING)
+async def record_verification_refused(session: RemiCall, _: NoArgs) -> dict[str, Any]:
+    """The person will not verify on this call (they decline to give the details, as opposed to giving details
+    that do not match). Call it once they have declined; you will not ask a third time. Records the call as a
+    refusal to verify, not a failed verification."""
+    if session.verified_as is not None:
+        raise ToolError("The person is already verified.")
+    agency = session.agency
+    assert agency is not None
+    session.verification_refused = True
+    return {
+        "recorded": "refused_verification",
+        "next": "Do not ask again, argue, or suggest any consequence. Disclose nothing about why you called. "
+        f"Offer the callback number {agency.callback_number}, answered by a person, which they can call instead; "
+        "you may say anything in writing goes to the address on file (never say the address). Then a polite "
+        "goodbye, log_contact_attempt with answered_by 'none', and end_call.",
+    }
 
 
 class DebtDetailsArgs(BaseModel):

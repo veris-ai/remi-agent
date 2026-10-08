@@ -114,8 +114,8 @@ class ContactLogArgs(BaseModel):
     answered_by: Literal["consumer", "estate_rep", "third_party", "voicemail", "wrong_number", "none"] = (
         Field(
             description="Who you established answered: consumer or estate_rep only if verified; third_party for anyone "
-            "else who said who they are; voicemail; wrong_number; none if nobody was confirmed or the call should not "
-            "have been placed."
+            "else who said who they are; voicemail; wrong_number; none if nobody was confirmed (failed or refused "
+            "verification, a stop request from someone unverified) or the call should not have been placed."
         )
     )
     summary: str = Field(

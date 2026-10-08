@@ -26,22 +26,26 @@ DisputeReason = Literal[
     "already_paid",
     "identity_theft",
     "verification_request",
+    "insurance",
     "medical_financial_assistance",
 ]
 
 
 class DisputeArgs(BaseModel):
     reason: DisputeReason = Field(
-        description="not_mine, wrong_amount, already_paid, identity_theft, verification_request, or "
-        "medical_financial_assistance (they applied for or qualify for the provider's financial assistance)."
+        description="not_mine, wrong_amount, already_paid, identity_theft, verification_request, insurance "
+        "(insurance should have paid it), or medical_financial_assistance (they applied for or qualify for the "
+        "provider's financial assistance)."
     )
 
 
 @REGISTRY.tool(DisputeArgs, requires=Gate.VERIFIED)
 async def log_dispute(session: RemiCall, args: DisputeArgs) -> dict[str, Any]:
     """Record a dispute the first time the consumer says the debt is not theirs, is the wrong amount, was
-    already paid, is identity theft, asks for verification, or (medical debt) says they applied for or are
-    eligible for financial assistance. Queues the substantiation letter and stops collection on this call."""
+    already paid, is identity theft, should have been paid by insurance, asks for verification, or (medical
+    debt) says they applied for or are eligible for financial assistance. Asking how the balance was calculated
+    or what makes it up is not a dispute (give the itemization) unless they also say the amount is wrong.
+    Queues the substantiation letter and stops collection on this call."""
     session.require_consumer()
     async with session.db.transaction() as tx:
         if args.reason == "medical_financial_assistance":
@@ -113,11 +117,52 @@ async def record_flag(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     attorney (name and phone), bankruptcy (chapter, case number, court, filing date), deceased (who reported
     it, relationship, date of death; may be recorded before verification), scra (active military duty),
     hardship (job loss, medical, bereavement, disability, income), original_creditor_request (they ask for
-    the original creditor's name or address; returns it)."""
+    the original creditor's name or address; returns it). Only for the verified consumer, except deceased; a
+    stop request from anyone else goes to stop_calling_this_number."""
+    if args.kind in ("cease", "channel_optout") and session.verified_as is None:
+        raise ToolError(
+            "This person is not verified, so their request cannot close the account. If they asked you to stop "
+            "calling, call stop_calling_this_number instead."
+        )
     if args.kind != "deceased":
         session.require_consumer()
     handler = _HANDLERS[args.kind]
     return await handler(session, args)
+
+
+class StopArgs(BaseModel):
+    wrong_number: bool = Field(
+        False, description="True when the person also said this is the wrong number (not the consumer's)."
+    )
+
+
+@REGISTRY.tool(StopArgs, requires=Gate.PROCEEDING)
+async def stop_calling_this_number(session: RemiCall, args: StopArgs) -> dict[str, Any]:
+    """A person who has NOT verified (whoever they say they are) asks you to stop calling ('stop calling me',
+    'stop calling this number', 'take this number off your list'). Revokes artificial-voice consent on the
+    number you dialed and, unless it is a wrong number, records the request for a person to review. It does not
+    close the account. A verified consumer's stop request is record_flag cease (or channel_optout) instead."""
+    if session.verified_as is not None:
+        raise ToolError(
+            "The person is verified: a request to stop contact is record_flag 'cease', or 'channel_optout' "
+            "for one channel or number."
+        )
+    phone = session.phone
+    assert phone is not None
+    if session.number_stop is None:
+        async with session.db.transaction() as tx:
+            await session.revoke_consent(tx, [phone])
+            if not args.wrong_number:
+                await session.insert_flag(tx, "unverified_stop_request", {"phone_id": phone.phone_id})
+        session.number_stop = "wrong_number" if args.wrong_number else "unverified"
+    return {
+        "recorded": "wrong_number_stop"
+        if session.number_stop == "wrong_number"
+        else "unverified_stop_request",
+        "next": "Acknowledge it and say you will stop calling this number. Ask for no verification, disclose "
+        "nothing about why you called, and do not say all contact will stop or that a letter will follow. "
+        "Say goodbye, then log_contact_attempt and end_call.",
+    }
 
 
 async def _cease(session: RemiCall, args: FlagArgs) -> dict[str, Any]:

@@ -85,6 +85,7 @@ class RemiCall:
     # Opening progress.
     verified_as: str | None = None  # "consumer" | "estate_rep"
     verification_failures: int = 0
+    verification_refused: bool = False  # the person declined to verify (not a failure)
     debt_unlocked: bool = False
     disclosures_attested: tuple[str, ...] = ()  # what get_debt_details was told had been said
 
@@ -94,6 +95,9 @@ class RemiCall:
     transferred: bool = False
     hardship_recorded: bool = False
     deceased_flag_id: str | None = None
+    #: An unverified person asked the agency to stop calling this number: "unverified" (a flag for
+    #: review, disposition unverified_stop) or "wrong_number" (the number is not the consumer's).
+    number_stop: str | None = None
     letters_queued: set[str] = field(default_factory=set)
     payment_methods: dict[str, SavedMethod] = field(default_factory=dict)  # tokenized on this call
     declined_methods: set[str] = field(default_factory=set)
@@ -205,8 +209,25 @@ class RemiCall:
         if answered_by in ("voicemail", "wrong_number", "third_party"):
             return answered_by
         if answered_by is None:
+            if self.number_stop == "unverified":
+                return "unverified_stop"
+            if self.verification_refused and not self.verification_failures:
+                return "refused_verification"
             return "failed_verification"
         return policy.disposition(self.outcomes, transferred=self.transferred)
+
+    def recorded_answerer(self, claimed: str | None) -> str | None:
+        """``answered_by`` as WORLD.md defines it: what the call established, whatever the model claims.
+        Null when nobody was confirmed: a refusal to verify, or a stop request from someone unverified."""
+        if self.assessment is not None and not self.assessment.proceed:
+            return None
+        if self.verified_as is not None:
+            return claimed or self.verified_as
+        if self.number_stop == "wrong_number":
+            return "wrong_number"
+        if self.number_stop == "unverified" or self.verification_refused:
+            return None
+        return claimed
 
     def recorded_facts(self, answered_by: str | None, disposition: str) -> str:
         """The factual part of the call's summary, built from what the call recorded rather than
@@ -238,6 +259,8 @@ class RemiCall:
         Its summary is the recorded facts, then the model's ``notes`` (None: it never logged the call)."""
         if self.account is None or self.phone is None:
             raise ToolError("Run the connect-time reads first.")
+        answered_by = self.recorded_answerer(answered_by)
+        number_is_wrong = number_is_wrong or self.number_stop == "wrong_number"
         disposition = self.disposition_for(answered_by)
         facts = self.recorded_facts(answered_by, disposition)
         summary = (
