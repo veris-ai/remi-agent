@@ -94,9 +94,11 @@ async def test_voxtral_realtime_turns_are_the_flushed_transcripts() -> None:
     sock.push({"type": "transcription.text.delta", "text": "Hel"})
     sock.push({"type": "transcription.done", "text": "Hello? Yes, this is Marcus."})
     sock.push({"type": "error", "error": {"message": "boom", "code": 500}})
+    interim: list[str] = []
     with pytest.raises(RuntimeError, match="boom"):
-        await stt.run(on_turn)
+        await stt.run(on_turn, interim.append)
     assert turns == ["Hello? Yes, this is Marcus."]
+    assert interim == ["Hel"] and VoxtralRealtime.interim_text
 
 
 async def test_voxtral_realtime_refuses_a_session_that_did_not_open() -> None:

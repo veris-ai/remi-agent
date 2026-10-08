@@ -44,7 +44,13 @@ import websockets
 
 from vamos_voice.audio import CHANNEL_RATE_HZ
 from vamos_voice.providers.base import CallRuntime
-from vamos_voice.providers.cascade import CascadeProvider, SpeechToText, TextToSpeech, TurnSink
+from vamos_voice.providers.cascade import (
+    CascadeProvider,
+    InterimSink,
+    SpeechToText,
+    TextToSpeech,
+    TurnSink,
+)
 from vamos_voice.providers.openai_chat import OpenAIChat, openai_client
 
 logger = logging.getLogger(__name__)
@@ -120,6 +126,8 @@ class GrokCascadeConfig:
 class GrokSTT(SpeechToText):
     """xAI streaming STT; its Smart Turn decides where the caller's turn ends."""
 
+    interim_text = True  # transcript.partial before speech_final
+
     def __init__(self, ws: Any) -> None:
         self.ws = ws
 
@@ -132,7 +140,7 @@ class GrokSTT(SpeechToText):
     async def feed(self, pcm: bytes, speaking: bool) -> None:
         await self.ws.send(pcm)
 
-    async def run(self, on_turn: TurnSink) -> None:
+    async def run(self, on_turn: TurnSink, on_interim: InterimSink) -> None:
         while True:
             try:
                 event = json.loads(await self.ws.recv())
@@ -142,6 +150,8 @@ class GrokSTT(SpeechToText):
             kind = event.get("type")
             if kind == "transcript.partial" and event.get("speech_final"):
                 await on_turn(event.get("text") or "")
+            elif kind == "transcript.partial":
+                on_interim(event.get("text") or "")
             elif kind == "error":
                 raise RuntimeError(f"xAI STT error: {event.get('message')}")
 

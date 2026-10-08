@@ -41,11 +41,17 @@ early with a message saying what must happen first:
    (closed status, revoked or missing artificial-voice consent, phone not valid,
    employer phone, 3-in-7 cap, responded this
    week, time-barred notice not yet 14 days old, outside 8 a.m.–9 p.m. ET).
-2. Right party: full name + two of date of birth / ZIP / SSN last four,
-   compared server-side (the model never holds the secrets); 3 failures lock.
-   Before verification Remi says only RULES.md's permitted statements (its
-   name, the business, automated assistant, a personal matter for the named
-   consumer, the number on file, the callback number). A refusal to verify is
+2. Right party: the consumer's name as the person said it or said yes to (a
+   first name is enough; a surname, if said, must match) + two of date of
+   birth / ZIP / SSN last four, which may come one at a time. Each
+   `verify_right_party` call adds the facts that matched; the call state keeps
+   the count. Compared server-side (the model never holds the secrets); three
+   wrong answers (a wrong name or fact) lock. Before verification Remi says
+   only RULES.md's permitted statements (its name, the business, automated
+   assistant, a personal business matter for the consumer, why it must check
+   (their privacy), whether now is a good time, the number on file, the
+   callback number, that anything in writing goes to the address on file);
+   never the debt, an amount, money or "your account". A refusal to verify is
    its own ending (`record_verification_refused` → `refused_verification`), and
    an unverified "stop calling" stops the number, not the account
    (`stop_calling_this_number` → consent revoked, `unverified_stop_request`
@@ -89,12 +95,12 @@ cease on file) and still says nothing it may not.
 | Tool | Gate | What it does |
 |---|---|---|
 | `get_account`, `get_dialed_phone`, `get_contact_history` | none | Connect-time reads, already run by the screen pop; kept for re-reads and as the fallback if it failed. No DOB, ZIP, SSN, street, balance or creditor in the result. |
-| `verify_right_party` | proceeding | Consumer (name + 2 factors) or `estate_rep` (name only, deceased consumer). |
+| `verify_right_party` | proceeding | Consumer: the name they said or confirmed (first name enough) + 2 facts, incrementally; returns the state (`name_confirmed`, `facts_confirmed`, `still_needed`, `attempts_left`), never which fact failed. `estate_rep`: full name only (deceased consumer). On success, `owed_before_the_debt` lists the disclosures due. |
 | `record_verification_refused` | proceeding | The person declined to verify: no disclosure, and the call's disposition is `refused_verification` (`answered_by` null), not `failed_verification`. |
 | `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. A cease or opt-out from an unverified person is refused and pointed at `stop_calling_this_number`. |
 | `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone; records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`), or for a wrong number marks it `wrong_number`. Never touches the account's status; verification is refused afterwards. |
 | `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
-| `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits. |
+| `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits, every amount in dollars (`"$1,430.00"`). |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
 | `take_payment` | debt unlocked, `collection` | `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: Remi sets `status` `paid`/`settled` (the gateway already moved the balance). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
 | `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan / settlement_instalments, equal monthly instalments, charged to a `method_id` saved this call. |
@@ -104,6 +110,27 @@ cease on file) and still says nothing it may not.
 | `transfer_to_human` | proceeding | Disposition `transferred`. |
 | `log_contact_attempt` | assessed | The call's one row; time, duration and disposition come from the session and the clock, and the summary leads with the facts the session recorded (disposition, who answered, whether the debt was read and after which attested disclosures, outcomes), then the model's notes. |
 | `end_call` | assessed | Requires the log; the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
+
+## How Remi talks (the prompt) and what its tools say back
+
+The prompt (`prompt/instructions.md`) is one text for every vendor. It gives
+the call as stages with a goal, limits and a couple of example phrasings each,
+not fixed lines: greet (use a name the callee already gave, never re-ask it;
+otherwise ask for the consumer by first name), ask whether now is a good time,
+say why the check is needed (privacy), verify one fact at a time, offer a way
+out (callback number answered by a person, or a letter) to a wary person by
+their second push-back, then the disclosures in short turns and the debt.
+Push-back questions get a reason and a way out. A short "how you talk"
+section bans narration, stock fillers and re-asking. The legally worded
+recording notice and mini-Miranda stay quoted.
+
+Tool results and gate refusals describe state and rules ("allowed_now",
+"owed_before_the_debt"), never words to say: the model reads hints aloud
+verbatim, so a hint that is a sentence becomes a scripted line
+(`tests/test_tools.py` scans the tool sources for speech scripts). Money
+crosses the tool boundary in dollars both ways: arguments are numbers in
+dollars (`amount: 250.00`), results are strings (`"$250.00"`). The World's
+rows and the gateway calls stay in cents; which rows are written is unchanged.
 
 ## Payments
 
@@ -145,7 +172,7 @@ details):
 |---|---|---|
 | `deepgram` (`remi-deepgram`) | `trace_adapter: deepgram-voice-agent`; candidate-env `DEEPGRAM_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json` (+ optional `VAMOS_DEEPGRAM_LLM_MODEL`, default `gpt-4.1-mini`) | No greeting in `Settings`: Remi stays silent until the callee's first words. Checked against the live API: no agent audio before "Hello?", tool calls round-trip, `end_call` hangs up after the goodbye. |
 | `elevenlabs` (`remi-elevenlabs`) | `trace_adapter: elevenlabs-convai`; candidate-env `ELEVENLABS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json` (+ optional `VAMOS_ELEVENLABS_LLM`, default `gpt-4.1-mini`) | A stored agent is created per call with Remi's instructions (screen pop included) and deleted after it: about 2 s between `/voice` connecting and the vendor hearing the callee (their "Hello?" is buffered, not lost). Parameters Remi leaves undescribed get their own name as description (ElevenLabs requires one). Checked against the live API, agents cleaned up. |
-| `fluxions` (`remi-fluxions`) | `trace_adapter: fluxions-realtime`; candidate-env `FLUXIONS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json`; no `public_endpoint` | **Remi cannot run on `api.fluxions.ai` today:** its instructions are ~14,300 characters with the screen pop and that host keeps 4,000 of the soul (silently). The provider refuses such a call before connecting rather than run Remi on a third of its policy. It needs a Fluxions host with a larger `max_soul_chars` (`VAMOS_FLUXIONS_BASE_URL`). The protocol itself was checked live with a cut prompt (callee first, tool calls, paced playback). |
+| `fluxions` (`remi-fluxions`) | `trace_adapter: fluxions-realtime`; candidate-env `FLUXIONS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json`; no `public_endpoint` | **Remi cannot run on `api.fluxions.ai` today:** its instructions are ~13,400 characters with the screen pop and that host keeps 4,000 of the soul (silently). The provider refuses such a call before connecting rather than run Remi on a third of its policy. It needs a Fluxions host with a larger `max_soul_chars` (`VAMOS_FLUXIONS_BASE_URL`). The protocol itself was checked live with a cut prompt (callee first, tool calls, paced playback). |
 
 ## Vendors
 
@@ -196,9 +223,9 @@ the same gates; only the voice stack differs.
 
 | Vendor | Stack | Turn taking |
 |---|---|---|
-| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; Silero barge-in |
-| `huggingface` | Whisper large-v3 → `openai/gpt-oss-120b:groq` → Kokoro (fal-ai), all on HF inference | Silero + 0.8 s of silence; Silero barge-in |
-| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI Smart Turn; Silero barge-in |
+| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; barge-in after 0.5 s of Silero speech and a transcribed word |
+| `huggingface` | Whisper large-v3 → `openai/gpt-oss-120b:groq` → Kokoro (fal-ai), all on HF inference | Silero + 0.8 s of silence; barge-in after 0.5 s of Silero speech |
+| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI Smart Turn; barge-in after 0.5 s of Silero speech and a transcribed word |
 | `gradium` | gradbot: Gradium STT → `gpt-4.1-mini` → Gradium TTS | gradbot's own |
 
 On the cascades Remi's first words wait for the callee's first finished turn

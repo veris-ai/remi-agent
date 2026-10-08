@@ -23,7 +23,7 @@ from .test_tools import DISCLOSED, IGNORED, VERIFY, comparable, open_call, verif
 
 pytestmark = pytest.mark.postgres
 
-WRONG = {"full_name": "Aaliyah Alvarez", "date_of_birth": "1958-02-01", "zip": "11201"}
+WRONG = {"name": "Aaliyah Alvarez", "date_of_birth": "1958-02-01", "zip": "11201"}
 
 
 async def log(s: CallSession, answered_by: str = "none") -> dict[str, Any]:
@@ -46,7 +46,7 @@ async def test_refusal_is_its_own_disposition_and_writes_nothing_else(pg_dsn, ma
     await open_call(s)
     refused = await s.dispatch("record_verification_refused", {})
     assert refused["recorded"] == "refused_verification"
-    assert "+12125550100" in refused["next"]  # the agency row's callback number, answered by a person
+    assert "+12125550100" in refused["allowed_now"]  # the agency row's callback number, answered by a person
     assert "error" in await s.dispatch("get_debt_details", DISCLOSED)
     assert (await log(s, "third_party"))["disposition"] == "refused_verification"
     attempt = remi_attempt(pg_dsn)
@@ -149,33 +149,63 @@ def rendered_prompt() -> str:
     return render_instructions(context, agency)
 
 
-def test_the_greeting_is_one_short_turn_asking_for_the_consumer_by_full_name() -> None:
-    text = rendered_prompt()
-    greeting = text.split("\n1. ")[1].split("\n2. ")[0]
-    assert "this is Remi with Tallmere Account Services, an\n   automated assistant." in greeting
-    assert "May I speak with <the consumer's full name from get_account>?" in greeting
-    # The pre-verification answers are not part of the opening.
-    assert "Do not say\n   why you are calling, that it is a personal business matter" in greeting
+def section(text: str, heading: str) -> str:
+    return text.split(f"# {heading}\n")[1].split("\n# ")[0]
 
 
-def test_the_prompt_answers_pre_verification_questions_one_at_a_time() -> None:
+def test_the_greeting_uses_a_given_name_and_never_re_asks_it() -> None:
+    stages = section(rendered_prompt(), "The call, stage by stage")
+    greet = stages.split("1. **Greet.**")[1].split("2. **Timing.**")[0]
+    assert "If they said their name, use it and\n   never ask for it again" in greet
+    assert (
+        "an automated assistant calling from\n   Tallmere Account Services, about a personal business matter."
+        in greet
+    )
+    assert "Is this <first name>?" in greet  # only when they gave no name
+    assert "full name" not in stages.split("6. **After verification**")[0]
+
+
+def test_the_stages_explain_the_check_and_verify_one_fact_at_a_time() -> None:
+    stages = section(rendered_prompt(), "The call, stage by stage")
+    for line in (
+        'never "regarding your\naccount"',
+        "Is now an okay time?",
+        "for their privacy",
+        "one at\n   a time; they choose",
+        "a first name is enough",
+        "Three wrong answers end the call",
+        "by their second push-back at\n   the latest",
+        "2 1 2, 5 5 5, 0 1 0 0, where a person answers",
+        '"This call is being recorded, and the recording may be used in connection with collecting a debt."',
+        "an attempt to collect a debt",
+        "one item per turn",
+        "the\n   itemization only if asked",
+    ):
+        assert line in stages, line
+
+
+def test_push_back_gets_a_reason_and_a_way_out() -> None:
     text = rendered_prompt()
-    section = text.split("# Before verification")[1].split("# Someone other than the consumer")[0]
-    for permitted in (
-        "never re-introduce yourself",
-        "Never recite this list",
-        '"Yes, I\'m an automated assistant."',
-        "personal business matter I can only discuss with <the consumer's",
+    pushback = section(text, "Push-back before verification")
+    for line in (
+        '"Why do you need my details?": so their private business isn\'t shared with the wrong person',
+        '"Is this a scam?"',
+        '"Are you a robot?": yes, an automated assistant',
         "the number the agency has on file",
-        "2 1 2, 5 5 5, 0 1 0 0, answered by a\n  person",
-        "Never the debt, the creditor, an amount",
         "record_verification_refused",
         "stop_calling_this_number",
     ):
-        assert permitted in section, permitted
-    refusal = section.split("- They will not verify")[1].split("- They ask you to stop calling")[0]
-    assert "give the callback number 2 1 2, 5 5 5, 0 1 0 0" in refusal
-    assert "then say goodbye. Only then log_contact_attempt" in refusal
+        assert line in pushback, line
+    refusal = pushback.split("- They won't verify")[1].split('- "Stop calling"')[0]
+    assert "give the callback number" in refusal and "never argue" in refusal
+
+
+def test_no_leaked_example_amount_or_name_and_no_narration() -> None:
+    text = rendered_prompt()
+    for leaked in ("185", "hundred", "Marisol", "May I speak with"):
+        assert leaked not in text, leaked
+    talk = section(text, "How you talk")
+    assert "No narration" in talk and "Never ask again for something they answered" in talk
 
 
 # --- the bench's cases, scripted, on the whole World ---------------------------------------------
@@ -253,7 +283,7 @@ async def test_remi_128_refuses_to_verify(pg_dsn, make_session) -> None:
     before = snapshot(pg_dsn)
     s = await scripted(make_session, "TAS-420228", "ph_420228_1", "2027-02-10T17:31:00-05:00")
     refused = await s.dispatch("record_verification_refused", {})
-    assert "callback number" in refused["next"]
+    assert "+12125550100" in refused["allowed_now"] and refused["callback_number"] == "+12125550100"
     await log(s)
     assert (await s.dispatch("end_call", {}))["ended"] is True
     assert matches_answer_key(changes(before, snapshot(pg_dsn)), REMI_128_POSTCONDITIONS)

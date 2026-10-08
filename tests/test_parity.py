@@ -722,7 +722,7 @@ async def test_socket_vendor_starts_with_remis_screen_pop(name: str) -> None:
     script.tool_calls("take_payment")  # the gates treat the reads as done: verification is next
     await asyncio.sleep(0.05)
     ((tool, refusal),) = call.session.results  # type: ignore[attr-defined]
-    assert tool == "take_payment" and refusal["error"].startswith("Confirm the right party first")
+    assert tool == "take_payment" and refusal["error"].startswith("Not verified yet")
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 
@@ -966,7 +966,7 @@ async def test_cascade_vendor_starts_with_remis_screen_pop(name: str) -> None:
     assert {events[i] for i in reads} >= {"sql:accounts", "sql:phones", "sql:contact_attempts"}
     assert max(reads) < events.index("llm") < events.index("agent audio")
     ((tool_name, refusal),) = call.session.results  # type: ignore[attr-defined]
-    assert tool_name == "take_payment" and refusal["error"].startswith("Confirm the right party first")
+    assert tool_name == "take_payment" and refusal["error"].startswith("Not verified yet")
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 

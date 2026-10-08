@@ -41,7 +41,7 @@ DISCLOSED = {
     "mini_miranda_given": True,
     "alternative_format_statement_given": True,
 }
-VERIFY = {"full_name": "Aaliyah Alvarez", "date_of_birth": "1958-01-01", "zip": "11215"}
+VERIFY = {"name": "Aaliyah Alvarez", "date_of_birth": "1958-01-01", "zip": "11215"}
 
 
 async def open_call(s: CallSession) -> dict:
@@ -89,12 +89,12 @@ async def test_debt_tools_wait_for_verification_and_disclosures(pg_dsn, make_ses
     seed_world(pg_dsn)
     s = await make_session()
     await open_call(s)
-    assert "right party" in (await s.dispatch("get_debt_details", DISCLOSED))["error"]
+    assert "verify_right_party" in (await s.dispatch("get_debt_details", DISCLOSED))["error"]
     assert (
-        "right party"
-        in (
-            await s.dispatch("take_payment", {"method_id": "x", "amount_cents": 1, "purpose": "pay_in_full"})
-        )["error"]
+        "verify_right_party"
+        in (await s.dispatch("take_payment", {"method_id": "x", "amount": 0.01, "purpose": "pay_in_full"}))[
+            "error"
+        ]
     )
     await s.dispatch("verify_right_party", VERIFY)
     refused = await s.dispatch(
@@ -103,9 +103,9 @@ async def test_debt_tools_wait_for_verification_and_disclosures(pg_dsn, make_ses
     assert "alternative-format" in refused["error"] and "language" not in refused["error"]
     assert (
         "disclosures"
-        in (
-            await s.dispatch("take_payment", {"method_id": "x", "amount_cents": 1, "purpose": "pay_in_full"})
-        )["error"]
+        in (await s.dispatch("take_payment", {"method_id": "x", "amount": 0.01, "purpose": "pay_in_full"}))[
+            "error"
+        ]
     )
 
 
@@ -119,7 +119,7 @@ async def test_english_only_no_language_step(pg_dsn, make_session) -> None:
     assessment = (await open_call(s))["call_assessment"]
     assert not any("language" in k for k in assessment)
     verified_result = await s.dispatch("verify_right_party", VERIFY)
-    assert "language" not in verified_result["next"]
+    assert "language" not in str(verified_result)
     before = snapshot(pg_dsn)
     assert "error" not in await s.dispatch("get_debt_details", DISCLOSED)
     assert changes(before, snapshot(pg_dsn)) == []
@@ -214,7 +214,7 @@ def test_the_summary_is_asked_for_only_what_happened() -> None:
     from vamos_agents.remi.tools.catalog import REGISTRY
 
     prompt = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
-    assert "only what was actually said and done on this call" in prompt
+    assert "what actually happened and the outcome; never what you meant or were told to say" in prompt
     (spec,) = [t for t in REGISTRY.specs() if t.name == "log_contact_attempt"]
     described = spec.parameters["properties"]["summary"]["description"]
     assert "never what you meant or were told to say" in described
@@ -224,10 +224,8 @@ async def test_three_failed_verifications_lock_the_call(pg_dsn, make_session) ->
     seed_world(pg_dsn)
     s = await make_session()
     await open_call(s)
-    wrong = {"full_name": "Aaliyah Alvarez", "date_of_birth": "1958-02-01", "zip": "11201"}
-    assert (
-        "not counted" in (await s.dispatch("verify_right_party", {"full_name": "Aaliyah Alvarez"}))["error"]
-    )
+    wrong = {"name": "Aaliyah Alvarez", "date_of_birth": "1958-02-01", "zip": "11201"}
+    assert "not counted" in (await s.dispatch("verify_right_party", {}))["error"]
     results = [await s.dispatch("verify_right_party", wrong) for _ in range(3)]
     assert [r["attempts_left"] for r in results] == [2, 1, 0]
     assert "three" in (await s.dispatch("verify_right_party", VERIFY))["error"]
@@ -237,7 +235,110 @@ async def test_three_failed_verifications_lock_the_call(pg_dsn, make_session) ->
     assert logged["disposition"] == "failed_verification"
 
 
+async def test_verification_takes_a_first_name_and_facts_one_at_a_time(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    first = await s.dispatch("verify_right_party", {"name": "Aaliyah", "date_of_birth": "1958-01-01"})
+    assert (first["verified"], first["name_confirmed"], first["facts_confirmed"]) == (False, True, 1)
+    assert first["attempts_left"] == 3 and "debt" in first["allowed_now"]
+    assert "error" in await s.dispatch("get_debt_details", DISCLOSED)
+    done = await s.dispatch("verify_right_party", {"name": "Aaliyah", "zip": "11215"})
+    assert done["verified"] is True
+    assert done["owed_before_the_debt"] == [
+        "the recording disclosure",
+        "the mini-Miranda",
+        "the alternative-format statement with the callback number",
+    ]
+    assert "next" not in done and "Now give" not in str(done)
+
+
+async def test_verification_keeps_matched_facts_across_a_wrong_answer(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    await s.dispatch("verify_right_party", {"name": "Aaliyah", "zip": "11215"})
+    wrong = await s.dispatch("verify_right_party", {"name": "Aaliyah", "date_of_birth": "1958-02-01"})
+    assert (wrong["verified"], wrong["attempts_left"], wrong["facts_confirmed"]) == (False, 2, 1)
+    assert "1958" not in str(wrong) and "date" not in str(wrong), "never which fact was wrong"
+    assert (await s.dispatch("verify_right_party", {"ssn_last4": "2234"}))["verified"] is True
+
+
+async def test_facts_without_a_name_wait_for_the_name(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    facts = await s.dispatch("verify_right_party", {"date_of_birth": "1958-01-01", "zip": "11215"})
+    assert (facts["verified"], facts["name_confirmed"], facts["facts_confirmed"]) == (False, False, 2)
+    assert any("name" in still for still in facts["still_needed"])
+    assert (await s.dispatch("verify_right_party", {"name": "aaliyah"}))["verified"] is True
+
+
+@pytest.mark.parametrize("name", ["Aaliyah Smith", "Alicia", "Aaliyah's sister"])
+async def test_a_name_that_is_not_the_consumers_is_a_wrong_answer(pg_dsn, make_session, name) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await open_call(s)
+    result = await s.dispatch("verify_right_party", {**VERIFY, "name": name})
+    assert (result["verified"], result["attempts_left"]) == (False, 2)
+
+
+def test_tool_hints_state_rules_not_lines_to_say() -> None:
+    import ast
+    from importlib.resources import files
+
+    sources = [files("vamos_agents.remi").joinpath(p) for p in ("call.py", "gates.py")]
+    sources += [f for f in files("vamos_agents.remi.tools").iterdir() if f.name.endswith(".py")]
+    for source in sources:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+                for script in (
+                    "Now give",
+                    "Say ",
+                    "Tell the",
+                    "Explain ",
+                    "Acknowledge ",
+                    "substantiation of",
+                ):
+                    assert script not in node.value, (source.name, node.value)
+
+
 # --- money -----------------------------------------------------------------------------------
+
+
+def no_cents(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all("cents" not in k and no_cents(v) for k, v in value.items())
+    if isinstance(value, list):
+        return all(map(no_cents, value))
+    return True
+
+
+async def test_money_crosses_the_tools_in_dollars(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    details = await unlocked(s)
+    assert no_cents(details)
+    assert details["current_balance"] == "$185.00"
+    assert details["itemization"]["charge_off_balance"].startswith("$")
+    assert details["limits"]["hardship_min_instalment"] == "$10.00"
+    fraction = await s.dispatch(
+        "record_promise", {"amount": 10.005, "due_on": "2027-02-19", "method": "check"}
+    )
+    assert "dollars and cents" in fraction["error"]
+    promise = await s.dispatch("record_promise", {"amount": 50.25, "due_on": "2027-02-19", "method": "check"})
+    assert promise["amount"] == "$50.25" and no_cents(promise)
+    (row,) = rows(pg_dsn, "promises_to_pay")
+    assert row["amount_cents"] == 5025, "the World still stores cents"
+
 
 #: REMI-001 (pay a small balance in full by card): the answer key's postconditions from
 #: utility-bench collections_bench/generated/manifest.json at the commit collections_world.sql names,
@@ -333,16 +434,16 @@ async def test_remi_001_pay_in_full_leaves_exactly_the_answer_key_rows(
     s = await make_session()
     caplog.set_level(logging.INFO)
     details = await unlocked(s)
-    assert details["current_balance_cents"] == 18500
+    assert details["current_balance"] == "$185.00"
     method_id = await card(s)
     ticks.t += 60
     paid = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount_cents": 18500, "purpose": "pay_in_full"}
+        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
     )
     assert paid == {
         "status": "approved",
-        "amount_cents": 18500,
-        "remaining_balance_cents": 0,
+        "amount": "$185.00",
+        "remaining_balance": "$0.00",
         "paid_with": "card ending 4242",
     }
     ticks.t += 65
@@ -392,21 +493,21 @@ async def test_card_decline_tells_the_model_why_then_a_promise(
     await unlocked(s)
     method_id = await card(s, number)
     declined = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount_cents": 18500, "purpose": "pay_in_full"}
+        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
     )
     assert (declined["status"], declined["decline_code"]) == ("declined", decline_code)
-    assert reason in declined["reason"] and "did not go through" in declined["next"]
-    assert "promise" in declined["next"] and "bank account" in declined["next"]
+    assert reason in declined["reason"] and "did not go through" in declined["allowed_now"]
+    assert "promise" in declined["allowed_now"] and "bank account" in declined["allowed_now"]
     again = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount_cents": 18500, "purpose": "pay_in_full"}
+        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
     )
     assert "already declined" in again["error"]
-    assert (
-        await s.dispatch("record_promise", {"amount_cents": 18500, "due_on": "2027-02-25", "method": "card"})
-    )["error"]
-    assert (
-        await s.dispatch("record_promise", {"amount_cents": 18500, "due_on": "2027-02-19", "method": "card"})
-    )["recorded"]
+    assert (await s.dispatch("record_promise", {"amount": 185.00, "due_on": "2027-02-25", "method": "card"}))[
+        "error"
+    ]
+    assert (await s.dispatch("record_promise", {"amount": 185.00, "due_on": "2027-02-19", "method": "card"}))[
+        "recorded"
+    ]
     assert (
         await s.dispatch(
             "log_contact_attempt",
@@ -433,7 +534,7 @@ async def test_card_decline_then_ach_pays_in_full(pg_dsn, make_session) -> None:
         "take_payment",
         {
             "method_id": await card(s, INSUFFICIENT_FUNDS_CARD),
-            "amount_cents": 18500,
+            "amount": 185.00,
             "purpose": "pay_in_full",
         },
     )
@@ -444,7 +545,7 @@ async def test_card_decline_then_ach_pays_in_full(pg_dsn, make_session) -> None:
     )
     assert (bank["method"], bank["last4"], bank["brand"]) == ("ach", "6789", None)
     paid = await s.dispatch(
-        "take_payment", {"method_id": bank["method_id"], "amount_cents": 18500, "purpose": "pay_in_full"}
+        "take_payment", {"method_id": bank["method_id"], "amount": 185.00, "purpose": "pay_in_full"}
     )
     assert paid["status"] == "approved" and paid["paid_with"] == "bank account ending 6789"
     assert (
@@ -477,7 +578,7 @@ async def test_ach_decline_is_reported(pg_dsn, make_session) -> None:
         {"method": "ach", "routing_number": DECLINING_BANK[0], "account_number": DECLINING_BANK[1]},
     )
     declined = await s.dispatch(
-        "take_payment", {"method_id": bank["method_id"], "amount_cents": 18500, "purpose": "pay_in_full"}
+        "take_payment", {"method_id": bank["method_id"], "amount": 185.00, "purpose": "pay_in_full"}
     )
     assert (declined["status"], declined["decline_code"], declined["declined"]) == (
         "declined",
@@ -510,7 +611,7 @@ async def test_gateway_validation_errors_reach_the_model_and_write_nothing(
     missing = await s.dispatch("add_payment_method", {"method": "card", "card_number": GOOD_CARD})
     assert "expiry" in missing["error"]
     over = await s.dispatch(
-        "take_payment", {"method_id": await card(s), "amount_cents": 18501, "purpose": "settlement"}
+        "take_payment", {"method_id": await card(s), "amount": 185.01, "purpose": "settlement"}
     )
     assert "full balance" in over["error"]  # refused by policy before the gateway is reached
     assert [m["last4"] for m in rows(pg_dsn, "payment_methods")] == ["4242"]
@@ -523,9 +624,7 @@ async def test_settlement_below_the_floor_goes_to_a_person(pg_dsn, make_session)
     s = await make_session()
     await unlocked(s)
     pm = await card(s)
-    refused = await s.dispatch(
-        "take_payment", {"method_id": pm, "amount_cents": 80000, "purpose": "settlement"}
-    )
+    refused = await s.dispatch("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"})
     assert "transfer_to_human" in refused["error"]
     await s.dispatch("transfer_to_human", {"reason": "settlement_below_floor"})
     assert (
@@ -548,10 +647,8 @@ async def test_lump_settlement_writes_payment_arrangement_and_letter(pg_dsn, mak
     s = await make_session()
     await unlocked(s)
     method_id = await card(s)
-    ok = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount_cents": 75000, "purpose": "settlement"}
-    )
-    assert ok["status"] == "approved" and ok["remaining_balance_cents"] == 25000
+    ok = await s.dispatch("take_payment", {"method_id": method_id, "amount": 750.00, "purpose": "settlement"})
+    assert ok["status"] == "approved" and ok["remaining_balance"] == "$250.00"
     (arr,) = rows(pg_dsn, "arrangements")
     assert (arr["kind"], arr["total_cents"], arr["instalments"], arr["method_id"]) == (
         "settlement_lump",
@@ -586,12 +683,12 @@ async def test_hardship_plan_needs_the_hardship_recorded_first(pg_dsn, make_sess
         "instalment_count": 24,
         "first_due_on": "2027-03-01",
     }
-    assert "Record the hardship first" in (await s.dispatch("create_arrangement", plan))["error"]
+    assert "hardship recorded first" in (await s.dispatch("create_arrangement", plan))["error"]
     await s.dispatch("record_flag", {"kind": "hardship", "hardship_reason": "job_loss"})
     made = await s.dispatch("create_arrangement", plan)
     assert len(made["instalments"]) == 24 and made["instalments"][0] == {
         "due_on": "2027-03-01",
-        "amount_cents": 4000,
+        "amount": "$40.00",
     }
     assert (
         await s.dispatch(
@@ -649,20 +746,18 @@ async def test_deceased_reported_by_the_executor(pg_dsn, make_session) -> None:
             "died_on": "2026-12-30",
         },
     )
-    assert (await s.dispatch("verify_right_party", {"full_name": "Simone Achterberg", "role": "estate_rep"}))[
+    assert (await s.dispatch("verify_right_party", {"name": "Simone Achterberg", "role": "estate_rep"}))[
         "verified"
     ]
     details = await s.dispatch(
         "get_debt_details", {"recording_disclosure_given": True, "mini_miranda_given": True}
     )
-    assert "limits" not in details and details["current_balance_cents"] == 18500
+    assert "limits" not in details and details["current_balance"] == "$185.00"
     assert (
         "Collection stopped"
-        in (
-            await s.dispatch(
-                "record_promise", {"amount_cents": 100, "due_on": "2027-02-12", "method": "check"}
-            )
-        )["error"]
+        in (await s.dispatch("record_promise", {"amount": 1.00, "due_on": "2027-02-12", "method": "check"}))[
+            "error"
+        ]
     )
     logged = await s.dispatch(
         "log_contact_attempt", {"answered_by": "estate_rep", "summary": "Executor reported the death."}

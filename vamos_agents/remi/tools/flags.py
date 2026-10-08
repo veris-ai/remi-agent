@@ -58,9 +58,9 @@ async def log_dispute(session: RemiCall, args: DisputeArgs) -> dict[str, Any]:
     session.outcomes.add("dispute")
     return {
         "recorded": "dispute",
-        "next": "Collection has stopped: state no amount, make no offer, ask for no payment. Never say a dispute "
-        "must be in writing. Explain they can request substantiation of the debt in writing and that written "
-        "instructions are being mailed to them.",
+        "allowed_now": "Collection has stopped for this call: no amount, offer or payment request. A dispute never "
+        "has to be in writing. What is true now, for your own plain words: they can ask in writing for proof of the "
+        "debt, and a letter explaining how is being mailed to them.",
     }
 
 
@@ -107,7 +107,7 @@ class FlagArgs(BaseModel):
 def _need(args: FlagArgs, *names: str) -> None:
     missing = [n for n in names if getattr(args, n) in (None, "")]
     if missing:
-        raise ToolError(f"{args.kind} needs {', '.join(missing)}: ask the person for them first.")
+        raise ToolError(f"{args.kind} needs {', '.join(missing)}, which the person has not given yet.")
 
 
 @REGISTRY.tool(FlagArgs, requires=Gate.PROCEEDING)
@@ -121,8 +121,8 @@ async def record_flag(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     stop request from anyone else goes to stop_calling_this_number."""
     if args.kind in ("cease", "channel_optout") and session.verified_as is None:
         raise ToolError(
-            "This person is not verified, so their request cannot close the account. If they asked you to stop "
-            "calling, call stop_calling_this_number instead."
+            "This person is not verified, so their request cannot close the account; an unverified request to "
+            "stop calling is stop_calling_this_number."
         )
     if args.kind != "deceased":
         session.require_consumer()
@@ -159,9 +159,8 @@ async def stop_calling_this_number(session: RemiCall, args: StopArgs) -> dict[st
         "recorded": "wrong_number_stop"
         if session.number_stop == "wrong_number"
         else "unverified_stop_request",
-        "next": "Acknowledge it and say you will stop calling this number. Ask for no verification, disclose "
-        "nothing about why you called, and do not say all contact will stop or that a letter will follow. "
-        "Say goodbye, then log_contact_attempt and end_call.",
+        "allowed_now": "Calls to this number stop. Nothing more may be asked (no verification) or disclosed; this "
+        "is not a stop to all contact and no letter follows. The call ends: goodbye, log_contact_attempt, end_call.",
     }
 
 
@@ -176,7 +175,8 @@ async def _cease(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.outcomes.add("cease")
     return {
         "recorded": "cease",
-        "next": "Acknowledge it, stop collecting now, and tell them they will receive at most one written confirmation.",
+        "allowed_now": "Collection has stopped: no amount, offer or payment request. At most one written "
+        "confirmation will be mailed.",
     }
 
 
@@ -195,7 +195,7 @@ async def _channel_optout(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.outcomes.add("channel_optout")
     return {
         "recorded": "channel_optout",
-        "next": "Acknowledge the opt-out for that channel only; it is not a request to stop all contact.",
+        "allowed_now": "Only that channel stops; it is not a request to stop all contact.",
     }
 
 
@@ -206,7 +206,7 @@ async def _attorney(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
         await tx.update("accounts", session.context.account_id, {"status": "attorney"})
     session.stop_collection("attorney")
     session.outcomes.add("attorney")
-    return {"recorded": "attorney", "next": "Say nothing more about the debt. Thank them and close the call."}
+    return {"recorded": "attorney", "allowed_now": "Nothing more about the debt; the call can close."}
 
 
 async def _bankruptcy(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
@@ -228,7 +228,7 @@ async def _bankruptcy(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.outcomes.add("bankruptcy")
     return {
         "recorded": "bankruptcy",
-        "next": "Ask for no payment of any kind, not even a voluntary one. Close the call.",
+        "allowed_now": "No payment of any kind may be asked for, not even a voluntary one; the call can close.",
     }
 
 
@@ -252,8 +252,9 @@ async def _deceased(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.stop_collection("deceased")
     return {
         "recorded": "deceased",
-        "next": "Never say or imply a relative or heir is responsible. Disclose nothing about the debt unless this "
-        "person is verified as the estate's executor or administrator (verify_right_party role estate_rep).",
+        "allowed_now": "No relative or heir is responsible, and nothing may imply one is. Nothing about the debt "
+        "unless this person is verified as the estate's executor or administrator (verify_right_party role "
+        "estate_rep).",
     }
 
 
@@ -263,8 +264,8 @@ async def _scra(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.stop_collection("scra")
     return {
         "recorded": "scra",
-        "next": "Acknowledge their service, say the agency will review their Servicemembers Civil Relief Act "
-        "protections, put no pressure on them to pay, and transfer_to_human now.",
+        "allowed_now": "No pressure to pay. The agency will review their Servicemembers Civil Relief Act "
+        "protections; transfer_to_human is next.",
     }
 
 
@@ -278,8 +279,8 @@ async def _hardship(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.outcomes.add("hardship")
     return {
         "recorded": "hardship",
-        "next": "Acknowledge it and offer the hardship plan (up to 24 months, at least $10.00 a month). Never "
-        "suggest borrowing, a credit card or selling property, and do not press for the full balance.",
+        "allowed_now": "The hardship plan may be offered: up to 24 months, at least $10.00 a month. Never "
+        "borrowing, a credit card or selling property, and no pressing for the full balance.",
     }
 
 
@@ -296,7 +297,7 @@ async def _original_creditor(session: RemiCall, args: FlagArgs) -> dict[str, Any
         return {
             "original_creditor": creditor.name,
             "mailing_address": None,
-            "next": "Give the name, say you do not have the address on hand and it will be sent in writing. "
+            "allowed_now": "The name may be given; the address is not on hand and will be sent in writing. "
             "Collection stops until it is provided: no amounts, offers or payment requests.",
         }
     return {"original_creditor": creditor.name, "mailing_address": creditor.mailing_address}

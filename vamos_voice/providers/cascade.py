@@ -29,9 +29,15 @@ What the cascade itself owns, the same for every vendor:
   sees the results. Turns that finish while the agent is answering are
   answered together, in one user message, next.
 - **Barge-in.** Silero VAD on the caller's audio (``silero.py``, the detector
-  the VAmoS Energy candidates of these vendors use): the caller starting to
-  speak while a turn is being answered stops the audio, clears the vendor's TTS
-  utterance, and silences the rest of that turn. The LLM round it lands in
+  the VAmoS Energy candidates of these vendors use), under ``BargeInRule``: the
+  caller talking over a turn being answered for ``min_speech_ms`` (0.5 s) of
+  Silero speech, and, where the STT leg streams interim text, saying at least
+  ``min_words`` (1) transcribed word, stops the audio, clears the vendor's TTS
+  utterance, and silences the rest of that turn. That is the LiveKit Agents /
+  Pipecat default shape (``min_interruption_duration`` 0.5 s; a minimum word
+  count), chosen once for every cascade: a single noise blip under the bench's
+  background audio no longer mutes a whole reply, while sustained speech still
+  interrupts. It is a framework default, not a per-vendor tuning. The LLM round it lands in
   still completes and its tool calls still run (a payment that was decided is
   made and recorded); then the turn ends and the caller's words are the next
   turn. The interrupted reply is kept in the history as the words the caller
@@ -79,6 +85,10 @@ BAD_ARGUMENTS = json.dumps({"error": "The arguments were not valid JSON. Call th
 
 Message = dict[str, Any]
 TurnSink = Callable[[str], Awaitable[None]]
+#: Interim (not yet final) caller text, as the STT leg streams it.
+InterimSink = Callable[[str], None]
+#: Non-speech that ends a caller utterance for the barge-in count (short pauses between words do not).
+UTTERANCE_GAP_MS = 300
 
 
 @dataclass(frozen=True)
@@ -120,13 +130,17 @@ class VoiceActivity(Protocol):
 class SpeechToText(abc.ABC):
     """One call's STT leg."""
 
+    #: True when the leg streams interim text (``on_interim``): barge-in then also needs a transcribed word.
+    interim_text: ClassVar[bool] = False
+
     @abc.abstractmethod
     async def feed(self, pcm: bytes, speaking: bool) -> None:
         """Caller audio (PCM16 24 kHz) with Silero's verdict on it."""
 
     @abc.abstractmethod
-    async def run(self, on_turn: TurnSink) -> None:
-        """Hand each finished caller turn to ``on_turn`` until the vendor closes; raise on a vendor error."""
+    async def run(self, on_turn: TurnSink, on_interim: InterimSink) -> None:
+        """Hand each finished caller turn to ``on_turn`` (and, if ``interim_text``, interim text to
+        ``on_interim``) until the vendor closes; raise on a vendor error."""
 
 
 class TextToSpeech(abc.ABC):
@@ -179,6 +193,56 @@ class SilenceEndpoint:
         return True
 
 
+@dataclass(frozen=True)
+class BargeInRule:
+    """When the caller talking over the agent interrupts it (every cascade, the same).
+
+    ``min_speech_ms`` of Silero speech in one utterance (pauses under
+    ``UTTERANCE_GAP_MS`` do not end it), counted from when the reply began, and,
+    where the STT leg streams interim text, at least ``min_words`` transcribed
+    words in that utterance. A leg without interim text (Whisper) uses the
+    duration alone.
+    """
+
+    min_speech_ms: int = 500
+    min_words: int = 1
+
+
+class BargeInDetector:
+    """One call's barge-in state under a ``BargeInRule``; fed caller audio and interim text."""
+
+    def __init__(self, rule: BargeInRule, needs_words: bool) -> None:
+        self.rule, self.needs_words = rule, needs_words
+        self.reset()
+
+    def reset(self) -> None:
+        """A reply begins: only speech from now on counts."""
+        self.speech_ms = 0.0
+        self.gap_ms = 0.0
+        self.words = 0
+
+    def audio(self, ms: float, speaking: bool) -> bool:
+        """Account for ``ms`` of caller audio; True when the rule is met."""
+        if not speaking:
+            self.gap_ms += ms
+            return False
+        if self.gap_ms >= UTTERANCE_GAP_MS:  # a new utterance: the last one never qualified
+            self.speech_ms, self.words = 0.0, 0
+        self.gap_ms = 0.0
+        self.speech_ms += ms
+        return self.due()
+
+    def interim(self, text: str) -> bool:
+        """Interim caller text arrived; True when the rule is met."""
+        self.words += len(text.split())
+        return self.due()
+
+    def due(self) -> bool:
+        if self.speech_ms < self.rule.min_speech_ms:
+            return False
+        return not self.needs_words or self.words >= self.rule.min_words
+
+
 class CascadeProvider(VoiceProvider, abc.ABC):
     """A vendor whose STT, LLM and TTS are run as a cascade in this process."""
 
@@ -187,6 +251,8 @@ class CascadeProvider(VoiceProvider, abc.ABC):
     #: How a leg opens its vendor socket; tests replace it to capture frames offline.
     connect: Connect = staticmethod(connect_websocket)
     llm: ChatModel
+    #: When caller speech interrupts the agent (documented in the module docstring).
+    barge_in_rule: ClassVar[BargeInRule] = BargeInRule()
 
     @abc.abstractmethod
     def open_legs(self, call: CallRuntime) -> AbstractAsyncContextManager[tuple[SpeechToText, TextToSpeech]]:
@@ -216,7 +282,7 @@ class _CascadeCall:
         self.messages = provider.system_messages(call.setup)
         self.tools = provider.tool_format.convert(call.setup.tools)
         self.vad = provider.voice_activity(call.setup)
-        self.voiced = False
+        self.barge = BargeInDetector(provider.barge_in_rule, needs_words=stt.interim_text)
         self.turns: asyncio.Queue[str] = asyncio.Queue()
         self.replying = False  # a turn is being answered
         self.cut = False  # ...and the caller talked over it
@@ -229,7 +295,7 @@ class _CascadeCall:
         self.call.inbound.bind(self.hear)
         await run_until_first_done(
             caller_to_stt=self.call.inbound.run(),
-            stt_to_turns=self.stt.run(self.on_turn),
+            stt_to_turns=self.stt.run(self.on_turn, self.on_interim),
             turns=self.converse(),
         )
 
@@ -237,10 +303,13 @@ class _CascadeCall:
 
     async def hear(self, pcm: bytes) -> None:
         speaking = self.vad.push(pcm)
-        if speaking and not self.voiced:
+        if self.barge.audio(pcm_ms(len(pcm)), speaking):
             self.barge_in()
-        self.voiced = speaking
         await self.stt.feed(pcm, speaking)
+
+    def on_interim(self, text: str) -> None:
+        if self.barge.interim(text):
+            self.barge_in()
 
     def barge_in(self) -> None:
         if not self.replying or self.cut:
@@ -278,6 +347,7 @@ class _CascadeCall:
     async def respond(self) -> bool:
         """Answer the conversation so far; True when the agent has hung up."""
         self.replying, self.cut = True, False
+        self.barge.reset()
         try:
             await self.rounds()
         finally:
