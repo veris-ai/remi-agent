@@ -9,9 +9,8 @@ What an agent declares (class attributes):
 
 - ``name``: the folder under ``vamos_agents/``, the ``AGENT`` build arg, the extra in
   pyproject.toml and the first half of the image name.
-- ``call_start``: who speaks first and which connect-time reads run before
-  (``vamos_voice.call_start``: ``callee_first`` for outbound, ``agent_first``
-  for inbound).
+- ``call_start``: who speaks first (``vamos_voice.call_start``:
+  ``callee_first`` for outbound, ``agent_first`` for inbound).
 - ``tools``: its ``ToolRegistry``.
 - ``gates``: its ``Gates`` (usually a ``GateLadder``) deciding what may run now.
 - ``required_env``: variables it cannot start without (checked before ``from_env``).
@@ -29,6 +28,9 @@ What an agent implements:
   context and the clock only, so every vendor sends identical text.
 - ``open_call(clock)``: a fresh per-call state object (``CallState``); every
   tool handler receives it.
+- ``screen_pop(call)`` (optional): the connect-time reads, performed by the
+  agent itself on that state before any vendor session opens, rendered as a
+  ``ScreenPop`` section appended to the instructions (``vamos_voice.screen_pop``).
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from typing import ClassVar, Self
 
 from .call_start import CallStartPolicy
 from .context import AgentContext, CallClock
+from .screen_pop import ScreenPop
 from .session import CallState, Gates
 from .tools import ToolRegistry
 
@@ -79,6 +82,12 @@ class AgentSpec(abc.ABC):
     @abc.abstractmethod
     def open_call(self, clock: CallClock) -> CallState:
         """A fresh per-call state; tool handlers receive it, ``finalize()`` runs at hang-up."""
+
+    async def screen_pop(self, call: CallState) -> ScreenPop | None:
+        """What the agent's screen shows when the call connects: run the connect-time reads on
+        ``call`` (through the agent's own world clients and its tools' handlers, so its gates see
+        them done) and render them. None: nothing to show. Runs before any vendor session opens."""
+        return None
 
     def describe(self) -> str:
         """One log-line summary of which call this pod serves (no secrets)."""

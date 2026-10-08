@@ -1,10 +1,11 @@
-"""Realtime-protocol call flow after priming, against a scripted vendor.
+"""Realtime-protocol call flow, against a scripted vendor.
 
 Turn taking is the vendor's own (server VAD replies and interrupts); these tests
 pin what the provider still does itself:
 
-- REMI-082: the priming response spoke "Hello... I'm here" aloud. Priming is a
-  text-only response, so it can never speak; the caller's reply is audio.
+- Call start sends the session and nothing that makes the model act: no priming
+  response (REMI-082: a priming response once spoke "Hello... I'm here" aloud),
+  so the first response is the vendor's own answer to the callee, in audio.
 - The provider's own requests (tool results) never race a running response:
   they wait for it, and one refused with ``conversation_already_has_active_response``
   is sent again when the running one ends.
@@ -22,8 +23,6 @@ import pytest
 
 from .fakes import HELLO, REMI, FakeLine, FakeVendorSocket, ScriptedSession, runtime
 from .test_parity import grok_call, openai_call
-
-READS = REMI.policy.connect_reads
 
 
 class Vendor:
@@ -72,32 +71,27 @@ def sent(sock: FakeVendorSocket, kind: str) -> list[dict[str, Any]]:
 
 
 def is_reply(frame: dict[str, Any]) -> bool:
-    """A response.create for the conversation (not a priming one)."""
-    return frame.get("type") == "response.create" and "tool_choice" not in frame.get("response", {})
+    """A response.create the provider asked for."""
+    return frame.get("type") == "response.create"
 
 
 async def settle() -> None:
     await asyncio.sleep(0.05)
 
 
-async def start(
-    build=openai_call, *, priming_timeout_s: float = 6.0
-) -> tuple[FakeVendorSocket, Vendor, FakeLine, Any, asyncio.Task]:
+async def start(build=openai_call) -> tuple[FakeVendorSocket, Vendor, FakeLine, Any, asyncio.Task]:
     sock = FakeVendorSocket()
     provider = build(sock)["provider"]
     line = FakeLine()
-    call = runtime(REMI, line, ScriptedSession(READS), priming_timeout_s=priming_timeout_s)
+    call = runtime(REMI, line, ScriptedSession())
     task = asyncio.create_task(provider.run_call(call))
-    await sock.wait_for(lambda f: f.get("type") == "response.create")  # the priming request
+    await sock.wait_for(lambda f: f.get("type") == "session.update")
     return sock, Vendor(sock), line, call, task
 
 
-async def primed(vendor: Vendor, line: FakeLine) -> None:
-    """The callee says "Hello?" while the reads run; the reads finish and release it."""
+async def answered(line: FakeLine) -> None:
+    """The callee says "Hello?"; it goes straight to the vendor."""
     await line.incoming.put(HELLO)
-    rid = vendor.created()
-    vendor.tool_calls(rid, *READS)
-    vendor.done(rid)
     await settle()
 
 
@@ -106,22 +100,16 @@ async def stop(task: asyncio.Task) -> None:
     await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_priming_is_text_only_and_the_callee_is_answered_in_audio() -> None:
+async def test_call_start_sends_only_the_session_and_the_callee_is_answered_in_audio() -> None:
     sock, vendor, line, _call, task = await start()
-    (prime,) = sent(sock, "response.create")
-    setup = REMI.setup()
-    assert prime["response"] == {
-        "tool_choice": "required",
-        "output_modalities": ["text"],  # it can never speak during the connect reads
-        "instructions": f"{setup.instructions}\n\n{REMI.policy.prime_instruction}",
-    }
+    await answered(line)
+    assert [f["type"] for f in sock.sent] == ["session.update", "input_audio_buffer.append"]
+    assert sock.sent[0]["session"]["output_modalities"] == ["audio"]
 
-    await primed(vendor, line)
     vendor.turn(0, 200)  # "Hello?": the vendor's VAD answers it
     await settle()
     assert not any(is_reply(f) for f in sock.sent), "the vendor replies to caller turns, not the provider"
-    assert len(sent(sock, "session.update")) == 1, "priming never rewrites the session"
-    assert sent(sock, "session.update")[0]["session"]["output_modalities"] == ["audio"]
+    assert len(sent(sock, "session.update")) == 1, "the session is never rewritten"
 
     rid = vendor.created()
     vendor.audio(rid)
@@ -142,7 +130,7 @@ async def test_turn_taking_is_the_vendors_own(build) -> None:
     assert vad["type"] == "server_vad"
     assert vad.get("create_response", True) and vad.get("interrupt_response", True)
 
-    await primed(vendor, line)
+    await answered(line)
     before = len(sock.sent)
     vendor.turn(0, 200)
     await settle()
@@ -153,7 +141,7 @@ async def test_turn_taking_is_the_vendors_own(build) -> None:
 
 async def test_caller_speech_over_the_agent_only_truncates() -> None:
     sock, vendor, line, _call, task = await start()
-    await primed(vendor, line)
+    await answered(line)
     vendor.turn(0, 200)
     reply = vendor.created()
     vendor.audio(reply, ms=5000)
@@ -167,30 +155,11 @@ async def test_caller_speech_over_the_agent_only_truncates() -> None:
     await stop(task)
 
 
-async def test_deadline_mid_priming_leaves_the_priming_response_to_the_vendor(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """REMI-082: the deadline released the greeting while the priming response was still running."""
-    sock, vendor, line, call, task = await start(priming_timeout_s=0.2)
-    await line.incoming.put(HELLO * 10)  # "Hi, you've reached Marcus Sokolov..."
-    prime = vendor.created()  # the priming response is running, no read yet
-    await sock.wait_for(lambda f: f.get("type") == "input_audio_buffer.append", within=2)
-    assert "not done after 0.2s" in caplog.text
-    assert sent(sock, "response.cancel") == [], "the priming response is not cancelled by the provider"
-
-    vendor.tool_calls(prime, *READS)  # its reads arrive late, then it finishes
-    vendor.done(prime)
-    await settle()
-    assert [c for c, _ in call.session.calls] == list(READS)
-    assert sum(is_reply(f) for f in sock.sent) == 1, "one follow-up carries the read results"
-    await stop(task)
-
-
 async def test_a_request_refused_for_an_active_response_is_sent_when_it_ends() -> None:
     sock, vendor, line, _call, task = await start()
-    await primed(vendor, line)
+    await answered(line)
     rid = vendor.created()
-    vendor.tool_calls(rid, READS[0])
+    vendor.tool_calls(rid, "get_account")
     vendor.done(rid)
     await sock.wait_for(is_reply)  # the tool-results follow-up
     sock.push(

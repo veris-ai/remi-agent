@@ -1,4 +1,4 @@
-"""Grok Voice: the session shape, the priming fallback and barge-in, against what the provider sends.
+"""Grok Voice: the session shape and barge-in, against what the provider sends.
 
 The parity matrix (``test_parity.py``) covers the call as a whole; these pin
 the places Grok's dialect differs from OpenAI Realtime, so a change to the
@@ -44,44 +44,18 @@ def test_session_keeps_voice_instructions_and_vad_at_the_top_level() -> None:
     assert all(t["type"] == "function" for t in session["tools"])
 
 
-async def _primed_call(sock: FakeVendorSocket, provider, script) -> tuple[FakeLine, asyncio.Task]:
-    reads = REMI.policy.connect_reads
+async def _started_call(sock: FakeVendorSocket, provider, script) -> tuple[FakeLine, asyncio.Task]:
     line = FakeLine()
-    task = asyncio.create_task(provider.run_call(runtime(REMI, line, ScriptedSession(reads))))
+    task = asyncio.create_task(provider.run_call(runtime(REMI, line, ScriptedSession())))
     await sock.wait_for(script.is_setup)
-    script.tool_calls(*reads)
-    await asyncio.sleep(0.05)
     return line, task
-
-
-async def test_priming_asks_again_for_a_skipped_read_by_name_without_tool_choice() -> None:
-    reads = REMI.policy.connect_reads
-    sock = FakeVendorSocket()
-    script = GrokScript(sock)
-    provider = GrokVoiceProvider("k", "m", "eve")
-    provider.connect = sock.connector()
-    task = asyncio.create_task(provider.run_call(runtime(REMI, FakeLine(), ScriptedSession(reads))))
-    await sock.wait_for(script.is_setup)
-    script.tool_calls(reads[0])  # the model ran only the first read
-    await asyncio.sleep(0.05)
-
-    notes = [
-        f for f in sock.sent if f.get("type") == "conversation.item.create" and f["item"]["type"] == "message"
-    ]
-    assert [n["item"]["content"][0]["text"] for n in notes] == [
-        REMI.policy.prime_note,
-        REMI.policy.reprime_note(list(reads[1:])),
-    ]
-    assert sock.sent[-1] == {"type": "response.create"}
-    assert not any("tool_choice" in f.get("response", {}) for f in sock.sent)
-    task.cancel()
 
 
 async def _barge_in(provider, script_cls) -> list[dict]:
     sock = FakeVendorSocket()
     script = script_cls(sock)
     provider.connect = sock.connector()
-    line, task = await _primed_call(sock, provider, script)
+    line, task = await _started_call(sock, provider, script)
     script.callee_spoke()
     sock.push(
         {

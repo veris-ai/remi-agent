@@ -1,24 +1,24 @@
 """Parity: every installed vendor sends the same agent, for every agent (agents x vendors).
 
 Each case runs a provider through a whole scripted call offline and asserts on
-what it actually SENT (the vendor's session/setup frame, its priming request,
-its audio toward the caller), not on module attributes:
+what it actually SENT (the vendor's session/setup frame, its requests, its
+audio toward the caller), not on module attributes:
 
 - byte-identical instructions, and exactly the registry's tools and schemas;
 - the same turn-taking numbers mapped into each vendor's VAD, as far as the
   vendor exposes one (each script declares what its vendor maps: Grok has no
   prefix padding, GPT-Live has no VAD at all);
-- CALLEE_FIRST: the connect reads run first, the caller's "Hello?" is held
-  until they finish, no greeting is triggered, and no agent audio reaches the
-  caller before the callee has spoken;
+- the screen pop: Remi's connect reads run (as SQL through the agent's own
+  database client) before the vendor session opens, so before any caller
+  audio is forwarded and any agent audio is sent; the setup carries the
+  "Account on screen" section without the verification secrets; nothing
+  forces a tool call; the gates treat the reads as done;
+- CALLEE_FIRST: nothing asks the model to act, the caller's "Hello?" goes
+  straight to the vendor, and no agent audio reaches the caller before the
+  callee has spoken;
 - AGENT_FIRST (the test-only inbound agent): the opening turn is the first
-  request after setup, caller audio is never held, and agent audio reaches
-  the caller before they speak;
-- end_call hangs up the line;
-- the priming deadline: a model that never runs the connect reads does not
-  hold the caller forever; their audio is released at the deadline, nothing
-  is run on the model's behalf, and the agent's gates refuse a debt tool with
-  the missing reads named.
+  request after setup, and agent audio reaches the caller before they speak;
+- end_call hangs up the line.
 """
 
 from __future__ import annotations
@@ -26,10 +26,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib.util
-import json
 from typing import Any
 
-import httpx
 import pytest
 
 from vamos_voice.providers import load_provider, vendor_names
@@ -37,11 +35,12 @@ from vamos_voice.providers import load_provider, vendor_names
 from .fakes import (
     AGENT_CASES,
     HELLO,
+    REMI_SECRETS,
     AgentCase,
     FakeLine,
     FakeVendorSocket,
     ScriptedSession,
-    remi_gated_session,
+    remi_screen_pop_runtime,
     runtime,
 )
 
@@ -156,12 +155,9 @@ class OpenAIScript:
         }
 
     is_setup = staticmethod(lambda f: f.get("type") == "session.update")
-    is_prime = staticmethod(lambda f: f.get("type") == "response.create")
+    #: A frame asking the model to act (a response, or a turn written into the conversation).
+    is_request = staticmethod(lambda f: f.get("type") in ("response.create", "conversation.item.create"))
     is_caller_audio = staticmethod(lambda f: f.get("type") == "input_audio_buffer.append")
-
-    @staticmethod
-    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
-        assert frame["response"]["tool_choice"] == "required"
 
     @staticmethod
     def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
@@ -176,7 +172,7 @@ class OpenAIScript:
 
 
 class GrokScript(OpenAIScript):
-    """Grok's Realtime dialect: top-level VAD, grok-transcribe, priming by a labelled note."""
+    """Grok's Realtime dialect: top-level VAD, grok-transcribe."""
 
     expected_vad = (800, None)
 
@@ -194,19 +190,6 @@ class GrokScript(OpenAIScript):
             "prefix_ms": vad.get("prefix_padding_ms"),
             "transcribes_caller": session["audio"]["input"]["transcription"] == {"model": "grok-transcribe"},
         }
-
-    # Grok cannot force a tool call: priming is a user-role note item, then response.create.
-    is_prime = staticmethod(
-        lambda f: (
-            (f.get("type") == "conversation.item.create" and f["item"]["type"] == "message")
-            or (f.get("type") == "response.create" and "instructions" in f.get("response", {}))
-        )
-    )
-
-    @staticmethod
-    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
-        assert frame["item"]["role"] == "user"
-        assert frame["item"]["content"] == [{"type": "input_text", "text": case.policy.prime_note}]
 
 
 def grok_call(sock: FakeVendorSocket) -> dict[str, Any]:
@@ -274,16 +257,10 @@ class GptLiveScript:
         }
 
     is_setup = staticmethod(lambda f: f.get("type") == "session.start")
-    is_prime = staticmethod(lambda f: f.get("type") == "session.instructions.append")
+    is_request = staticmethod(
+        lambda f: f.get("type") in ("session.instructions.append", "session.update", "response.create")
+    )
     is_caller_audio = staticmethod(lambda f: f.get("type") == "session.input_audio.append")
-
-    @staticmethod
-    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
-        assert frame == {
-            "type": "session.instructions.append",
-            "delegation_id": None,
-            "content": case.policy.prime_instruction,
-        }
 
     @staticmethod
     def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
@@ -358,12 +335,8 @@ class GeminiScript:
         }
 
     is_setup = staticmethod(lambda f: "setup" in f)
-    is_prime = staticmethod(lambda f: "clientContent" in f)
+    is_request = staticmethod(lambda f: "clientContent" in f)
     is_caller_audio = staticmethod(lambda f: "realtimeInput" in f)
-
-    @staticmethod
-    def check_prime(frame: dict[str, Any], case: AgentCase) -> None:
-        assert frame["clientContent"]["turns"][0]["parts"][0]["text"] == case.policy.prime_note
 
     @staticmethod
     def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
@@ -396,16 +369,15 @@ def test_the_matrix_covers_both_call_starts() -> None:
 
 @pytest.mark.parametrize("agent", CALLEE_FIRST_CASES)
 @pytest.mark.parametrize("name", sorted(SOCKET_VENDORS))
-async def test_socket_vendor_primes_and_waits_for_the_callee(name: str, agent: str) -> None:
+async def test_socket_vendor_waits_for_the_callee(name: str, agent: str) -> None:
     if not installed(name):
         pytest.skip(f"{name} extra not installed")
     case = CASES[agent]
-    reads = case.policy.connect_reads
     build, script_cls = SOCKET_VENDORS[name]
     sock = FakeVendorSocket()
     script = script_cls(sock)
     provider = build(sock)["provider"]
-    line, session = FakeLine(), ScriptedSession(reads)
+    line, session = FakeLine(), ScriptedSession()
     call = runtime(case, line, session)
     task = asyncio.create_task(provider.run_call(call))
 
@@ -418,17 +390,9 @@ async def test_socket_vendor_primes_and_waits_for_the_callee(name: str, agent: s
     assert "key=" not in sock.url
 
     script.ready()
-    await line.incoming.put(HELLO)  # the callee answers while priming runs
-    script.check_prime(await sock.wait_for(script.is_prime), case)
-    await asyncio.sleep(0.05)
-    assert not any(script.is_caller_audio(f) for f in sock.sent), (
-        "caller audio reached the vendor before priming finished"
-    )
-
-    script.tool_calls(*reads)
-    await sock.wait_for(script.is_caller_audio)  # the held "Hello?" is released after the reads
-    assert [c for c, _ in session.calls] == list(reads)
-    assert call.start.primed
+    await line.incoming.put(HELLO)  # the callee answers
+    await sock.wait_for(script.is_caller_audio)  # straight to the vendor: nothing is held
+    assert not any(script.is_request(f) for f in sock.sent), "nothing asks the model to act first"
 
     script.audio()  # the model talks before the callee has been heard
     await asyncio.sleep(0.05)
@@ -441,51 +405,61 @@ async def test_socket_vendor_primes_and_waits_for_the_callee(name: str, agent: s
     script.tool_calls("end_call")
     await asyncio.wait_for(task, 3)
     assert line.closed
-    first_after_setup = next(f for f in sock.sent if not script.is_setup(f))
-    assert script.is_prime(first_after_setup), (
-        "the first request after setup must be the priming turn, not a greeting"
-    )
+    assert [c for c, _ in session.calls] == ["end_call"]
 
 
-MISSING_READS_REFUSAL = {
-    "error": "Run the connect-time reads first: get_account, get_dialed_phone, get_contact_history."
-}
+def _forced_tool_choices(node: Any) -> list[Any]:
+    """Every ``tool_choice`` in a frame other than ``auto`` (a forced or required tool call)."""
+    if isinstance(node, dict):
+        found = [v for k, v in node.items() if k == "tool_choice" and v != "auto"]
+        return found + [x for v in node.values() for x in _forced_tool_choices(v)]
+    if isinstance(node, list):
+        return [x for v in node for x in _forced_tool_choices(v)]
+    return []
 
 
 @pytest.mark.parametrize("name", sorted(SOCKET_VENDORS))
-async def test_socket_vendor_releases_the_caller_at_the_priming_deadline(
-    name: str, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_socket_vendor_starts_with_remis_screen_pop(name: str) -> None:
+    """GPT-Live never ran the reads when priming asked for them, and asked for the agency's callback
+    contact instead of the consumer: the screen pop gives every vendor the account before the call."""
     if not installed(name):
         pytest.skip(f"{name} extra not installed")
-    case = CASES["remi"]
+    events: list[str] = []
     build, script_cls = SOCKET_VENDORS[name]
-    sock = FakeVendorSocket()
+    sock = FakeVendorSocket(events)
     script = script_cls(sock)
     provider = build(sock)["provider"]
-    line, session = FakeLine(), remi_gated_session()
-    call = runtime(case, line, session, priming_timeout_s=0.2)
+    line = FakeLine(events)
+    await line.incoming.put(HELLO)  # the callee is already talking when the call connects
+    call = await remi_screen_pop_runtime(events, line)
     task = asyncio.create_task(provider.run_call(call))
 
-    await sock.wait_for(script.is_setup)
+    instructions = script.setup(await sock.wait_for(script.is_setup))["instructions"]
+    assert instructions == call.setup.instructions
+    assert instructions.startswith(CASES["remi"].setup().instructions.rstrip())
+    pop = instructions.split("# Account on screen", 1)[1]
+    assert "You are calling Marcus Sokolov" in pop and "Call assessment: the call may proceed." in pop
+    for read in ("get_account", "get_dialed_phone", "get_contact_history"):
+        assert f"\n{read}: {{" in pop
+    for secret in REMI_SECRETS:
+        assert secret not in instructions, f"verification secret {secret!r} reached the instructions"
+
     script.ready()
-    await line.incoming.put(HELLO)
-    await sock.wait_for(script.is_prime)  # priming asked; the model never runs the reads
-    await asyncio.sleep(0.05)
-    assert not any(script.is_caller_audio(f) for f in sock.sent)
-
-    await sock.wait_for(script.is_caller_audio, within=2)  # released at the deadline
-    assert call.start.primed
-    assert "not done after 0.2s" in caplog.text and "get_account" in caplog.text
-    assert session.results == [], "no read was run on the model's behalf"
-
-    script.callee_spoke()  # the call proceeds
+    await sock.wait_for(script.is_caller_audio)
+    script.callee_spoke()
     script.audio()
     await asyncio.sleep(0.05)
-    assert line.sent, "agent audio reaches the caller once they have spoken"
-    script.tool_calls("take_payment")  # a debt tool, before the reads
+    reads = [i for i, e in enumerate(events) if e.startswith("sql:")]
+    vendor = [i for i, e in enumerate(events) if e.startswith("vendor:")]
+    assert {events[i] for i in reads} >= {"sql:accounts", "sql:phones", "sql:contact_attempts"}
+    assert max(reads) < min(vendor) < events.index("agent audio"), events
+    assert not any(script.is_request(f) for f in sock.sent), "no priming request of any kind"
+    assert not [c for f in sock.sent for c in _forced_tool_choices(f)], "no forced tool choice"
+
+    script.tool_calls("take_payment")  # the gates treat the reads as done: verification is next
     await asyncio.sleep(0.05)
-    assert session.results == [("take_payment", MISSING_READS_REFUSAL)]
+    ((tool, refusal),) = call.session.results  # type: ignore[attr-defined]
+    assert tool == "take_payment" and refusal["error"].startswith("Confirm the right party first")
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 
@@ -496,12 +470,11 @@ async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent:
     if not installed(name):
         pytest.skip(f"{name} extra not installed")
     case = CASES[agent]
-    assert not case.policy.connect_reads, "this test covers an opening with no connect reads"
     build, script_cls = SOCKET_VENDORS[name]
     sock = FakeVendorSocket()
     script = script_cls(sock)
     provider = build(sock)["provider"]
-    line, session = FakeLine(), ScriptedSession(())
+    line, session = FakeLine(), ScriptedSession()
     call = runtime(case, line, session)
     task = asyncio.create_task(provider.run_call(call))
 
@@ -511,8 +484,8 @@ async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent:
     assert (sent_setup["silence_ms"], sent_setup["prefix_ms"]) == script.expected_vad
 
     script.ready()
-    script.check_opening(await sock.wait_for(script.is_prime), case)  # the opening turn is requested
-    assert call.start.primed and call.start.audio_open
+    script.check_opening(await sock.wait_for(script.is_request), case)  # the opening turn is requested
+    assert call.start.audio_open
 
     script.audio()  # the greeting, before the caller has said anything
     await asyncio.sleep(0.05)
@@ -533,86 +506,27 @@ async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent:
 # --- pipecat: what the LLM receives ------------------------------------------------------
 
 
-def _completion(names: list[str]) -> dict[str, Any]:
-    return {
-        "id": "c1",
-        "object": "chat.completion",
-        "created": 0,
-        "model": "gpt-test",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {"id": f"call_{n}", "type": "function", "function": {"name": n, "arguments": "{}"}}
-                        for n in names
-                    ],
-                },
-            }
-        ],
-    }
-
-
-@pytest.mark.parametrize("agent", CALLEE_FIRST_CASES)
+@pytest.mark.parametrize("agent", sorted(CASES))
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
-async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context(agent: str) -> None:
-    from openai import AsyncOpenAI
-
+def test_pipecat_sends_the_same_instructions_and_tools(agent: str) -> None:
     from vamos_voice.providers.base import TurnTaking
     from vamos_voice.providers.pipecat import PipecatProvider, user_speech_timeout_s, vad_params
     from vamos_voice.providers.pipecat.services import ServiceConfig
 
     case = CASES[agent]
-    reads = case.policy.connect_reads
-    expected = case.expected_tools()
-    requests: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        requests.append(body)
-        names = list(reads[:-1]) if len(requests) == 1 else [body["tool_choice"]["function"]["name"]]
-        return httpx.Response(200, json=_completion(names))
-
     provider = PipecatProvider(
         ServiceConfig(openai_api_key="sk-test", stt="deepgram", tts="openai"), "gpt-test"
     )
-    provider.openai_client = lambda: AsyncOpenAI(
-        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    )
-    session = ScriptedSession(reads)
-    call = runtime(case, session=session)
-    context = provider.build_context(call.setup)
-    await provider.prime(call, context)
-
-    # Priming: forced tool calls through the instrumented SDK, the missing read forced by name.
-    assert requests[0]["tool_choice"] == "required"
-    assert requests[1]["tool_choice"] == {"type": "function", "function": {"name": reads[-1]}}
-    assert requests[0]["messages"][0]["content"] == case.setup().instructions
-    assert requests[0]["messages"][1]["content"] == case.policy.prime_instruction
+    call = runtime(case)
+    params = _pipecat_request(provider, call)
+    assert params["messages"] == [{"role": "system", "content": case.setup().instructions}]
     assert {
         t["function"]["name"]: (
             set(t["function"]["parameters"]["properties"]),
             set(t["function"]["parameters"]["required"]),
         )
-        for t in requests[0]["tools"]
-    } == expected
-    assert [c for c, _ in session.calls] == list(reads)
-
-    # What the pipeline's first real completion will send: the same instructions and tools, the reads already in context.
-    llm = provider.build_llm(call.setup)
-    params = llm.get_llm_adapter().get_llm_invocation_params(
-        context, system_instruction=llm._settings.system_instruction, convert_developer_to_user=False
-    )
-    assert params["messages"][0] == {"role": "system", "content": case.setup().instructions}
-    roles = [m["role"] for m in params["messages"][1:]]
-    assert roles == ["assistant", *["tool"] * (len(reads) - 1), "assistant", "tool"]
-    assert {t["function"]["name"] for t in params["tools"]} == set(expected)
-    assert not any(m["role"] == "assistant" and m.get("content") for m in params["messages"]), (
-        "no greeting before the callee"
-    )
+        for t in params["tools"]
+    } == case.expected_tools()
 
     turns = TurnTaking()
     assert vad_params(turns).stop_secs + user_speech_timeout_s(turns) == pytest.approx(
@@ -620,37 +534,36 @@ async def test_pipecat_primes_with_traced_sdk_calls_and_sends_the_same_context(a
     )
 
 
-@pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
-@pytest.mark.parametrize("model", ["never_calls_the_reads", "never_answers"])
-async def test_pipecat_gives_up_priming_at_the_deadline(model: str, caplog: pytest.LogCaptureFixture) -> None:
-    from openai import AsyncOpenAI
+def _pipecat_request(provider: Any, call: Any) -> dict[str, Any]:
+    """What the pipeline's first completion sends: the system instruction plus the context."""
+    llm = provider.build_llm(call.setup)
+    return llm.get_llm_adapter().get_llm_invocation_params(
+        provider.build_context(call.setup),
+        system_instruction=llm._settings.system_instruction,
+        convert_developer_to_user=False,
+    )
 
+
+@pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
+async def test_pipecat_starts_with_remis_screen_pop_and_an_empty_context() -> None:
     from vamos_voice.providers.pipecat import PipecatProvider
     from vamos_voice.providers.pipecat.services import ServiceConfig
 
-    async def handler(request: httpx.Request) -> httpx.Response:
-        if model == "never_answers":
-            await asyncio.sleep(10)
-        return httpx.Response(200, json=_completion([]))  # a reply with no tool calls
-
+    events: list[str] = []
+    call = await remi_screen_pop_runtime(events, FakeLine(events))
     provider = PipecatProvider(
         ServiceConfig(openai_api_key="sk-test", stt="deepgram", tts="openai"), "gpt-test"
     )
-    provider.openai_client = lambda: AsyncOpenAI(
-        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    )
-    session = remi_gated_session()
-    call = runtime(CASES["remi"], session=session, priming_timeout_s=0.2)
-    await asyncio.wait_for(provider.prime_within_deadline(call, provider.build_context(call.setup)), 2)
-    assert call.start.primed, "the caller is heard either way"
-    assert "get_account" in caplog.text and "releasing the caller" in caplog.text
-    assert session.results == []
-    assert await session.dispatch("take_payment", {}) == MISSING_READS_REFUSAL
+    (system,) = _pipecat_request(provider, call)["messages"]  # no forced read in the context
+    assert system["role"] == "system" and "# Account on screen" in system["content"]
+    assert "You are calling Marcus Sokolov" in system["content"]
+    assert not any(secret in system["content"] for secret in REMI_SECRETS)
+    assert {"sql:accounts", "sql:phones", "sql:contact_attempts"} <= set(events)
 
 
 @pytest.mark.parametrize("agent", AGENT_FIRST_CASES)
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
-async def test_pipecat_opens_the_call_for_an_inbound_agent(agent: str) -> None:
+def test_pipecat_opens_the_call_for_an_inbound_agent(agent: str) -> None:
     from pipecat.frames.frames import LLMMessagesAppendFrame
 
     from vamos_voice.providers.pipecat import PipecatProvider
@@ -660,15 +573,7 @@ async def test_pipecat_opens_the_call_for_an_inbound_agent(agent: str) -> None:
     provider = PipecatProvider(
         ServiceConfig(openai_api_key="sk-test", stt="deepgram", tts="openai"), "gpt-test"
     )
-
-    def no_llm() -> Any:
-        raise AssertionError("an agent with no connect reads must not prime")
-
-    provider.openai_client = no_llm
-    call = runtime(case, session=ScriptedSession(()))
-    context = provider.build_context(call.setup)
-    await provider.prime(call, context)
-    assert context.get_messages() == []
+    call = runtime(case)
     (frame,) = provider.opening_frames(call.setup)
     assert isinstance(frame, LLMMessagesAppendFrame) and frame.run_llm
     assert frame.messages == [{"role": "system", "content": case.policy.opening_instruction}]

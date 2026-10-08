@@ -114,8 +114,6 @@ class HangUpProvider(VoiceProvider):
 
         call.inbound.bind(to_vendor)
         pump = asyncio.create_task(call.inbound.run())
-        call.start.mark_primed()
-        await call.inbound.release()
         assert await call.outbound.send(GREETING, "greeting")
         await asyncio.wait_for(heard.wait(), 5)
         await call.session.dispatch("end_call", {})
@@ -131,8 +129,6 @@ class ListenProvider(HangUpProvider):
             self.heard.append(pcm)
 
         call.inbound.bind(to_vendor)
-        call.start.mark_primed()
-        await call.inbound.release()
         assert await call.outbound.send(GREETING, "greeting")
         await call.inbound.run()  # returns when the caller hangs up
 
@@ -171,7 +167,7 @@ def test_json_caller_end_finalizes_the_call_without_echoing_end() -> None:
 
 
 class FailingProvider(HangUpProvider):
-    """The vendor fails before the call starts (e.g. priming could not reach it)."""
+    """The vendor fails before the call starts (e.g. it could not be reached)."""
 
     async def run_call(self, call: CallRuntime) -> None:
         raise RuntimeError("vendor unreachable")

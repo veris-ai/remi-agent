@@ -139,6 +139,34 @@ async def test_connect_reads_return_no_secrets_and_assess_the_call(pg_dsn, make_
     assert s.tool_log[:3] == ["get_account", "get_account", "get_dialed_phone"]
 
 
+async def test_the_screen_pop_runs_the_connect_reads_and_shows_no_secrets(pg_dsn, make_session) -> None:
+    """The dialer's screen pop: the same three handlers on the call's state, as Remi's own SQL, rendered
+    without the verification secrets; the gates are past the reads and verification is next."""
+    from vamos_agents.remi.screen_pop import HEADING, screen_pop
+
+    seed_world(pg_dsn)
+    s = await make_session()
+    pop = await screen_pop(s.state)
+    text = pop.render()
+    assert pop.heading == HEADING == "Account on screen"
+    for secret in ("1958", "11215", "2234", "7th Ave", "18500", "Ashcombe", "4001"):
+        assert secret not in text
+    assert "Call assessment: the call may proceed." in text and '"call_assessment"' in text
+    assert "Also call" not in text, "the per-read 'next' hints are stale once all three ran"
+    assert s.state.missing_reads == [] and s.tool_log == []
+    assert "error" not in await s.dispatch("verify_right_party", VERIFY)
+
+
+async def test_the_screen_pop_shows_a_call_that_should_not_have_been_placed(pg_dsn, make_session) -> None:
+    from vamos_agents.remi.screen_pop import screen_pop
+
+    seed_world(pg_dsn, phone={"source": "employer"})
+    s = await make_session()
+    text = (await screen_pop(s.state)).render()
+    assert "should NOT have been placed (employer_phone)" in text
+    assert "should not have been placed" in (await s.dispatch("verify_right_party", VERIFY))["error"]
+
+
 async def test_should_not_call_closes_without_verification(pg_dsn, make_session) -> None:
     seed_world(pg_dsn, phone={"source": "employer"})
     s = await make_session()

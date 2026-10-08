@@ -1,9 +1,9 @@
-"""GPT-Live: session.start, the forced priming through the delegated backend, and frame translation.
+"""GPT-Live: session.start, the delegated backend, and frame translation.
 
-GPT-Live has no forced tool choice on the live model but does on its
-Responses backend, which ``session.update`` may change mid-session; these
-tests pin that the provider uses it to force each connect read, then hands
-the backend back to ``auto`` before the caller is heard.
+These pin that the whole configuration (with the agent's screen pop in the
+instructions of both the live model and its backend) goes out in the one
+``session.start``, that the backend's ``tool_choice`` stays ``auto`` (no read
+is ever forced), and that tool runs are answered and continued.
 """
 
 from __future__ import annotations
@@ -15,7 +15,16 @@ import pytest
 from vamos_voice.providers.gpt_live import BACKEND_PREAMBLE, GptLiveProvider
 from vamos_voice.providers.wire import dispatch_json_call
 
-from .fakes import FAKE_INBOUND, HELLO, REMI, FakeLine, FakeVendorSocket, ScriptedSession, runtime
+from .fakes import (
+    FAKE_INBOUND,
+    HELLO,
+    REMI,
+    FakeLine,
+    FakeVendorSocket,
+    ScriptedSession,
+    remi_screen_pop_runtime,
+    runtime,
+)
 from .test_parity import GptLiveScript
 
 
@@ -43,12 +52,9 @@ def test_from_env_defaults_and_overrides() -> None:
     assert (custom.model, custom.backend_model, custom.voice) == ("m", "b", "v")
 
 
-@pytest.mark.parametrize("force", [True, False])
-def test_session_start_puts_tools_on_the_backend(force: bool) -> None:
+def test_session_start_puts_tools_on_the_backend() -> None:
     setup = REMI.setup()
-    start = GptLiveProvider("sk", "gpt-live-1", "gpt-5.6-terra", "marin").session_start(
-        setup, force_tools=force
-    )
+    start = GptLiveProvider("sk", "gpt-live-1", "gpt-5.6-terra", "marin").session_start(setup)
     session = start["session"]
     assert start["type"] == "session.start"
     assert session["model"] == "gpt-live-1"
@@ -60,16 +66,14 @@ def test_session_start_puts_tools_on_the_backend(force: bool) -> None:
     assert backend["model"] == "gpt-5.6-terra"
     assert backend["instructions"] == BACKEND_PREAMBLE + setup.instructions
     assert [t["name"] for t in backend["tools"]] == [t.name for t in setup.tools]
-    assert backend["tool_choice"] == ("required" if force else "auto")
+    assert backend["tool_choice"] == "auto"
     assert backend["parallel_tool_calls"] is False
 
 
 async def test_nothing_but_session_start_goes_out_before_session_started() -> None:
     sock = FakeVendorSocket()
     line = FakeLine()
-    task = asyncio.create_task(
-        provider_on(sock).run_call(runtime(REMI, line, ScriptedSession(REMI.policy.connect_reads)))
-    )
+    task = asyncio.create_task(provider_on(sock).run_call(runtime(REMI, line, ScriptedSession())))
     await sock.wait_for(GptLiveScript.is_setup)
     await line.incoming.put(HELLO)
     await asyncio.sleep(0.05)
@@ -84,65 +88,39 @@ async def test_an_error_before_session_started_fails_the_call() -> None:
         await provider_on(sock).run_call(runtime(REMI))
 
 
-async def test_priming_forces_each_missing_read_on_the_backend_then_returns_to_auto() -> None:
-    reads = REMI.policy.connect_reads
+async def test_the_screen_pop_reaches_the_live_model_and_the_backend_and_nothing_is_forced() -> None:
+    """trial_5sy9iim6ancmrxjd9pp0b: priming never got the reads to run on GPT-Live, so the model had no
+    account and asked for the agency's callback contact. The screen pop is in session.start itself."""
     sock = FakeVendorSocket()
     script = GptLiveScript(sock)
-    line, session = FakeLine(), ScriptedSession(reads)
-    call = runtime(REMI, line, session)
+    line = FakeLine()
+    call = await remi_screen_pop_runtime([], line)
     task = asyncio.create_task(provider_on(sock).run_call(call))
-    await sock.wait_for(script.is_setup)
+    start = await sock.wait_for(script.is_setup)
+    session = start["session"]
+    assert "# Account on screen" in session["instructions"]
+    assert "You are calling Marcus Sokolov" in session["instructions"]
+    assert session["delegation"]["responses"]["instructions"] == BACKEND_PREAMBLE + session["instructions"]
+    assert session["delegation"]["responses"]["tool_choice"] == "auto"
+
     script.ready()
     await line.incoming.put(HELLO)
-    await sock.wait_for(script.is_prime)
-
-    for read in reads:  # the backend runs one call per run (parallel_tool_calls off)
-        script.tool_calls(read)
-        await asyncio.sleep(0.02)
     await sock.wait_for(script.is_caller_audio)
-    assert call.start.primed and [c for c, _ in session.calls] == list(reads)
-
-    kinds = [f["type"] for f in sock.sent]
-    assert kinds[:2] == ["session.start", "session.instructions.append"]
-    choices = [
-        f["session"]["delegation"]["responses"]["tool_choice"]
-        for f in sock.sent
-        if f["type"] == "session.update"
-    ]
-    assert choices == [{"type": "function", "name": reads[1]}, {"type": "function", "name": reads[2]}, "auto"]
-    outputs = [f["item"]["call_id"] for f in sock.sent if f["type"] == "response.item.create"]
-    assert outputs == ["call_1_0", "call_2_0", "call_3_0"]
-    # Every answered run is continued, and the caller's audio follows the last read.
-    assert kinds.count("response.create") == 3
-    assert kinds.index("session.input_audio.append") > max(
-        i for i, k in enumerate(kinds) if k == "session.update"
+    assert [f["type"] for f in sock.sent] == ["session.start", "session.input_audio.append"], (
+        "no instruction append, no tool_choice update: nothing primes the reads"
     )
     task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_a_run_without_calls_while_priming_asks_the_live_model_again() -> None:
-    reads = REMI.policy.connect_reads
+async def test_a_tool_run_is_answered_and_continued() -> None:
     sock = FakeVendorSocket()
     script = GptLiveScript(sock)
-    task = asyncio.create_task(provider_on(sock).run_call(runtime(REMI, FakeLine(), ScriptedSession(reads))))
-    await sock.wait_for(script.is_setup)
-    script.ready()
-    await sock.wait_for(script.is_prime)
-    script.tool_calls()  # a backend run that called nothing
-    await asyncio.sleep(0.05)
-    appends = [f["content"] for f in sock.sent if f["type"] == "session.instructions.append"]
-    assert appends == [REMI.policy.prime_instruction, REMI.policy.reprime_instruction(list(reads))]
-    task.cancel()
-
-
-async def test_after_priming_a_tool_run_is_answered_and_continued() -> None:
-    sock = FakeVendorSocket()
-    script = GptLiveScript(sock)
-    session = ScriptedSession(())
+    session = ScriptedSession()
     task = asyncio.create_task(provider_on(sock).run_call(runtime(FAKE_INBOUND, FakeLine(), session)))
     await sock.wait_for(script.is_setup)
     script.ready()
-    await sock.wait_for(script.is_prime)
+    await sock.wait_for(script.is_request)  # the opening turn
     script.tool_calls("verify_caller")
     await asyncio.sleep(0.05)
     assert sock.sent[-2] == {
@@ -150,9 +128,7 @@ async def test_after_priming_a_tool_run_is_answered_and_continued() -> None:
         "item": {"type": "function_call_output", "call_id": "call_1_0", "output": '{"ok": "verify_caller"}'},
     }
     assert sock.sent[-1] == {"type": "response.create"}
-    assert not any(f["type"] == "session.update" for f in sock.sent), (
-        "no priming: tool_choice is never touched"
-    )
+    assert not any(f["type"] == "session.update" for f in sock.sent), "tool_choice is never touched"
     task.cancel()
 
 
@@ -160,7 +136,7 @@ async def test_end_call_closes_the_line_and_the_session() -> None:
     sock = FakeVendorSocket()
     script = GptLiveScript(sock)
     line = FakeLine()
-    task = asyncio.create_task(provider_on(sock).run_call(runtime(FAKE_INBOUND, line, ScriptedSession(()))))
+    task = asyncio.create_task(provider_on(sock).run_call(runtime(FAKE_INBOUND, line, ScriptedSession())))
     await sock.wait_for(script.is_setup)
     script.ready()
     script.tool_calls("end_call")
@@ -170,24 +146,7 @@ async def test_end_call_closes_the_line_and_the_session() -> None:
 
 
 async def test_cut_off_arguments_are_never_dispatched() -> None:
-    session = ScriptedSession(())
+    session = ScriptedSession()
     assert await dispatch_json_call(session, "make_payment", '{"amount": 12') is None  # type: ignore[arg-type]
     assert session.calls == []
     assert await dispatch_json_call(session, "noop", "") == '{"ok": "noop"}'  # type: ignore[arg-type]
-
-
-async def test_the_priming_deadline_hands_the_backend_back_its_tool_choice() -> None:
-    sock = FakeVendorSocket()
-    script = GptLiveScript(sock)
-    call = runtime(REMI, FakeLine(), ScriptedSession(REMI.policy.connect_reads), priming_timeout_s=0.1)
-    task = asyncio.create_task(provider_on(sock).run_call(call))
-    await sock.wait_for(script.is_setup)
-    script.ready()
-    update = await sock.wait_for(lambda f: f["type"] == "session.update", within=2)
-    assert update == {
-        "type": "session.update",
-        "session": {"delegation": {"type": "responses", "responses": {"tool_choice": "auto"}}},
-    }
-    assert call.start.primed
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)

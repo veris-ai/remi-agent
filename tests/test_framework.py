@@ -1,8 +1,7 @@
-"""The framework on its own: the boundary, discovery, the context, the gate engine, dispatch."""
+"""The framework on its own: the boundary, discovery, the context, the gate engine, dispatch, the screen pop."""
 
 from __future__ import annotations
 
-import asyncio
 import enum
 import importlib
 import logging
@@ -135,20 +134,17 @@ def tiny_session() -> tuple[CallSession, State]:
         explain=lambda s, needed: "Verify the caller first.",
     )
     state = State()
-    return CallSession(state, registry, gates, connect_reads=("verify",)), state
+    return CallSession(state, registry, gates), state
 
 
 async def test_dispatch_gates_redacts_and_never_raises(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO)
     session, state = tiny_session()
-    assert session.missing_reads == ["verify"]
     assert await session.dispatch("balance", {}) == {"error": "Verify the caller first."}
     assert await session.dispatch("nope", {}) == {"error": "There is no tool named nope."}
     assert "invalid arguments" in (await session.dispatch("verify", {}))["error"]
     assert await session.dispatch("verify", {"pin": "9999"}) == {"error": "Wrong PIN."}
-    assert session.missing_reads == ["verify"]
     assert await session.dispatch("verify", {"pin": "1234"}) == {"verified": True}
-    assert session.missing_reads == []
     assert await session.dispatch("balance", {}) == {"balance": 10}
     assert "system problem" in (await session.dispatch("broken", {}))["error"]
     await session.dispatch("end_call", {})
@@ -160,60 +156,52 @@ async def test_dispatch_gates_redacts_and_never_raises(caplog: pytest.LogCapture
     assert session.tool_log[0] == "balance"
 
 
-# --- the priming deadline ---------------------------------------------------------------
+# --- the screen pop ------------------------------------------------------------------------------
 
 
-def test_priming_timeout_comes_from_the_environment() -> None:
-    from vamos_voice.call_start import PRIMING_TIMEOUT_S
-    from vamos_voice.server import priming_timeout_from_env
+class PoppingAgent:
+    """Just enough of an ``AgentSpec`` for the screen pop: it reads, records the read, renders it."""
 
-    assert priming_timeout_from_env({}) == PRIMING_TIMEOUT_S == 6.0
-    assert priming_timeout_from_env({"VAMOS_PRIMING_TIMEOUT_S": "2.5"}) == 2.5
-    for bad in ("0", "-1", "soon", "nan", "inf"):
-        with pytest.raises(ConfigError, match="VAMOS_PRIMING_TIMEOUT_S"):
-            priming_timeout_from_env({"VAMOS_PRIMING_TIMEOUT_S": bad})
+    name = "popper"
 
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
 
-async def test_a_finished_background_task_does_not_end_the_call() -> None:
-    from vamos_voice.providers.wire import run_until_first_done
+    async def screen_pop(self, call: State) -> Any:
+        from vamos_voice.screen_pop import ScreenPop
 
-    order: list[str] = []
-
-    async def background() -> None:
-        order.append("background done")
-
-    async def loop() -> None:
-        await asyncio.sleep(0.05)
-        order.append("loop done")
-
-    await run_until_first_done(background(), main=loop())
-    assert order == ["background done", "loop done"]
+        if self.fail:
+            raise RuntimeError("world unreachable")
+        call.verified = True  # the state records the reads, so the gates see them done
+        return ScreenPop("Caller on screen", "Account ACME-1, verified by caller ID.")
 
 
-async def test_a_failing_background_task_fails_the_call() -> None:
-    from vamos_voice.providers.wire import run_until_first_done
+async def test_the_screen_pop_is_appended_to_the_instructions_and_marks_the_state() -> None:
+    from vamos_voice.screen_pop import run_screen_pop, with_screen_pop
 
-    async def background() -> None:
-        raise RuntimeError("deadline handler broke")
+    session, state = tiny_session()
+    pop = await run_screen_pop(PoppingAgent(), state)  # type: ignore[arg-type]
+    assert state.verified and await session.dispatch("balance", {}) == {"balance": 10}
+    assert with_screen_pop("Be brief.\n", pop) == (
+        "Be brief.\n\n# Caller on screen\n\nAccount ACME-1, verified by caller ID.\n"
+    )
+    assert with_screen_pop("Be brief.", None) == "Be brief."
 
-    with pytest.raises(RuntimeError, match="deadline handler broke"):
-        await run_until_first_done(background(), main=asyncio.sleep(5))
+
+async def test_a_failed_screen_pop_is_logged_and_the_call_goes_on(caplog: pytest.LogCaptureFixture) -> None:
+    from vamos_voice.screen_pop import run_screen_pop
+
+    session, state = tiny_session()
+    assert await run_screen_pop(PoppingAgent(fail=True), state) is None  # type: ignore[arg-type]
+    assert "screen pop failed for popper" in caplog.text and "world unreachable" in caplog.text
+    assert await session.dispatch("balance", {}) == {"error": "Verify the caller first."}
 
 
-async def test_priming_deadline_abandons_only_when_priming_overruns() -> None:
-    from vamos_voice.call_start import CallStart, callee_first
+async def test_an_agent_without_a_screen_pop_shows_nothing() -> None:
+    from vamos_voice.context import CallClock
 
-    policy = callee_first(("read",), "run the read")
-    abandoned: list[bool] = []
+    from .fakes import FAKE_INBOUND
 
-    async def abandon() -> None:
-        abandoned.append(True)
-
-    on_time = CallStart(policy, priming_timeout_s=0.5)
-    on_time.mark_primed()
-    await on_time.priming_deadline(lambda: [], abandon)
-    assert abandoned == []
-
-    late = CallStart(policy, priming_timeout_s=0.05)
-    await late.priming_deadline(lambda: ["read"], abandon)
-    assert abandoned == [True]
+    agent = FAKE_INBOUND.agent()
+    assert await agent.screen_pop(object()) is None  # type: ignore[arg-type]
+    assert FAKE_INBOUND.setup().instructions == agent.instructions(CallClock(agent.call_time()))

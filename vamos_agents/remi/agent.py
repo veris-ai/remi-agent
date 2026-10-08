@@ -4,7 +4,9 @@ Remi works for Tallmere Account Services, LLC and places outbound calls to
 consumers in New York City for the VAmoS Debt Collection benchmark. Its world
 is one Postgres collections database (``DATABASE_URL``), opened in
 ``connect()``; payments go through the gateway functions inside it
-(``payments.PaymentGateway``), so there is no second world client.
+(``payments.PaymentGateway``), so there is no second world client. When the
+call connects, Remi's screen pop (``screen_pop``) reads the account, the
+dialed phone and the contact history before any vendor session opens.
 """
 
 from __future__ import annotations
@@ -18,12 +20,14 @@ from typing import Self
 from vamos_voice.agent import AgentSpec
 from vamos_voice.call_start import callee_first
 from vamos_voice.context import AgentContext, CallClock
+from vamos_voice.screen_pop import ScreenPop
 
-from .call import CONNECT_READS, RemiCall
+from .call import RemiCall
 from .context import CallContext
 from .db import Database
 from .gates import GATES
 from .prompt import render_instructions
+from .screen_pop import screen_pop
 from .tools import REGISTRY
 from .world import Agency
 
@@ -32,13 +36,8 @@ logger = logging.getLogger(__name__)
 DB_CONNECT_ATTEMPTS = 10
 DB_CONNECT_DELAY_S = 3.0
 
-PRIME_INSTRUCTION = (
-    "The call has just connected and nobody has spoken yet. Run the connect-time checks now by calling "
-    "get_account, get_dialed_phone and get_contact_history. Do not say anything."
-)
-
-#: Outbound: run the three connect reads silently, then wait for whoever answers to speak.
-CALLEE_FIRST = callee_first(CONNECT_READS, PRIME_INSTRUCTION)
+#: Outbound: whoever answers speaks first.
+CALLEE_FIRST = callee_first()
 
 
 async def connect_with_retry(connect: Callable[[], Awaitable[Database]]) -> Database:
@@ -95,6 +94,9 @@ class RemiAgent(AgentSpec):
         if self.db is None:
             raise RuntimeError("RemiAgent.connect() must run before a call")
         return RemiCall(self.context, clock, self.db)
+
+    async def screen_pop(self, call: RemiCall) -> ScreenPop:
+        return await screen_pop(call)
 
     def describe(self) -> str:
         return f"remi account={self.context.account_id}"

@@ -3,16 +3,10 @@
 OpenAI Realtime speaks it natively; xAI's Grok Voice Agent API speaks a close
 dialect. ``RealtimeProtocolProvider`` implements the protocol once; a vendor
 subclasses it and supplies ``url``, ``headers`` and ``session_config``, plus
-the capabilities dialects differ on, each declared rather than branched on
-inside the loop:
-
-- ``priming_frames``: how the connect reads are forced. The default is a
-  text-only ``response.create`` with ``tool_choice`` and the priming
-  instruction (OpenAI); a dialect without forced tool choice (Grok) sends a
-  labelled note instead.
-- ``truncates_on_barge_in``: whether ``conversation.item.truncate`` is sent
-  when the caller talks over the agent (OpenAI yes; Grok documents it as
-  unsupported).
+the capability dialects differ on, declared rather than branched on inside
+the loop: ``truncates_on_barge_in``, whether ``conversation.item.truncate`` is
+sent when the caller talks over the agent (OpenAI yes; Grok documents it as
+unsupported).
 
 See ``vamos_voice/providers/openai_realtime`` and ``grok_voice``.
 
@@ -22,17 +16,13 @@ frames and reading them with ``recv()``, because the bench's
 exactly that client's ``send``/``recv``. Input transcription is enabled so
 the caller's words appear in that trace.
 
-Call start (``CALLEE_FIRST``): the session opens with the caller's audio held;
-the vendor's ``priming_frames`` make the model run the connect reads (OpenAI:
-a text-only ``response.create`` with ``tool_choice: "required"``, then any
-skipped read forced by name). Only then is the held audio released, so server
-VAD hears "Hello?" after the reads are done and the reply knows the account.
-Per-response settings (``output_modalities``, ``tool_choice``,
-``instructions``) never touch the session, so the caller's reply is spoken.
-
-Call start (``AGENT_FIRST``): any connect reads are primed the same way, then
-one ``response.create`` asks for the opening turn (the session instructions
-plus the policy's opening instruction), and its audio goes straight out.
+Call start: the opening ``session.update`` carries the instructions with the
+agent's screen pop already in them, so the model knows the account before it
+hears anything. Caller audio flows to the vendor straight after it.
+``CALLEE_FIRST``: nothing more; the vendor's VAD answers the callee's
+"Hello?". ``AGENT_FIRST``: one ``response.create`` asks for the opening turn
+(the session instructions plus the policy's opening instruction), and its
+audio goes straight out.
 
 Turns are the vendor's own: its server VAD decides when the caller has
 finished (and the vendor replies), and when the caller interrupts the agent
@@ -107,30 +97,6 @@ class RealtimeProtocolProvider(VoiceProvider, abc.ABC):
         instructions = f"{setup.instructions}\n\n{setup.start_policy.opening_instruction}"
         return {"type": "response.create", "response": {"instructions": instructions}}
 
-    def priming_frames(self, setup: SessionSetup, missing: list[str], first: bool) -> list[dict[str, Any]]:
-        """What makes the model run the connect reads before the callee is heard.
-
-        ``first`` is the opening request; later ones name the reads still ``missing``.
-        Default: a text-only ``response.create`` forcing a tool call (any, then the missing
-        one by name), carrying the priming instruction. Text-only, because a priming
-        response that may speak can talk for seconds before it calls a read (it did, and
-        the priming deadline cut it off with no read run); the setting is per response,
-        so the session stays audio.
-        """
-        policy = setup.start_policy
-        choice: Any = "required" if first else {"type": "function", "name": missing[0]}
-        note = policy.prime_instruction if first else policy.reprime_instruction(missing)
-        return [
-            {
-                "type": "response.create",
-                "response": {
-                    "tool_choice": choice,
-                    "output_modalities": ["text"],
-                    "instructions": f"{setup.instructions}\n\n{note}",
-                },
-            }
-        ]
-
     async def run_call(self, call: CallRuntime) -> None:
         async with self.connect(self.url(), self.headers()) as ws:
             await _RealtimeCall(self, ws, call).run()
@@ -141,7 +107,6 @@ class _RealtimeCall:
 
     def __init__(self, provider: RealtimeProtocolProvider, ws: Any, call: CallRuntime) -> None:
         self.provider, self.ws, self.call = provider, ws, call
-        self.priming = True
         self.tool_answered = False  # a function_call_output went out in the current response
         self.audio_item: str | None = None
         # Responses this provider asked for, oldest first (popped at response.created), what
@@ -158,15 +123,9 @@ class _RealtimeCall:
         call = self.call
         await self.send({"type": "session.update", "session": self.provider.session_config(call.setup)})
         call.inbound.bind(self.forward)
-        if missing := call.session.missing_reads:
-            await self.send_priming(missing, first=True)
-        else:
-            await self.finish_priming()
-        await run_until_first_done(
-            call.start.priming_deadline(lambda: call.session.missing_reads, self.finish_priming),
-            caller_to_vendor=call.inbound.run(),
-            vendor_to_caller=self.events(),
-        )
+        if call.setup.start_policy.agent_opens:
+            await self.request_response(self.provider.opening_response(call.setup), "opening")
+        await run_until_first_done(caller_to_vendor=call.inbound.run(), vendor_to_caller=self.events())
 
     async def forward(self, pcm: bytes) -> None:
         """Caller audio to the vendor, unchanged: turn detection is the vendor's."""
@@ -220,12 +179,6 @@ class _RealtimeCall:
         self.requested.append((frame, purpose))
         await self.send(frame)
 
-    async def send_priming(self, missing: list[str], first: bool) -> None:
-        for frame in self.provider.priming_frames(self.call.setup, missing, first):
-            if frame.get("type") == "response.create":
-                self.requested.append((frame, "priming"))
-            await self.send(frame)
-
     async def run_tool(self, event: dict[str, Any]) -> None:
         output = await dispatch_json_call(self.call.session, event["name"], event.get("arguments"))
         if output is None:
@@ -244,13 +197,6 @@ class _RealtimeCall:
         if self.active is None and self.requested:
             self.requested.popleft()  # done without a created (never in the GA protocol; be safe)
         self.active = None
-        if self.priming:
-            missing = call.session.missing_reads
-            if missing:
-                await self.send_priming(missing, first=False)
-                return False
-            await self.finish_priming()
-            return False
         if call.session.ended:
             await call.hang_up()
             return True
@@ -260,19 +206,6 @@ class _RealtimeCall:
         if follow is not None:
             await self.request_response(*follow)
         return False
-
-    async def finish_priming(self) -> None:
-        """The reads are done (or there were none, or the deadline passed): release the caller,
-        and open if the agent speaks first. Runs once. A priming response still in flight
-        at the deadline is left to the vendor (its reads count if they arrive)."""
-        if not self.priming:
-            return
-        call = self.call
-        self.priming = False
-        call.start.mark_primed()
-        await call.inbound.release()
-        if call.setup.start_policy.agent_opens:
-            await self.request_response(self.provider.opening_response(call.setup), "opening")
 
     async def barge_in(self) -> None:
         """The caller talks over the agent. Where the vendor supports it, tell it how much of the

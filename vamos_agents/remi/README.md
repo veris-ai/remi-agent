@@ -19,7 +19,8 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 | `AgentSpec` piece | Remi | File |
 |---|---|---|
 | `name` | `remi` (images `bench-e2e/remi-<vendor>`) | `agent.py` |
-| `call_start` | `callee_first(get_account, get_dialed_phone, get_contact_history)`: the three reads run silently, then Remi waits for whoever answers | `agent.py` |
+| `call_start` | `callee_first()`: Remi waits for whoever answers to speak first | `agent.py` |
+| `screen_pop` | the three connect reads (`get_account`, `get_dialed_phone`, `get_contact_history`) run by Remi itself when the call connects, before any vendor session opens; rendered as "Account on screen" in the instructions | `screen_pop.py` |
 | context view | `VERIS_AGENT_CONTEXT` → `CallContext(account_id TAS-NNNNNN, phone_id, call_time in Eastern)`; missing or malformed stops the pod | `context.py` |
 | `call_time()` | the context's `call_time` (World frozen at 2027-02-10) | `agent.py` |
 | `instructions(clock)` | RULES.md distilled into `prompt/instructions.md`, rendered with the call's date and the agency row | `prompt/` |
@@ -34,8 +35,9 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 RULES.md fixes the order of a call's opening, and the gates refuse anything
 early with a message saying what must happen first:
 
-1. Connect reads: account, dialed phone, contact history. The last read
-   returns `call_assessment`: proceed, or should-not-call with reasons
+1. Connect reads: account, dialed phone, contact history, done by the screen
+   pop (below) before anyone speaks. The last read returns `call_assessment`:
+   proceed, or should-not-call with reasons
    (closed status, revoked or missing artificial-voice consent, phone not valid,
    employer phone, 3-in-7 cap, responded this
    week, time-barred notice not yet 14 days old, outside 8 a.m.–9 p.m. ET).
@@ -56,11 +58,37 @@ early with a message saying what must happen first:
 4. Only then the debt, offers and payments. A dispute, cease, attorney,
    bankruptcy, death or SCRA claim stops collection for the rest of the call.
 
+## The screen pop (call start)
+
+A collector's dialer shows the account when the call connects; Remi's does
+too. `screen_pop.screen_pop(call)` runs the three connect-read handlers (the
+tools' own code and SQL) on the call's `RemiCall`, through Remi's database
+connection, so:
+
+- the reads are Remi's SELECTs on `accounts`, `phones` and `contact_attempts`
+  in the World's SQL log, before any vendor session opens and so before the
+  first spoken turn (the grader accepts these or the tool calls);
+- the call's account, phone, history and assessment are set, so the gates
+  start past the connect reads (verification is next, or the should-not-call
+  close);
+- the model gets the results as an "Account on screen" section at the end of
+  its instructions, identical on every vendor: who is being called (and that
+  the agency's callback contact is not that person), the assessment, then each
+  read's result exactly as the tool returns it. Those results carry no date of
+  birth, ZIP, SSN or street: verification stays server-side in
+  `verify_right_party`.
+
+The three read tools stay registered (ungated): the model may re-read, and if
+the screen pop ever fails (it is logged and the call goes on without it), the
+instructions tell the model to run them and the gates name any read missing.
+Remi still decides from what the screen shows (should-not-call, cap reached,
+cease on file) and still says nothing it may not.
+
 ## Tools
 
 | Tool | Gate | What it does |
 |---|---|---|
-| `get_account`, `get_dialed_phone`, `get_contact_history` | none | Connect-time reads, one tool each so the trace shows each. No DOB, ZIP, SSN, street, balance or creditor in the result. |
+| `get_account`, `get_dialed_phone`, `get_contact_history` | none | Connect-time reads, already run by the screen pop; kept for re-reads and as the fallback if it failed. No DOB, ZIP, SSN, street, balance or creditor in the result. |
 | `verify_right_party` | proceeding | Consumer (name + 2 factors) or `estate_rep` (name only, deceased consumer). |
 | `record_verification_refused` | proceeding | The person declined to verify: no disclosure, and the call's disposition is `refused_verification` (`answered_by` null), not `failed_verification`. |
 | `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. A cease or opt-out from an unverified person is refused and pointed at `stop_calling_this_number`. |
@@ -124,6 +152,7 @@ uv run --all-extras pytest -q vamos_agents/remi
   that owns nothing, so the gateway's write guards bind.
 - `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
 - `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, balance effects, no direct writes.
-- `tests/test_smoke.py`: the real server running Remi over `/voice` with a fake provider; startup config errors.
+- `tests/test_tools.py` also runs the screen pop against that Postgres: reads done, gates past them, no secrets in the section, the should-not-call case.
+- `tests/test_smoke.py`: the real server running Remi over `/voice` with a fake provider (the screen pop has run before the provider starts); startup config errors.
 
 Remi also runs in the root parity matrix (`tests/test_parity.py`) on every vendor.

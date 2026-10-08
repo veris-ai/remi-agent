@@ -1,8 +1,10 @@
 """Smoke: the real server running Remi, /health and /voice, a fake provider, a real Postgres.
 
-The fake provider plays a model: it primes the connect reads, tries to talk
-before the callee (which the server must drop), answers after "Hello?",
-logs the call and hangs up. The test is the caller on the /voice socket.
+The server runs Remi's screen pop (the connect reads, against the real
+database) before the provider starts; the fake provider checks the account is
+in its instructions and the gates are past the reads, tries to talk before
+the callee (which the server must drop), answers after "Hello?", logs the call
+and hangs up. The test is the caller on the /voice socket.
 """
 
 from __future__ import annotations
@@ -49,14 +51,10 @@ class FakeProvider(VoiceProvider):
             heard.append(pcm)
             first_heard.set()
 
+        assert_screen_popped(call)
         call.inbound.bind(to_vendor)
         pump = asyncio.create_task(call.inbound.run())
-        for read in ("get_account", "get_dialed_phone", "get_contact_history"):
-            assert "error" not in await call.session.dispatch(read, {})
-        assert not heard, "caller audio must be held while priming"
         await call.outbound.send(TOO_EARLY, "early")  # a model that talks first: must never reach the caller
-        call.start.mark_primed()
-        await call.inbound.release()
         await asyncio.wait_for(first_heard.wait(), 5)
         call.start.mark_callee_spoke()  # the vendor's VAD heard "Hello?"
         await call.outbound.send(GREETING, "greeting")
@@ -68,8 +66,16 @@ class FakeProvider(VoiceProvider):
         pump.cancel()
 
 
+def assert_screen_popped(call: CallRuntime) -> None:
+    """The screen pop ran before the provider: the account is in the instructions, the reads are done."""
+    assert "# Account on screen" in call.setup.instructions
+    assert call.session.state.missing_reads == []
+    assert call.session.state.assessment is not None and call.session.state.assessment.proceed
+    assert call.session.tool_log == [], "the screen pop is not a model tool call"
+
+
 class ListeningProvider(FakeProvider):
-    """Primes, greets after the callee's Hello, then listens until the callee hangs up (no log, no end_call)."""
+    """Greets after the callee's Hello, then listens until the callee hangs up (no log, no end_call)."""
 
     async def run_call(self, call: CallRuntime) -> None:
         heard = asyncio.Event()
@@ -77,12 +83,9 @@ class ListeningProvider(FakeProvider):
         async def to_vendor(pcm: bytes) -> None:
             heard.set()
 
+        assert_screen_popped(call)
         call.inbound.bind(to_vendor)
         pump = asyncio.create_task(call.inbound.run())
-        for read in ("get_account", "get_dialed_phone", "get_contact_history"):
-            assert "error" not in await call.session.dispatch(read, {})
-        call.start.mark_primed()
-        await call.inbound.release()
         await asyncio.wait_for(heard.wait(), 5)
         call.start.mark_callee_spoke()
         await call.outbound.send(GREETING, "greeting")
