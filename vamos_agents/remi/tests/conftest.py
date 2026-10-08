@@ -12,6 +12,7 @@ from vamos_agents.remi.db import Database
 from vamos_voice.context import CallClock
 from vamos_voice.session import CallSession
 
+from . import support
 from .support import CALL_TIME, PostgresUnavailable, app_dsn, start_postgres, stop_postgres
 
 
@@ -61,7 +62,7 @@ async def make_session(
         ctx = call_context or context
         clock = CallClock(ctx.call_time, monotonic=ticks)
         clock.start()
-        return CallSession(RemiCall(ctx, clock, db), RemiAgent.tools, RemiAgent.gates)
+        return CallSession(RemiCall(ctx, clock, db, support.LEDGER), RemiAgent.tools, RemiAgent.gates)
 
     yield build
     for db in opened:

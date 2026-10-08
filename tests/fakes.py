@@ -64,10 +64,18 @@ def _remi(db: Any = None) -> AgentSpec:
     from vamos_agents.remi.world import Agency
 
     context = CallContext("TAS-420101", "ph_420101_1", REMI_CALL_TIME)
-    agent = RemiAgent(context, connect_db=_no_db)
+    agent = RemiAgent(context, connect_db=_no_db, connect_ledger=_no_db)
     agent.agency = Agency("Tallmere Account Services, LLC", "2091843-DCA", "+12125550100", "Dana Whitlock")
     agent.db = db
+    agent.ledger = _NoLedger()
     return agent
+
+
+class _NoLedger:
+    """Parity calls never reach the debt, so nothing here is ever asked of the ledger."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"parity tests never read the ledger ({name})")
 
 
 async def _no_db() -> Any:
@@ -92,8 +100,8 @@ class FakeRemiDb:
 
         self.events.append("sql:accounts")
         return Account(
-            account_id, "con_1", "cred_1", "9921", date(2025, 3, 1), date(2024, 11, 1), 120_000, 0, 0, 0,
-            120_000, None, date(2030, 11, 1), date(2025, 3, 5), None, 60, 12, 2_500, "active",
+            account_id, "con_1", "cred_1", "9921", date(2025, 3, 1), date(2030, 11, 1), date(2025, 3, 5), None,
+            60, 12, 2_500, "active",
         )  # fmt: skip
 
     async def consumer(self, consumer_id: str) -> Any:
@@ -196,7 +204,7 @@ def remi_gated_session() -> RecordingSession:
     from vamos_agents.remi.call import RemiCall
 
     agent = REMI.agent()
-    state = RemiCall(agent.context, CallClock(agent.call_time()), None, None)  # type: ignore[arg-type]
+    state = RemiCall(agent.context, CallClock(agent.call_time()), None, None, None)  # type: ignore[arg-type]
     return RecordingSession(state, agent.tools, agent.gates)
 
 

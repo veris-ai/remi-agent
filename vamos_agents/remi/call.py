@@ -32,6 +32,7 @@ from . import policy
 from .context import CallContext
 from .db import Database, Transaction
 from .gates import Gate
+from .ledger import Debt, Ledger, LedgerUnavailable
 from .payments import SavedMethod
 from .world import Account, Agency, Consumer, ContactAttempt, Creditor, Phone
 
@@ -87,6 +88,7 @@ class RemiCall:
     context: CallContext
     clock: CallClock
     db: Database
+    ledger: Ledger
 
     # Connect-time reads.
     agency: Agency | None = None
@@ -104,6 +106,7 @@ class RemiCall:
     facts_confirmed: set[str] = field(default_factory=set)  # date_of_birth / zip / ssn_last4 that matched
     verification_refused: bool = False  # the person declined to verify (not a failure)
     debt_unlocked: bool = False
+    debt: Debt | None = None  # the account's money, as the ledger last answered (get_debt_details on)
     disclosures_attested: tuple[str, ...] = ()  # what get_debt_details was told had been said
 
     # What the call produced.
@@ -186,6 +189,19 @@ class RemiCall:
     def require_consumer(self) -> None:
         if self.verified_as != "consumer":
             raise ToolError("Only the verified consumer can do this; it is not available to anyone else.")
+
+    async def read_debt(self) -> Debt:
+        """The account's money from the ledger, now; kept on the call. An unreachable ledger is a refusal
+        the model can act on (the balance cannot be stated), and is logged."""
+        try:
+            self.debt = await self.ledger.debt(self.context.account_id)
+        except LedgerUnavailable as err:
+            logger.error("ledger unavailable reading %s: %s", self.context.account_id, err)
+            raise ToolError(
+                "The account's ledger cannot be reached right now, so the balance cannot be read: offer a "
+                "callback or a person (transfer_to_human)."
+            ) from err
+        return self.debt
 
     def stop_collection(self, reason: str) -> None:
         self.collection_stopped_by = self.collection_stopped_by or reason

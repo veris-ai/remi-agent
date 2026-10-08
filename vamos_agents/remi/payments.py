@@ -9,8 +9,9 @@ SQL functions, and ``PaymentGateway`` is Remi's one client for them:
 - ``gateway_tokenize_card`` / ``gateway_tokenize_ach`` save an instrument on the
   account and answer its ``method_id`` (the existing one for a card or bank
   account already saved there);
-- ``gateway_charge`` charges a saved method, writes the ``payments`` row and,
-  when approved, applies the amount to the account's balance itself.
+- ``gateway_charge`` charges a saved method and writes the ``payments`` row.
+  It does not know the balance: posting an approved charge to the account's
+  loan is the ledger's (``ledger.FineractLedger.post_payment``).
 
 The world decides approve or decline; a decline is a normal result, not an
 error. An invalid instrument, unknown method or out-of-range amount raises
@@ -95,11 +96,7 @@ class Charge:
 
 
 class PaymentGateway:
-    """The gateway functions, called inside the tool's own transaction on the collections database.
-
-    Bound to one ``Transaction`` so a charge and the writes that depend on it
-    (the account's status, a settlement's arrangement) land together or not at all.
-    """
+    """The gateway functions, called inside the tool's own transaction on the collections database."""
 
     def __init__(self, tx: Transaction) -> None:
         self._tx = tx

@@ -11,8 +11,13 @@ system's payment gateway (``payments.PaymentGateway``). Card and bank numbers
 are accepted only by ``add_payment_method``, are declared ``redact`` (never
 logged), go only to the gateway, and are never stored or echoed: the result
 carries the gateway's ``method_id`` and the last four digits. The gateway
-decides approve or decline, and applies an approved charge to the balance
-itself; Remi sets only the account's ``status``.
+decides approve or decline.
+
+The money itself is the ledger's (``ledger.FineractLedger``): every amount is
+checked against the balance it holds, an approved charge is then posted to the
+account's loan (and a one-payment settlement's remainder written off), and a
+payment plan re-ages the loan, its schedule the one the ledger computed. The
+agreement, its method and its confirmation letter stay rows in Postgres.
 
 Amounts cross the tool boundary in dollars, both ways (arguments as numbers
 like 250.00, results as "$250.00"): a model handed cents reads them out as
@@ -21,7 +26,7 @@ dollars. The World's rows and the gateway calls stay in cents.
 
 from __future__ import annotations
 
-from dataclasses import replace
+import logging
 from datetime import date
 from typing import Any, Literal
 
@@ -33,8 +38,11 @@ from .. import policy
 from ..call import RemiCall, new_id
 from ..db import Transaction
 from ..gates import COLLECTION, Gate
+from ..ledger import Debt, LedgerUnavailable, Posting
 from ..payments import BankDetails, CardDetails, Charge, PaymentGateway, SavedMethod
 from .catalog import REGISTRY
+
+logger = logging.getLogger(__name__)
 
 TRANSFER_HINT = "No counter-offer is allowed; a person can handle it (transfer_to_human)."
 
@@ -50,6 +58,10 @@ DECLINE_NEXT = (
     "promise to pay: an exact amount on an exact date no more than 14 days out (record_promise)."
 )
 DOLLARS = "In dollars, e.g. 250.00."
+NOT_POSTED = (
+    "The charge went through, but posting it to the account's ledger failed: the payment is safe and a person "
+    "will post it. Do not charge again."
+)
 
 
 def _cents(amount: float) -> int:
@@ -121,6 +133,14 @@ class PaymentArgs(BaseModel):
     )
 
 
+async def _open_debt(session: RemiCall) -> Debt:
+    """The account's money, now; refused when the ledger says nothing is owed."""
+    debt = await session.read_debt()
+    if not debt.open or debt.balance_cents <= 0:
+        raise ToolError("Nothing is owed on this account now: it has been paid or settled.")
+    return debt
+
+
 @REGISTRY.tool(PaymentArgs, requires=Gate.DEBT_UNLOCKED, tags=(COLLECTION,))
 async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     """Charge a saved payment method today, after stating the amount and getting the consumer's agreement:
@@ -130,45 +150,40 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     session.require_consumer()
     account = session.account
     assert account is not None
-    balance = account.current_balance_cents
+    debt = await _open_debt(session)
+    balance = debt.balance_cents
     amount = _cents(args.amount)
     if args.purpose == "pay_in_full" and amount != balance:
         raise ToolError(f"Paying in full means exactly the balance, {policy.dollars(balance)}.")
-    if args.purpose == "settlement" and (refusal := policy.settlement_refusal(account, amount, 1)):
+    if args.purpose == "settlement" and (refusal := policy.settlement_refusal(account, balance, amount, 1)):
         raise ToolError(f"{refusal.detail}. {TRANSFER_HINT}")
     saved = _method(session, args.method_id)
     if saved.method_id in session.declined_methods:
         raise ToolError(f"The {_described(saved)} was already declined on this call. {DECLINE_NEXT}")
-    status = "paid" if args.purpose == "pay_in_full" else "settled"
     async with session.db.transaction() as tx:
         charge = await PaymentGateway(tx).charge(
             method_id=saved.method_id, amount_cents=amount, at=session.clock.now()
         )
-        if charge.approved:
-            await tx.update("accounts", account.account_id, {"status": status})
-            if status == "settled":
-                today = session.clock.today()
-                await _insert_arrangement(
-                    session,
-                    tx,
-                    "settlement_lump",
-                    amount,
-                    [{"due_on": today.isoformat(), "amount_cents": amount}],
-                    saved,
-                )
     if not charge.approved:
         session.declined_methods.add(saved.method_id)
         return _declined(saved, charge)
-    # The gateway applied the charge to the balance in the same transaction.
-    session.account = replace(
-        account,
-        current_balance_cents=balance - amount,
-        paid_since_charge_off_cents=account.paid_since_charge_off_cents + amount,
-        last_payment_on=session.clock.today(),
-        status=status,
-    )
-    session.outcomes.add(status)
-    return {
+    settled = args.purpose == "settlement"
+    posted = await _post(session, debt, saved, charge, amount, settle=settled)
+    if settled:
+        today = session.clock.today()
+        async with session.db.transaction() as tx:
+            await _insert_arrangement(
+                session,
+                tx,
+                new_id("arr"),
+                "settlement_lump",
+                amount,
+                [{"due_on": today.isoformat(), "amount_cents": amount}],
+                saved,
+            )
+    outcome = "settled" if settled else "paid"
+    session.outcomes.add(outcome)
+    result: dict[str, Any] = {
         "status": "approved",
         "amount": policy.dollars(amount),
         "remaining_balance": policy.dollars(balance - amount),
@@ -177,6 +192,47 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
         "allowed_now": "The charge went through, and the consumer does not know that yet: the outcome reaches "
         "them before anything else, including logging or ending the call.",
     }
+    if not posted:
+        result["ledger"] = NOT_POSTED
+    return result
+
+
+async def _post(
+    session: RemiCall, debt: Debt, saved: SavedMethod, charge: Charge, amount: int, *, settle: bool
+) -> bool:
+    """Post an approved charge to the account's loan, then, for a settlement, write off the rest. Each
+    step is tried twice: the posting carries the gateway's payment id, so a second try never posts twice.
+    False (and logged) when the ledger stayed out of reach: the money was taken and a person must post it."""
+    today = session.clock.today()
+    for attempt in (1, 2):
+        try:
+            posting: Posting = await session.ledger.post_payment(
+                debt,
+                amount_cents=amount,
+                on=today,
+                kind=saved.kind,
+                payment_id=charge.payment_id,
+                processor_ref=charge.processor_ref,
+            )
+            if settle:
+                await session.ledger.write_off(
+                    debt,
+                    on=today,
+                    external_id=f"wo_{charge.payment_id}",
+                    note=f"Settled for {policy.dollars(amount)}: payment {charge.payment_id}.",
+                )
+            logger.info(
+                "posted %s to loan %s as transaction %s",
+                charge.payment_id,
+                debt.loan_id,
+                posting.transaction_id,
+            )
+            return True
+        except LedgerUnavailable as err:
+            logger.error(
+                "posting %s to %s failed (attempt %d): %s", charge.payment_id, debt.account_id, attempt, err
+            )
+    return False
 
 
 def _declined(saved: SavedMethod, charge: Charge) -> dict[str, Any]:
@@ -215,28 +271,40 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
     account = session.account
     assert account is not None
     today = session.clock.today()
+    debt = await _open_debt(session)
+    balance = debt.balance_cents
     if args.kind == "settlement_instalments":
         if args.total is None:
             raise ToolError("A settlement in instalments needs its agreed total.")
         total = _cents(args.total)
         refusal = policy.settlement_refusal(
-            account, total, args.instalment_count
+            account, balance, total, args.instalment_count
         ) or policy.first_due_refusal(args.first_due_on, today)
     else:
         if args.kind == "hardship_plan" and not session.hardship_recorded:
             raise ToolError(
                 "A hardship plan needs the hardship recorded first (record_flag kind 'hardship')."
             )
-        total = account.current_balance_cents
+        total = balance
         refusal = policy.plan_refusal(
-            account, args.instalment_count, args.first_due_on, today, hardship=args.kind == "hardship_plan"
+            account,
+            balance,
+            args.instalment_count,
+            args.first_due_on,
+            today,
+            hardship=args.kind == "hardship_plan",
         )
     if refusal:
         raise ToolError(f"{refusal.detail}. {TRANSFER_HINT}")
     saved = _method(session, args.method_id)
-    instalments = policy.monthly_instalments(total, args.instalment_count, args.first_due_on)
-    async with session.db.transaction() as tx:
-        await _insert_arrangement(session, tx, args.kind, total, instalments, saved)
+    arrangement_id = new_id("arr")
+    if args.kind == "settlement_instalments":
+        # An agreement until its last instalment: the ledger is written off only when it is paid.
+        instalments = policy.monthly_instalments(total, args.instalment_count, args.first_due_on)
+        async with session.db.transaction() as tx:
+            await _insert_arrangement(session, tx, arrangement_id, args.kind, total, instalments, saved)
+    else:
+        instalments = await _re_age(session, debt, args, arrangement_id, saved)
     session.outcomes.add("settlement_plan" if args.kind == "settlement_instalments" else args.kind)
     return {
         "created": args.kind,
@@ -249,9 +317,39 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
     }
 
 
+async def _re_age(
+    session: RemiCall, debt: Debt, args: ArrangementArgs, arrangement_id: str, saved: SavedMethod
+) -> list[dict[str, Any]]:
+    """Put the balance on the plan in the ledger, then record the agreement with the ledger's own schedule;
+    if the agreement cannot be recorded, the re-age is undone, so the two never disagree."""
+    aged = await session.ledger.re_age(
+        debt, instalments=args.instalment_count, first_due_on=args.first_due_on, external_id=arrangement_id
+    )
+    session.debt = aged
+    schedule = [i for i in aged.schedule if i.due_on >= args.first_due_on and i.paid_cents < i.amount_cents]
+    instalments = [
+        {"due_on": i.due_on.isoformat(), "amount_cents": i.amount_cents - i.paid_cents} for i in schedule
+    ]
+    try:
+        if len(instalments) != args.instalment_count:
+            raise ToolError(
+                f"The ledger produced {len(instalments)} payments, not {args.instalment_count}: no plan was set up. "
+                "Offer a person (transfer_to_human)."
+            )
+        async with session.db.transaction() as tx:
+            await _insert_arrangement(
+                session, tx, arrangement_id, args.kind, debt.balance_cents, instalments, saved
+            )
+    except BaseException:
+        await session.ledger.undo_re_age(aged)
+        raise
+    return instalments
+
+
 async def _insert_arrangement(
     session: RemiCall,
     tx: Transaction,
+    arrangement_id: str,
     kind: str,
     total: int,
     instalments: list[dict[str, Any]],
@@ -260,7 +358,7 @@ async def _insert_arrangement(
     await tx.insert(
         "arrangements",
         {
-            "arrangement_id": new_id("arr"),
+            "arrangement_id": arrangement_id,
             "account_id": session.context.account_id,
             "kind": kind,
             "total_cents": total,
@@ -289,10 +387,9 @@ async def record_promise(session: RemiCall, args: PromiseArgs) -> dict[str, Any]
     if refusal := policy.ptp_refusal(args.due_on, session.clock.today()):
         raise ToolError(refusal.detail)
     amount = _cents(args.amount)
-    if amount > account.current_balance_cents:
-        raise ToolError(
-            f"A promise cannot exceed the balance, {policy.dollars(account.current_balance_cents)}."
-        )
+    debt = await _open_debt(session)
+    if amount > debt.balance_cents:
+        raise ToolError(f"A promise cannot exceed the balance, {policy.dollars(debt.balance_cents)}.")
     async with session.db.transaction() as tx:
         await tx.insert(
             "promises_to_pay",

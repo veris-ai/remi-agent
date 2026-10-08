@@ -17,8 +17,10 @@ from typing import Any
 import pytest
 
 from tests.guards import assert_no_wall_clock
+from vamos_agents.remi.ledger import LedgerUnavailable
 from vamos_voice.session import CallSession
 
+from . import support
 from .support import (
     CALL_TIME,
     DECLINED_CARD,
@@ -384,17 +386,6 @@ REMI_001_POSTCONDITIONS = [
         },
         "table": "payments",
     },
-    {
-        "key": "TAS-420101",
-        "op": "update",
-        "set": {
-            "current_balance_cents": 0,
-            "last_payment_on": "2027-02-10",
-            "paid_since_charge_off_cents": 18500,
-            "status": "paid",
-        },
-        "table": "accounts",
-    },
 ]
 #: What the answer key ignores (WORLD.md): generated ids, timestamps, agent_name; plus the
 #: contact row's duration_s and summary, which the assertion checks in words, not by value, and
@@ -483,6 +474,20 @@ async def test_remi_001_pay_in_full_leaves_exactly_the_answer_key_rows(
     )  # the call's clock, not wall time
     assert GOOD_CARD not in all_text(pg_dsn)
     assert GOOD_CARD not in caplog.text and "[redacted]" in caplog.text
+    # The money moved in the ledger, not in Postgres: the approved charge posted once, on the call's date.
+    assert support.LEDGER.writes == [
+        (
+            "repayment",
+            {
+                "amount_cents": 18500,
+                "on": date(2027, 2, 10),
+                "kind": "card",
+                "payment_id": payment["payment_id"],
+                "receipt": payment["processor_ref"],
+            },
+        )
+    ]
+    assert (support.LEDGER.balance("TAS-420101"), support.LEDGER.status("TAS-420101")) == (0, 600)
 
 
 @pytest.mark.parametrize(
@@ -525,12 +530,8 @@ async def test_card_decline_tells_the_model_why_then_a_promise(
     assert [(p["status"], p["decline_code"]) for p in rows(pg_dsn, "payments")] == [
         ("declined", decline_code)
     ]
-    account = rows(pg_dsn, "accounts")[0]
-    assert (account["status"], account["current_balance_cents"], account["last_payment_on"]) == (
-        "active",
-        18500,
-        None,
-    )
+    assert rows(pg_dsn, "accounts")[0]["status"] == "active"
+    assert support.LEDGER.writes == [] and support.LEDGER.balance("TAS-420101") == 18500
 
 
 async def test_card_decline_then_ach_pays_in_full(pg_dsn, make_session) -> None:
@@ -569,12 +570,11 @@ async def test_card_decline_then_ach_pays_in_full(pg_dsn, make_session) -> None:
         ("approved", 18500),
         ("declined", 18500),
     ]
-    account = rows(pg_dsn, "accounts")[0]
-    assert (account["status"], account["current_balance_cents"], account["paid_since_charge_off_cents"]) == (
-        "paid",
-        0,
-        18500,
-    )
+    assert rows(pg_dsn, "accounts")[0]["status"] == "active"  # paid is the ledger's: the loan is closed
+    assert [(op, w["amount_cents"], w["kind"]) for op, w in support.LEDGER.writes] == [
+        ("repayment", 18500, "ach")
+    ]
+    assert (support.LEDGER.balance("TAS-420101"), support.LEDGER.status("TAS-420101")) == (0, 600)
 
 
 async def test_ach_decline_is_reported(pg_dsn, make_session) -> None:
@@ -672,12 +672,106 @@ async def test_lump_settlement_writes_payment_arrangement_and_letter(pg_dsn, mak
         75000,
         method_id,
     )
-    account = rows(pg_dsn, "accounts")[0]
-    assert (account["status"], account["current_balance_cents"], account["paid_since_charge_off_cents"]) == (
-        "settled",
-        25000,
-        75000,
+    assert rows(pg_dsn, "accounts")[0]["status"] == "active"  # settled is the ledger's: written off
+    assert [(op, w.get("amount_cents")) for op, w in support.LEDGER.writes] == [
+        ("repayment", 75000),
+        ("writeoff", 25000),
+    ]
+    assert support.LEDGER.writes[1][1]["external_id"] == f"wo_{payment['payment_id']}"
+    assert (support.LEDGER.balance("TAS-420101"), support.LEDGER.status("TAS-420101")) == (0, 601)
+
+
+async def test_an_approved_charge_the_ledger_cannot_take_is_reported_not_hidden(
+    pg_dsn, make_session, monkeypatch, caplog
+) -> None:
+    """The money was taken: the result says so, says it was not posted, and the failure is logged."""
+    seed_world(pg_dsn)
+    s = await make_session()
+    await unlocked(s)
+    method_id = await card(s)
+
+    async def unreachable(*_a: Any, **_k: Any) -> Any:
+        raise LedgerUnavailable("the ledger could not be reached: connection refused")
+
+    monkeypatch.setattr(support.LEDGER, "post_payment", unreachable)
+    paid = await s.dispatch(
+        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
     )
+    assert paid["status"] == "approved" and "posting it to the account's ledger failed" in paid["ledger"]
+    assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
+    assert support.LEDGER.balance("TAS-420101") == 18500
+    assert "posting pay_" in caplog.text
+
+
+async def test_nothing_is_taken_from_an_account_the_ledger_has_closed(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await unlocked(s)
+    await s.dispatch("take_payment", {"method_id": await card(s), "amount": 185.00, "purpose": "pay_in_full"})
+    again = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": 185.00, "purpose": "pay_in_full"}
+    )
+    assert "Nothing is owed" in again["error"]
+    promise = await s.dispatch("record_promise", {"amount": 10.00, "due_on": "2027-02-19", "method": "check"})
+    assert "Nothing is owed" in promise["error"]
+
+
+async def test_an_unreachable_ledger_is_a_refusal_the_model_can_act_on(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    support.LEDGER.unavailable = True
+    await verified(s)
+    refused = await s.dispatch("get_debt_details", DISCLOSED)
+    assert "ledger cannot be reached" in refused["error"] and "transfer_to_human" in refused["error"]
+
+
+async def test_a_plan_re_ages_the_loan_and_records_the_ledgers_schedule(pg_dsn, make_session) -> None:
+    seed_world(
+        pg_dsn, account={"current_balance_cents": 26500, "max_plan_months": 12, "min_instalment_cents": 2500}
+    )
+    s = await make_session()
+    await unlocked(s)
+    method_id = await card(s)
+    plan = {"kind": "plan", "method_id": method_id, "instalment_count": 6, "first_due_on": "2027-03-01"}
+    made = await s.dispatch("create_arrangement", plan)
+    assert [i["amount"] for i in made["instalments"]] == ["$44.17"] * 5 + ["$44.15"]
+    (arr,) = rows(pg_dsn, "arrangements")
+    assert (arr["kind"], arr["total_cents"]) == ("plan", 26500)
+    assert [i["amount_cents"] for i in arr["instalments"]] == [4417] * 5 + [4415]
+    assert arr["instalments"][-1]["due_on"] == "2027-08-01"
+    ((op, write),) = support.LEDGER.writes
+    assert (op, write["instalments"], write["first_due_on"], write["external_id"]) == (
+        "reAge",
+        6,
+        date(2027, 3, 1),
+        arr["arrangement_id"],
+    )
+    again = await s.dispatch("create_arrangement", {**plan, "instalment_count": 3})
+    assert "once a day" in again["error"]
+    assert len(rows(pg_dsn, "arrangements")) == 1
+
+
+async def test_a_plan_the_agency_cannot_record_is_taken_back_from_the_ledger(
+    pg_dsn, make_session, monkeypatch
+) -> None:
+    from vamos_agents.remi.tools import money
+
+    seed_world(pg_dsn, account={"current_balance_cents": 26500})
+    s = await make_session()
+    await unlocked(s)
+    method_id = await card(s)
+
+    async def refused(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(money, "_insert_arrangement", refused)
+    failed = await s.dispatch(
+        "create_arrangement",
+        {"kind": "plan", "method_id": method_id, "instalment_count": 6, "first_due_on": "2027-03-01"},
+    )
+    assert "error" in failed
+    assert [op for op, _ in support.LEDGER.writes] == ["reAge", "undoReAge"]
+    assert rows(pg_dsn, "arrangements") == []
 
 
 async def test_hardship_plan_needs_the_hardship_recorded_first(pg_dsn, make_session) -> None:

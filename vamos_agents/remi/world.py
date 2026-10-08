@@ -2,6 +2,8 @@
 
 Plain frozen dataclasses: the policy reasons over these, the tools return
 selected fields of them to the model, and nothing here touches the database.
+An account's money is not here: it is the account's loan in the ledger
+(``ledger.Debt``), read when the debt is.
 Secrets (date of birth, ZIP, SSN last four, street) live on ``Consumer`` so the
 verifier can compare against them; ``get_account`` never returns them.
 """
@@ -84,13 +86,6 @@ class Account:
     creditor_id: str
     original_account_last4: str
     placed_on: date
-    charge_off_on: date
-    charge_off_balance_cents: int
-    interest_since_charge_off_cents: int
-    fees_since_charge_off_cents: int
-    paid_since_charge_off_cents: int
-    current_balance_cents: int
-    last_payment_on: date | None
     sol_expires_on: date
     validation_notice_mailed_on: date
     time_barred_notice_mailed_on: date | None

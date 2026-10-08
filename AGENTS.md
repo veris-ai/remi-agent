@@ -57,7 +57,7 @@ vamos_voice/                      # the framework: never imports an agent
     livekit/                          # LiveKit Agents in a room on the image's own livekit-server
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
-    agent.py ... tests/           # world clients (db; payments via the World's gateway), and its own tests
+    agent.py ... tests/           # world clients (db; payments via the World's gateway; the Fineract ledger), and its own tests
 tests/                            # framework tests, the agents x vendors parity matrix,
   fake_inbound.py                 # a test-only inbound agent (not a pack, never shipped)
 Dockerfile                        # ONE recipe: ARG AGENT x ARG VENDOR
@@ -576,7 +576,9 @@ Agents:
 | Variable | Agent | Meaning |
 |---|---|---|
 | `VERIS_AGENT_CONTEXT` keys `account_id`, `phone_id`, `call_time` | remi | Required; `TAS-NNNNNN`, a `phones` row id, ISO-8601 with offset. |
-| `DATABASE_URL` | remi | Postgres DSN of the collections twin (bench-injected). Required. Payments go through the payment gateway inside that database (`gateway_tokenize_card`, `gateway_tokenize_ach`, `gateway_charge`), so Remi has no other world variable. |
+| `DATABASE_URL` | remi | Postgres DSN of the collections twin (bench-injected). Required. Payments are charged through the payment gateway inside that database (`gateway_tokenize_card`, `gateway_tokenize_ach`, `gateway_charge`). |
+| `FINERACT_API_BASE` | remi | The Fineract twin's host (bench-injected): the ledger holding every account's money. Required. |
+| `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | remi | Fineract's Basic pair and tenant (bench-wide candidate-env, set by utility-bench `publish world`). Required. |
 
 Any missing required variable stops the process at startup (exit 2) with a message naming it.
 
@@ -646,12 +648,15 @@ string instead of the key (veris-sandbox
 `benchmark/api/app/services/engine_runner.py`, `_image_candidate_spec`).
 `image.env` holds only per-candidate, non-secret config (the framing, model and voice names).
 
-The bench injects `DATABASE_URL` (the collections twin's DSN) and
-`VERIS_AGENT_CONTEXT`. That is Remi's whole world: the debt-collection World has
-no Stripe twin (Stripe does not serve debt collection agencies), and payments go
-through the payment gateway inside the collections database (utility-bench
-`collections_bench/WORLD.md`, "The payment gateway"). No `STRIPE_*` value is
-needed on the bench; one left over in candidate-env is ignored.
+The bench injects `DATABASE_URL` (the collections twin's DSN), `FINERACT_API_BASE`
+(the Fineract twin's host) and `VERIS_AGENT_CONTEXT`, and its bench-wide
+candidate-env holds `FINERACT_USER`, `FINERACT_PASSWORD` and `FINERACT_TENANT`.
+That is Remi's whole world: the debt-collection World has no Stripe twin (Stripe
+does not serve debt collection agencies); payments are charged through the
+payment gateway inside the collections database and posted to the account's
+Fineract loan (utility-bench `collections_bench/WORLD.md`, "The payment gateway"
+and "Money: the Fineract ledger"). No `STRIPE_*` value is needed on the bench; one
+left over in candidate-env is ignored.
 
 Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 
@@ -799,7 +804,9 @@ uv run ruff check . && uv run ruff format --check .
   (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`) loaded with
   the World's own SQL (schema, payment gateway, rows; vendored in
   `tests/fixtures/collections_world.sql`, resynced with `resync_world.sh`),
-  the payment gateway client against the real gateway functions, `/voice` smoke test.
+  the payment gateway client against the real gateway functions, the Fineract
+  ledger client on the wire (and, opt-in, against a real Fineract:
+  `REMI_TEST_FINERACT_URL`), `/voice` smoke test.
 
 No test calls a paid API.
 
