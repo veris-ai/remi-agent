@@ -230,7 +230,10 @@ class LiveKitProvider(VoiceProvider):
         return Agent(instructions=call.setup.instructions, tools=tools)
 
     def token(self, room: str, identity: str) -> str:
-        grants = api.VideoGrants(room_join=True, room=room, can_publish=True, can_subscribe=True)
+        # The agent session publishes its state as participant attributes.
+        grants = api.VideoGrants(
+            room_join=True, room=room, can_publish=True, can_subscribe=True, can_update_own_metadata=True
+        )
         return (
             api.AccessToken(self.config.room_api_key, self.config.room_api_secret)
             .with_identity(identity)
