@@ -211,6 +211,19 @@ def confirmation_letter_due_by(created_on: date) -> date:
 # --- money ---------------------------------------------------------------------------
 
 
+def dollars(cents: int) -> str:
+    """An amount as the model sees and says it: "$1,430.00". The World stores cents; tools never return them."""
+    sign = "-" if cents < 0 else ""
+    whole, part = divmod(abs(cents), 100)
+    return f"{sign}${whole:,}.{part:02d}"
+
+
+def to_cents(amount: float) -> int | None:
+    """Dollars from a tool argument to whole cents; None when it has fractions of a cent."""
+    cents = round(amount * 100)
+    return cents if abs(amount * 100 - cents) < 1e-6 else None
+
+
 def pct_of(balance_cents: int, pct: int) -> int:
     """A percentage of a balance in whole cents, rounded up: a floor is never undercut by rounding."""
     return math.ceil(balance_cents * pct / 100)
@@ -263,7 +276,7 @@ def plan_refusal(
     if months > max_months:
         return Refusal("term_above_maximum", f"this account allows at most {max_months} monthly payments")
     if balance // months < minimum:
-        return Refusal("instalment_below_minimum", f"each payment must be at least {minimum} cents")
+        return Refusal("instalment_below_minimum", f"each payment must be at least {dollars(minimum)}")
     return first_due_refusal(first_due_on, today)
 
 
@@ -285,7 +298,7 @@ def settlement_refusal(account: Account, total_cents: int, instalments: int) -> 
     floor = settlement_floor_cents(account, instalments)
     if total_cents < floor:
         return Refusal(
-            "below_floor", f"this settlement must total at least {floor} cents; a person must handle less"
+            "below_floor", f"this settlement must total at least {dollars(floor)}; a person must handle less"
         )
     if total_cents >= account.current_balance_cents:
         return Refusal("not_a_settlement", "that is the full balance: use pay in full or a payment plan")

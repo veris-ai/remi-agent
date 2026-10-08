@@ -84,7 +84,9 @@ class RemiCall:
 
     # Opening progress.
     verified_as: str | None = None  # "consumer" | "estate_rep"
-    verification_failures: int = 0
+    verification_failures: int = 0  # wrong answers (a wrong name or fact)
+    name_confirmed: bool = False  # they said, or said yes to, the consumer's name
+    facts_confirmed: set[str] = field(default_factory=set)  # date_of_birth / zip / ssn_last4 that matched
     verification_refused: bool = False  # the person declined to verify (not a failure)
     debt_unlocked: bool = False
     disclosures_attested: tuple[str, ...] = ()  # what get_debt_details was told had been said
@@ -134,28 +136,32 @@ class RemiCall:
         return Gate.DEBT_UNLOCKED
 
     def refusal_for(self, needed: Gate) -> str:
-        """What must happen before a tool needing ``needed`` may run."""
+        """Why a tool needing ``needed`` may not run yet: the rule, not words to say."""
         if self.assessment is None:
-            return f"Run the connect-time reads first: {', '.join(self.missing_reads)}."
+            return f"The connect-time reads come first: {', '.join(self.missing_reads)}."
         if not self.assessment.proceed:
             return (
                 "This call should not have been placed ("
                 + ", ".join(self.assessment.should_not_call_reasons)
-                + "). Say nothing about why you called. Close the call courteously, then call "
-                "log_contact_attempt with answered_by 'none', then end_call."
+                + "): nothing about why you called may be said, and the only tools left are "
+                "log_contact_attempt (answered_by 'none') and end_call."
             )
         if self.verification_failures >= MAX_VERIFICATION_ATTEMPTS:
-            return "Verification failed three times. Disclose nothing; end the call politely, log it, and end_call."
+            return "Verification failed three times: nothing may be disclosed, and the call ends."
         if needed >= Gate.VERIFIED and self.verified_as is None:
-            return "Confirm the right party first with verify_right_party. Say nothing about the debt until then."
+            return (
+                "Not verified yet: the debt, and anything that depends on it, waits until verify_right_party "
+                "confirms this is the consumer."
+            )
         return (
-            "Give the required disclosures first, then call get_debt_details: the recording disclosure, the "
-            "mini-Miranda, and when due the time-barred disclosure and the alternative-format statement."
+            "The debt comes only after the required disclosures and get_debt_details: the recording "
+            "disclosure, the mini-Miranda, and when due the time-barred disclosure and the alternative-format "
+            "statement."
         )
 
     def require_consumer(self) -> None:
         if self.verified_as != "consumer":
-            raise ToolError("Only the verified consumer can do this.")
+            raise ToolError("Only the verified consumer can do this; it is not available to anyone else.")
 
     def stop_collection(self, reason: str) -> None:
         self.collection_stopped_by = self.collection_stopped_by or reason
@@ -258,7 +264,7 @@ class RemiCall:
 
         Its summary is the recorded facts, then the model's ``notes`` (None: it never logged the call)."""
         if self.account is None or self.phone is None:
-            raise ToolError("Run the connect-time reads first.")
+            raise ToolError("The connect-time reads come first.")
         answered_by = self.recorded_answerer(answered_by)
         number_is_wrong = number_is_wrong or self.number_stop == "wrong_number"
         disposition = self.disposition_for(answered_by)

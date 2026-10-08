@@ -13,6 +13,10 @@ logged), go only to the gateway, and are never stored or echoed: the result
 carries the gateway's ``method_id`` and the last four digits. The gateway
 decides approve or decline, and applies an approved charge to the balance
 itself; Remi sets only the account's ``status``.
+
+Amounts cross the tool boundary in dollars, both ways (arguments as numbers
+like 250.00, results as "$250.00"): a model handed cents reads them out as
+dollars. The World's rows and the gateway calls stay in cents.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from ..gates import COLLECTION, Gate
 from ..payments import BankDetails, CardDetails, Charge, PaymentGateway, SavedMethod
 from .catalog import REGISTRY
 
-TRANSFER_HINT = "Do not counter-offer. Offer to transfer them to a person (transfer_to_human)."
+TRANSFER_HINT = "No counter-offer is allowed; a person can handle it (transfer_to_human)."
 
 #: What each gateway decline code means, in words the model can say to the consumer.
 DECLINE_REASONS = {
@@ -41,10 +45,18 @@ DECLINE_REASONS = {
     "expired_card": "the card has expired",
 }
 DECLINE_NEXT = (
-    "Tell the consumer the payment did not go through and why; never say it succeeded, and do not charge "
-    "this method again. You may offer another card or a bank account (add_payment_method, then take_payment), "
-    "or a promise to pay: an exact amount on an exact date no more than 14 days out (record_promise)."
+    "The payment did not go through; it is never described as having gone through, and this method is not "
+    "charged again. Still open: another card or a bank account (add_payment_method, then take_payment), or a "
+    "promise to pay: an exact amount on an exact date no more than 14 days out (record_promise)."
 )
+DOLLARS = "In dollars, e.g. 250.00."
+
+
+def _cents(amount: float) -> int:
+    cents = policy.to_cents(amount)
+    if cents is None:
+        raise ToolError("Amounts are dollars and cents, e.g. 250.00.")
+    return cents
 
 
 class PaymentMethodArgs(BaseModel):
@@ -76,12 +88,12 @@ async def add_payment_method(session: RemiCall, args: PaymentMethodArgs) -> dict
         gateway = PaymentGateway(tx)
         if args.method == "card":
             if not args.card_number or not args.cvc or args.exp_month is None or args.exp_year is None:
-                raise ToolError("Ask for the full card number, expiry month and year, and security code.")
+                raise ToolError("A card needs the full number, expiry month and year, and security code.")
             card = CardDetails(args.card_number, args.exp_month, args.exp_year, args.cvc)
             saved = await gateway.tokenize_card(**common, card=card, at=session.clock.now())
         else:
             if not args.routing_number or not args.account_number:
-                raise ToolError("Ask for the 9-digit routing number and the account number.")
+                raise ToolError("A bank account needs the 9-digit routing number and the account number.")
             bank = BankDetails(args.routing_number, args.account_number)
             saved = await gateway.tokenize_ach(**common, bank=bank, at=session.clock.now())
     session.payment_methods[saved.method_id] = saved
@@ -103,7 +115,7 @@ def _described(saved: SavedMethod) -> str:
 
 class PaymentArgs(BaseModel):
     method_id: str = Field(description="The method_id add_payment_method returned.")
-    amount_cents: int = Field(gt=0)
+    amount: float = Field(gt=0, description=DOLLARS)
     purpose: Literal["pay_in_full", "settlement"] = Field(
         description="pay_in_full: the whole current balance. settlement: one payment of an agreed settlement."
     )
@@ -119,9 +131,10 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     account = session.account
     assert account is not None
     balance = account.current_balance_cents
-    if args.purpose == "pay_in_full" and args.amount_cents != balance:
-        raise ToolError(f"Paying in full means exactly the balance, {balance} cents.")
-    if args.purpose == "settlement" and (refusal := policy.settlement_refusal(account, args.amount_cents, 1)):
+    amount = _cents(args.amount)
+    if args.purpose == "pay_in_full" and amount != balance:
+        raise ToolError(f"Paying in full means exactly the balance, {policy.dollars(balance)}.")
+    if args.purpose == "settlement" and (refusal := policy.settlement_refusal(account, amount, 1)):
         raise ToolError(f"{refusal.detail}. {TRANSFER_HINT}")
     saved = _method(session, args.method_id)
     if saved.method_id in session.declined_methods:
@@ -129,7 +142,7 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     status = "paid" if args.purpose == "pay_in_full" else "settled"
     async with session.db.transaction() as tx:
         charge = await PaymentGateway(tx).charge(
-            method_id=saved.method_id, amount_cents=args.amount_cents, at=session.clock.now()
+            method_id=saved.method_id, amount_cents=amount, at=session.clock.now()
         )
         if charge.approved:
             await tx.update("accounts", account.account_id, {"status": status})
@@ -139,8 +152,8 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
                     session,
                     tx,
                     "settlement_lump",
-                    args.amount_cents,
-                    [{"due_on": today.isoformat(), "amount_cents": args.amount_cents}],
+                    amount,
+                    [{"due_on": today.isoformat(), "amount_cents": amount}],
                     saved,
                 )
     if not charge.approved:
@@ -149,16 +162,16 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     # The gateway applied the charge to the balance in the same transaction.
     session.account = replace(
         account,
-        current_balance_cents=balance - args.amount_cents,
-        paid_since_charge_off_cents=account.paid_since_charge_off_cents + args.amount_cents,
+        current_balance_cents=balance - amount,
+        paid_since_charge_off_cents=account.paid_since_charge_off_cents + amount,
         last_payment_on=session.clock.today(),
         status=status,
     )
     session.outcomes.add(status)
     return {
         "status": "approved",
-        "amount_cents": args.amount_cents,
-        "remaining_balance_cents": balance - args.amount_cents,
+        "amount": policy.dollars(amount),
+        "remaining_balance": policy.dollars(balance - amount),
         "paid_with": _described(saved),
     }
 
@@ -170,7 +183,7 @@ def _declined(saved: SavedMethod, charge: Charge) -> dict[str, Any]:
         "decline_code": code,
         "reason": DECLINE_REASONS.get(code, code.replace("_", " ")),
         "declined": _described(saved),
-        "next": DECLINE_NEXT,
+        "allowed_now": DECLINE_NEXT,
     }
 
 
@@ -183,8 +196,10 @@ class ArrangementArgs(BaseModel):
     first_due_on: date = Field(
         description="Date of the first payment, YYYY-MM-DD; later ones fall on the same day each month."
     )
-    total_cents: int | None = Field(
-        None, gt=0, description="settlement_instalments only: the agreed settlement total."
+    total: float | None = Field(
+        None,
+        gt=0,
+        description="settlement_instalments only: the agreed settlement total, in dollars, e.g. 900.00.",
     )
 
 
@@ -198,16 +213,16 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
     assert account is not None
     today = session.clock.today()
     if args.kind == "settlement_instalments":
-        if args.total_cents is None:
-            raise ToolError("A settlement in instalments needs total_cents.")
-        total = args.total_cents
+        if args.total is None:
+            raise ToolError("A settlement in instalments needs its agreed total.")
+        total = _cents(args.total)
         refusal = policy.settlement_refusal(
             account, total, args.instalment_count
         ) or policy.first_due_refusal(args.first_due_on, today)
     else:
         if args.kind == "hardship_plan" and not session.hardship_recorded:
             raise ToolError(
-                "Record the hardship first (record_flag kind 'hardship'), then offer the hardship plan."
+                "A hardship plan needs the hardship recorded first (record_flag kind 'hardship')."
             )
         total = account.current_balance_cents
         refusal = policy.plan_refusal(
@@ -222,8 +237,10 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
     session.outcomes.add("settlement_plan" if args.kind == "settlement_instalments" else args.kind)
     return {
         "created": args.kind,
-        "total_cents": total,
-        "instalments": instalments,
+        "total": policy.dollars(total),
+        "instalments": [
+            {"due_on": i["due_on"], "amount": policy.dollars(i["amount_cents"])} for i in instalments
+        ],
         "charged_to": _described(saved),
         "confirmation_letter": "queued",
     }
@@ -254,7 +271,7 @@ async def _insert_arrangement(
 
 
 class PromiseArgs(BaseModel):
-    amount_cents: int = Field(gt=0)
+    amount: float = Field(gt=0, description=DOLLARS)
     due_on: date = Field(description="The exact date, YYYY-MM-DD, no more than 14 days from today.")
     method: Literal["card", "ach", "check"]
 
@@ -268,15 +285,18 @@ async def record_promise(session: RemiCall, args: PromiseArgs) -> dict[str, Any]
     assert account is not None
     if refusal := policy.ptp_refusal(args.due_on, session.clock.today()):
         raise ToolError(refusal.detail)
-    if args.amount_cents > account.current_balance_cents:
-        raise ToolError(f"A promise cannot exceed the balance, {account.current_balance_cents} cents.")
+    amount = _cents(args.amount)
+    if amount > account.current_balance_cents:
+        raise ToolError(
+            f"A promise cannot exceed the balance, {policy.dollars(account.current_balance_cents)}."
+        )
     async with session.db.transaction() as tx:
         await tx.insert(
             "promises_to_pay",
             {
                 "promise_id": new_id("ptp"),
                 "account_id": account.account_id,
-                "amount_cents": args.amount_cents,
+                "amount_cents": amount,
                 "due_on": args.due_on,
                 "method": args.method,
                 "created_at": session.clock.now(),
@@ -285,7 +305,7 @@ async def record_promise(session: RemiCall, args: PromiseArgs) -> dict[str, Any]
     session.outcomes.add("ptp")
     return {
         "recorded": "promise",
-        "amount_cents": args.amount_cents,
+        "amount": policy.dollars(amount),
         "due_on": args.due_on.isoformat(),
         "method": args.method,
     }

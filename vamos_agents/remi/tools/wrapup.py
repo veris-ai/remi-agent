@@ -46,7 +46,7 @@ async def schedule_callback(session: RemiCall, args: CallbackArgs) -> dict[str, 
         raise ToolError("A callback must be in the future.")
     if not policy.in_calling_window(when):
         raise ToolError(
-            "Callbacks must be after 8:00 a.m. and before 9:00 p.m. Eastern. Ask for another time."
+            "Callbacks must be after 8:00 a.m. and before 9:00 p.m. Eastern; that time is outside the window."
         )
     if not args.consumer_requested and when < session.clock.now() + policy.CAP_WINDOW:
         raise ToolError(
@@ -106,7 +106,7 @@ async def transfer_to_human(session: RemiCall, args: TransferArgs) -> dict[str, 
     return {
         "transferred": True,
         "reason": args.reason,
-        "next": "Tell the consumer you are connecting them to a person now, then log_contact_attempt and end_call.",
+        "allowed_now": "A person takes over from here; the call ends with log_contact_attempt and end_call.",
     }
 
 
@@ -167,4 +167,4 @@ async def end_call(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     if not session.contact_logged:
         raise ToolError("Call log_contact_attempt first.")
     session.ended = True
-    return {"ended": True, "next": "Say nothing more."}
+    return {"ended": True, "allowed_now": "Nothing more is said."}

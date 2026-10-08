@@ -47,7 +47,7 @@ class RemiGates:
         if COLLECTION in tool.tags and call.collection_stopped_by:
             return (
                 f"Collection stopped on this call ({call.collection_stopped_by.replace('_', ' ')}). "
-                "State no amount, make no offer and ask for no payment."
+                "No amount, offer or payment request is allowed for the rest of the call."
             )
         return None
 

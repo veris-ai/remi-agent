@@ -468,7 +468,7 @@ async def test_cartesia_tool_error_results_are_flagged() -> None:
             "type": "client_tool_call",
             "tool_call_id": "c1",
             "tool_name": "take_payment",
-            "parameters": {"amount_cents": 100},
+            "parameters": {"amount": 1.00},
         }
     )
     await until(lambda: any(f.get("type") == "client_tool_result" for f in sock.frames()))
