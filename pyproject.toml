@@ -20,6 +20,7 @@ dependencies = [
 # --- agents ---
 remi = [
     "psycopg[binary]>=3.3,<3.4",
+    "httpx>=0.28,<0.29",  # the Fineract ledger client (ledger.py)
 ]
 
 # --- vendors (the speech-to-speech vendors need nothing beyond the core: raw websockets) ---
