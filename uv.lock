@@ -1795,6 +1795,7 @@ pipecat = [
     { name = "pipecat-ai", extra = ["deepgram", "websocket"], marker = "extra == 'extra-12-vamos-agents-pipecat' or (extra == 'extra-12-vamos-agents-grok-cascade' and extra == 'extra-12-vamos-agents-livekit') or (extra == 'extra-12-vamos-agents-huggingface' and extra == 'extra-12-vamos-agents-livekit')" },
 ]
 remi = [
+    { name = "httpx" },
     { name = "psycopg", extra = ["binary"] },
 ]
 vapi = [
@@ -1818,6 +1819,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'elevenlabs'", specifier = ">=0.28,<0.29" },
     { name = "httpx", marker = "extra == 'fluxions'", specifier = ">=0.28,<0.29" },
     { name = "httpx", marker = "extra == 'huggingface'", specifier = ">=0.28,<0.29" },
+    { name = "httpx", marker = "extra == 'remi'", specifier = ">=0.28,<0.29" },
     { name = "httpx", marker = "extra == 'vapi'", specifier = ">=0.28,<0.29" },
     { name = "livekit", marker = "extra == 'livekit'", specifier = ">=1.1,<1.2" },
     { name = "livekit-agents", marker = "extra == 'livekit'", specifier = ">=1.8,<1.9" },
