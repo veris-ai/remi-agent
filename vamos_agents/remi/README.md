@@ -169,3 +169,20 @@ uv run --all-extras pytest -q vamos_agents/remi
 - `tests/test_smoke.py`: the real server running Remi over `/voice` with a fake provider (the screen pop has run before the provider starts); startup config errors.
 
 Remi also runs in the root parity matrix (`tests/test_parity.py`) on every vendor.
+
+## Vendors
+
+One image per vendor, `bench-e2e/remi-<vendor>` (AGENTS.md section 13 has each
+candidate's `trace_adapter`, candidate-env secrets and `image.env`). Every
+vendor gets the same instructions (with the screen pop), the same tools and
+the same gates; only the voice stack differs.
+
+| Vendor | Stack | Turn taking |
+|---|---|---|
+| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; Silero barge-in |
+| `huggingface` | Whisper large-v3 → `openai/gpt-oss-120b:groq` → Kokoro (fal-ai), all on HF inference | Silero + 0.8 s of silence; Silero barge-in |
+| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI Smart Turn; Silero barge-in |
+| `gradium` | gradbot: Gradium STT → `gpt-4.1-mini` → Gradium TTS | gradbot's own |
+
+On the cascades Remi's first words wait for the callee's first finished turn
+(callee first), and on gradbot for its first transcribed words.

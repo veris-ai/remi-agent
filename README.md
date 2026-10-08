@@ -8,7 +8,7 @@ under `vamos_agents/` that supplies its prompt, tools, rules and world clients.
 
 | Agent | Benchmark | Calls | Vendors |
 |---|---|---|---|
-| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Grok Voice, GPT-Live, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS) |
+| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Grok Voice, GPT-Live, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS), Mistral (Voxtral cascade), Hugging Face (Whisper → gpt-oss → Kokoro), Grok STT + TTS cascade, Gradium (gradbot) |
 
 ## Quickstart
 
@@ -28,7 +28,9 @@ curl localhost:8008/health
 
 `AGENT` is a folder under `vamos_agents/`; `VENDOR` is one of `openai_realtime`,
 `grok_voice` (xAI, key `XAI_API_KEY`), `gpt_live` (OpenAI GPT-Live),
-`gemini_live`, `pipecat`. Vendors differ in what they support (barge-in
+`gemini_live`, `pipecat`, and the cascades `mistral` (`MISTRAL_API_KEY`), `huggingface`
+(`HF_TOKEN`), `grok_cascade` (`XAI_API_KEY`, plus `OPENAI_API_KEY` for its default
+`gpt-4.1-mini`) and `gradium` (`GRADIUM_API_KEY`, `OPENAI_API_KEY`). Vendors differ in what they support (barge-in
 truncation, VAD settings); what the agent knows when the call connects does
 not: the agent's own screen pop puts it in every vendor's instructions
 (AGENTS.md section 6). AGENTS.md section 10 lists the
