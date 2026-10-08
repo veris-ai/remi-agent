@@ -143,21 +143,39 @@ async def test_insurance_is_a_dispute_reason(pg_dsn, make_session) -> None:
     assert [letter["kind"] for letter in rows(pg_dsn, "letters")] == ["substantiation_instructions"]
 
 
-def test_the_prompt_lists_only_the_permitted_pre_verification_answers() -> None:
+def rendered_prompt() -> str:
     context = CallContext("TAS-420101", "ph_420101_1", datetime.fromisoformat(CALL_TIME))
     agency = Agency("Tallmere Account Services, LLC", "2091843-DCA", "+12125550100", "Dana Whitlock")
-    text = render_instructions(context, agency)
+    return render_instructions(context, agency)
+
+
+def test_the_greeting_is_one_short_turn_asking_for_the_consumer_by_full_name() -> None:
+    text = rendered_prompt()
+    greeting = text.split("\n1. ")[1].split("\n2. ")[0]
+    assert "this is Remi with Tallmere Account Services, an\n   automated assistant." in greeting
+    assert "May I speak with <the consumer's full name from get_account>?" in greeting
+    # The pre-verification answers are not part of the opening.
+    assert "Do not say\n   why you are calling, that it is a personal business matter" in greeting
+
+
+def test_the_prompt_answers_pre_verification_questions_one_at_a_time() -> None:
+    text = rendered_prompt()
     section = text.split("# Before verification")[1].split("# Someone other than the consumer")[0]
     for permitted in (
-        "automated (virtual) assistant",
-        "personal business matter",
+        "never re-introduce yourself",
+        "Never recite this list",
+        '"Yes, I\'m an automated assistant."',
+        "personal business matter I can only discuss with <the consumer's",
         "the number the agency has on file",
-        "2 1 2, 5 5 5, 0 1 0 0, answered by a person",
+        "2 1 2, 5 5 5, 0 1 0 0, answered by a\n  person",
         "Never the debt, the creditor, an amount",
         "record_verification_refused",
         "stop_calling_this_number",
     ):
         assert permitted in section, permitted
+    refusal = section.split("- They will not verify")[1].split("- They ask you to stop calling")[0]
+    assert "give the callback number 2 1 2, 5 5 5, 0 1 0 0" in refusal
+    assert "then say goodbye. Only then log_contact_attempt" in refusal
 
 
 # --- the bench's cases, scripted, on the whole World ---------------------------------------------
