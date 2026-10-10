@@ -627,13 +627,15 @@ async def test_gateway_validation_errors_reach_the_model_and_write_nothing(
     assert bad_luhn not in caplog.text and GOOD_CARD not in caplog.text
 
 
-async def test_settlement_below_the_floor_goes_to_a_person(pg_dsn, make_session) -> None:
+async def test_settlement_below_the_floor_is_countered_then_goes_to_a_person(pg_dsn, make_session) -> None:
     seed_world(pg_dsn, account={"current_balance_cents": 200000, "charge_off_balance_cents": 200000})
     s = await make_session()
     await unlocked(s)
     pm = await card(s)
     refused = await s.dispatch("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"})
-    assert "transfer_to_human" in refused["error"]
+    assert "counter-offer an amount from the minimum up to the full balance" in refused["error"]
+    assert "No counter-offer is allowed" not in refused["error"]
+    assert "transfer_to_human" in refused["error"]  # if the consumer will not reach the minimum
     await s.dispatch("transfer_to_human", {"reason": "settlement_below_floor"})
     assert (
         await s.dispatch(

@@ -103,8 +103,8 @@ class TransferArgs(BaseModel):
 @REGISTRY.tool(TransferArgs, requires=Gate.PROCEEDING)
 async def transfer_to_human(session: RemiCall, args: TransferArgs) -> dict[str, Any]:
     """Transfer the call to a person: on the first request for a person, and without being asked when the
-    consumer wants a settlement below the minimum, a plan outside the house rules, or mentions active military
-    duty. Never loop back to offering your own help first."""
+    consumer will not bring a settlement up to the minimum after your counter-offer, wants a plan outside the
+    house rules, or mentions active military duty. Never loop back to offering your own help first."""
     session.transferred = True
     return {
         "transferred": True,
