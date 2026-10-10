@@ -3,8 +3,9 @@
 All four need the debt unlocked (verified consumer, disclosures given) and are
 refused once collection has stopped on the call. The house rules in
 ``policy`` decide every amount, term and date; a request outside them comes
-back as an error telling the model to offer a person instead of inventing a
-counter-offer.
+back as an error telling the model what to do instead: a settlement under the
+minimum is countered with an amount from the minimum up to the balance, and
+any other term outside the rules goes to a person.
 
 Cards and bank accounts are saved and charged only through the collections
 system's payment gateway (``payments.PaymentGateway``). Card and bank numbers
@@ -45,6 +46,16 @@ from .catalog import REGISTRY
 logger = logging.getLogger(__name__)
 
 TRANSFER_HINT = "No counter-offer is allowed; a person can handle it (transfer_to_human)."
+COUNTER_HINT = (
+    "Don't accept it: counter-offer an amount from the minimum up to the full balance. If the consumer will not "
+    "reach the minimum, a person can handle it (transfer_to_human)."
+)
+
+
+def _refused(refusal: policy.Refusal) -> ToolError:
+    """A settlement under the minimum is countered on the call; any other term outside the rules goes to a person."""
+    return ToolError(f"{refusal.detail}. {COUNTER_HINT if refusal.code == 'below_floor' else TRANSFER_HINT}")
+
 
 #: What each gateway decline code means, in words the model can say to the consumer.
 DECLINE_REASONS = {
@@ -156,7 +167,7 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     if args.purpose == "pay_in_full" and amount != balance:
         raise ToolError(f"Paying in full means exactly the balance, {policy.dollars(balance)}.")
     if args.purpose == "settlement" and (refusal := policy.settlement_refusal(account, balance, amount, 1)):
-        raise ToolError(f"{refusal.detail}. {TRANSFER_HINT}")
+        raise _refused(refusal)
     saved = _method(session, args.method_id)
     if saved.method_id in session.declined_methods:
         raise ToolError(f"The {_described(saved)} was already declined on this call. {DECLINE_NEXT}")
@@ -295,7 +306,7 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
             hardship=args.kind == "hardship_plan",
         )
     if refusal:
-        raise ToolError(f"{refusal.detail}. {TRANSFER_HINT}")
+        raise _refused(refusal)
     saved = _method(session, args.method_id)
     arrangement_id = new_id("arr")
     if args.kind == "settlement_instalments":
