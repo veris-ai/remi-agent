@@ -33,7 +33,6 @@ from .context import CallContext
 from .db import Database, Transaction
 from .gates import Gate
 from .ledger import Debt, Ledger, LedgerUnavailable
-from .negotiation import NegotiationState
 from .payments import SavedMethod
 from .world import Account, Agency, Consumer, ContactAttempt, Creditor, Phone
 
@@ -127,10 +126,6 @@ class RemiCall:
     letters_queued: set[str] = field(default_factory=set)
     payment_methods: dict[str, SavedMethod] = field(default_factory=dict)  # tokenized on this call
     declined_methods: set[str] = field(default_factory=set)
-    negotiation: NegotiationState | None = None  # the settlement engine's state, from the first offer on
-    #: The one-time settlement the engine last accepted: a one-shot authorization. take_payment claims it
-    #: before its first await and gives it back only after a decline or a charge that never happened.
-    settlement_agreed_cents: int | None = None
     charge_in_flight: bool = False  # a take_payment holds the call's one charge until the gateway answers
     #: The call's charge once the gateway approved it (or its answer was lost): there is never a second.
     charged_payment_id: str | None = None

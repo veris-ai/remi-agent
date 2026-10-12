@@ -292,6 +292,7 @@ async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str
     if consumer:
         today = session.clock.today()
         result["limits"] = {
+            "settlement_one_payment_min": usd(policy.settlement_floor_cents(account, debt.balance_cents, 1)),
             "settlement_instalments_min": usd(policy.settlement_floor_cents(account, debt.balance_cents, 2)),
             "settlement_max_instalments": policy.SETTLEMENT_INSTALMENTS_MAX,
             "plan_months": [policy.PLAN_MIN_MONTHS, account.max_plan_months],

@@ -3,13 +3,15 @@
 All four need the debt unlocked (verified consumer, disclosures given) and are
 refused once collection has stopped on the call. The house rules in
 ``policy`` decide every amount, term and date; a request outside them comes
-back as an error telling the model what to do instead (a person, for terms
-outside the rules). A one-time settlement is only an amount the settlement
-engine accepted on this call (``tools.settlement``, ``negotiation``), and that
-acceptance authorizes one charge: ``take_payment`` claims it before anything is
-awaited and gives it back only after a decline or a charge that never happened.
-A call takes at most one charge, so an approved charge the ledger could not post
-is never taken twice.
+back as an error telling the model what to do instead.
+
+The model negotiates a one-time settlement itself; code only bounds it.
+``take_payment`` refuses a settlement below the one-payment minimum or at or
+above the balance, whatever was said on the call. A call takes at most one
+charge: ``take_payment`` reserves it before anything is awaited (a concurrent
+duplicate is refused), keeps it once the gateway approves, even when the ledger
+posting then fails, and releases it only after a decline or a charge that never
+happened. So an agreed amount is never charged twice.
 
 Cards and bank accounts are saved and charged only through the collections
 system's payment gateway (``payments.PaymentGateway``). Card and bank numbers
@@ -50,15 +52,17 @@ from .catalog import REGISTRY
 logger = logging.getLogger(__name__)
 
 TRANSFER_HINT = "No counter-offer is allowed; a person can handle it (transfer_to_human)."
-NOT_AGREED = (
-    "A one-time settlement is only the amount evaluate_settlement_offer accepted on this call: call it with the "
-    "consumer's offer and say only what it returns."
+BELOW_MINIMUM_HINT = (
+    "Nothing was charged. Don't accept less than the minimum; if the consumer can't reach it, a person can "
+    "handle it (transfer_to_human)."
 )
 
 
 def _refused(refusal: policy.Refusal) -> ToolError:
-    """Terms outside the house rules go to a person."""
-    return ToolError(f"{refusal.detail}. {TRANSFER_HINT}")
+    """A settlement under the minimum is not accepted; any other term outside the rules goes to a person."""
+    return ToolError(
+        f"{refusal.detail}. {BELOW_MINIMUM_HINT if refusal.code == 'below_floor' else TRANSFER_HINT}"
+    )
 
 
 #: What each gateway decline code means, in words the model can say to the consumer.
@@ -163,15 +167,14 @@ async def _open_debt(session: RemiCall) -> Debt:
 @REGISTRY.tool(PaymentArgs, requires=Gate.DEBT_UNLOCKED, tags=(COLLECTION,))
 async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     """Charge a saved payment method today, after stating the amount and getting the consumer's agreement:
-    the full balance (pay_in_full) or a one-payment settlement evaluate_settlement_offer accepted. The
+    the full balance (pay_in_full) or a one-payment settlement at or above the settlement minimum. The
     gateway approves or declines. A decline is real: tell the consumer it did not go through and why, never
     that it succeeded."""
     session.require_consumer()
     account = session.account
     assert account is not None
     amount = _cents(args.amount)
-    authorization = _claim_charge(session, args.purpose, amount)  # before the first await
-    charged = False
+    _claim_charge(session)  # before the first await
     try:
         debt = await _open_debt(session)
         balance = debt.balance_cents
@@ -186,12 +189,9 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
             raise ToolError(f"The {_described(saved)} was already declined on this call. {DECLINE_NEXT}")
         charge = await _charge(session, saved, amount)
         if charge.approved:
-            charged = True
             session.charged_payment_id = charge.payment_id
     finally:
-        session.charge_in_flight = False
-        if not charged and authorization is not None:
-            session.settlement_agreed_cents = authorization
+        session.charge_in_flight = False  # the charge is kept by charged_payment_id, or released
     if not charge.approved:
         session.declined_methods.add(saved.method_id)
         return _declined(saved, charge)
@@ -225,26 +225,14 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     return result
 
 
-def _refuse_after_charge(session: RemiCall) -> None:
-    """A call takes at most one charge: refused while one is in flight or once one went through."""
+def _claim_charge(session: RemiCall) -> None:
+    """Reserve the call's one charge without awaiting, so a concurrent take_payment sees it taken: refused
+    while another is in flight or once one went through. The caller releases it unless the gateway charged."""
     if session.charged_payment_id is not None:
         raise ToolError(ALREADY_CHARGED)
     if session.charge_in_flight:
         raise ToolError("A payment is already being processed on this call: wait for its result.")
-
-
-def _claim_charge(session: RemiCall, purpose: str, amount: int) -> int | None:
-    """Reserve the call's one charge, and for a settlement claim the engine's one-shot authorization, without
-    awaiting, so a concurrent take_payment sees it taken. Returns the claimed authorization (None for a payment
-    in full); the caller gives it back unless the gateway charged."""
-    _refuse_after_charge(session)
-    authorization = None
-    if purpose == "settlement":
-        if amount != session.settlement_agreed_cents:
-            raise ToolError(NOT_AGREED)
-        authorization, session.settlement_agreed_cents = session.settlement_agreed_cents, None
     session.charge_in_flight = True
-    return authorization
 
 
 async def _charge(session: RemiCall, saved: SavedMethod, amount: int) -> Charge:

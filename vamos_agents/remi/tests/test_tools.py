@@ -112,6 +112,23 @@ async def test_debt_tools_wait_for_verification_and_disclosures(pg_dsn, make_ses
     )
 
 
+def test_the_model_negotiates_a_settlement_within_code_bounds() -> None:
+    """No settlement engine tool and no prescribed ladder: the prompt leaves the negotiation to the model,
+    and every money tool it names is registered (so every vendor gets the same set)."""
+    import re
+    from importlib.resources import files
+
+    from vamos_agents.remi.tools import REGISTRY
+
+    names = {t.name for t in REGISTRY.specs()}
+    text = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
+    assert "evaluate_settlement_offer" not in names and "evaluate_settlement_offer" not in text
+    assert "negotiate it as you judge best" in text and "Never reveal the minimum" in text
+    assert "counter-offer" not in text and not re.search(r"\b(midpoint|halfway|twice)\b", text)
+    for tool in ("get_debt_details", "add_payment_method", "take_payment", "transfer_to_human"):
+        assert tool in names and tool in text
+
+
 async def test_english_only_no_language_step(pg_dsn, make_session) -> None:
     """No language tool exists, the opening never asks for one, and the debt unlocks without it."""
     from vamos_agents.remi.tools import REGISTRY
@@ -621,39 +638,34 @@ async def test_gateway_validation_errors_reach_the_model_and_write_nothing(
     over = await s.dispatch(
         "take_payment", {"method_id": await card(s), "amount": 185.01, "purpose": "settlement"}
     )
-    assert "evaluate_settlement_offer" in over["error"]  # not agreed: refused before the gateway
+    assert "full balance" in over["error"]  # refused by policy before the gateway is reached
     assert [m["last4"] for m in rows(pg_dsn, "payment_methods")] == ["4242"]
     assert rows(pg_dsn, "payments") == []
     assert bad_luhn not in caplog.text and GOOD_CARD not in caplog.text
 
 
-async def test_settlement_below_the_floor_is_countered_twice_then_transferred(pg_dsn, make_session) -> None:
+async def test_settlement_below_the_floor_is_refused_then_goes_to_a_person(pg_dsn, make_session) -> None:
     seed_world(pg_dsn, account={"current_balance_cents": 200000, "charge_off_balance_cents": 200000})
     s = await make_session()
     details = await unlocked(s)
-    assert "settlement_one_payment_min" not in details["limits"]  # the floor never reaches the model
+    assert details["limits"]["settlement_one_payment_min"] == "$1,400.00"  # Remi knows its minimum
     pm = await card(s)
     refused = await s.dispatch("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"})
-    assert "evaluate_settlement_offer" in refused["error"]
-    first = await s.dispatch("evaluate_settlement_offer", {"offer": 800.00})
-    assert (first["decision"], first["amount"]) == ("counter", "$1,400.00")  # mid $1,400, the floor too
-    assert "1,400" in first["say"] and "%" not in first["say"]
-    second = await s.dispatch("evaluate_settlement_offer", {"offer": 800.00})
-    assert (second["decision"], second["amount"]) == ("counter", "$1,400.00")  # mid $1,100 -> the floor
-    third = await s.dispatch("evaluate_settlement_offer", {"offer": 800.00})
-    assert third["decision"] == "transfer" and "amount" not in third
-    # The transfer is terminal: a later offer at the floor, or at the balance, is not negotiated, and
-    # nothing is charged, whether as a settlement or a payment in full.
+    assert (
+        "at least $1,400.00" in refused["error"] and "Don't accept less than the minimum" in refused["error"]
+    )
+    assert "counter" not in refused["error"].lower()  # no prescribed negotiation
+    assert "transfer_to_human" in refused["error"]  # if the consumer can't reach the minimum
+    await s.dispatch("transfer_to_human", {"reason": "settlement_below_floor"})
+    # The transfer is terminal: nothing more is negotiated or charged, at the minimum or in full.
     for later in (
-        ("evaluate_settlement_offer", {"offer": 1400.00}),
-        ("evaluate_settlement_offer", {"offer": 2000.00}),
-        ("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"}),
         ("take_payment", {"method_id": pm, "amount": 1400.00, "purpose": "settlement"}),
         ("take_payment", {"method_id": pm, "amount": 2000.00, "purpose": "pay_in_full"}),
+        ("record_promise", {"amount": 1400.00, "due_on": "2027-02-19", "method": "check"}),
+        ("add_payment_method", {"method": "ach", "routing_number": "021000021", "account_number": "1"}),
     ):
         refused = await s.dispatch(*later)
         assert "transferred to a person" in refused["error"], (later, refused)
-    assert s.state.settlement_agreed_cents is None
     assert (
         await s.dispatch(
             "log_contact_attempt", {"answered_by": "consumer", "summary": "Wanted 40 percent; transferred."}
@@ -662,8 +674,8 @@ async def test_settlement_below_the_floor_is_countered_twice_then_transferred(pg
     assert rows(pg_dsn, "payments") == [] and rows(pg_dsn, "arrangements") == []
 
 
-async def _accepted_settlement(pg_dsn, make_session) -> CallSession:
-    """A call where the engine accepted a $750.00 one-time settlement on a $1,000.00 balance."""
+async def _settlement_call(pg_dsn, make_session) -> CallSession:
+    """A verified, unlocked call on a $1,000.00 balance whose one-payment settlement minimum is $700.00."""
     seed_world(
         pg_dsn,
         account={
@@ -674,19 +686,30 @@ async def _accepted_settlement(pg_dsn, make_session) -> CallSession:
     )
     s = await make_session()
     await unlocked(s)
-    for _ in range(2):
-        assert (await s.dispatch("evaluate_settlement_offer", {"offer": 750.00}))["decision"] == "counter"
-    assert (await s.dispatch("evaluate_settlement_offer", {"offer": 750.00}))["decision"] == "accept"
     return s
 
 
 SETTLE_750 = {"amount": 750.00, "purpose": "settlement"}
 
 
+async def test_the_settlement_minimum_is_enforced_in_code(pg_dsn, make_session) -> None:
+    """Whatever the model agreed, a settlement charge is below neither the minimum nor at the balance."""
+    s = await _settlement_call(pg_dsn, make_session)
+    pm = await card(s)
+    for dollars, why in ((699.99, "at least $700.00"), (1000.00, "full balance"), (1200.00, "full balance")):
+        refused = await s.dispatch(
+            "take_payment", {"method_id": pm, "amount": dollars, "purpose": "settlement"}
+        )
+        assert why in refused["error"], (dollars, refused)
+    assert rows(pg_dsn, "payments") == []
+    at_floor = await s.dispatch("take_payment", {"method_id": pm, "amount": 700.00, "purpose": "settlement"})
+    assert at_floor["status"] == "approved" and at_floor["remaining_balance"] == "$300.00"
+
+
 async def test_an_approved_settlement_the_ledger_cannot_post_is_never_charged_again(
     pg_dsn, make_session, monkeypatch
 ) -> None:
-    s = await _accepted_settlement(pg_dsn, make_session)
+    s = await _settlement_call(pg_dsn, make_session)
     pm = await card(s)
 
     async def unreachable(*_a: Any, **_k: Any) -> Any:
@@ -700,13 +723,11 @@ async def test_an_approved_settlement_the_ledger_cannot_post_is_never_charged_ag
     assert "already went through" in again["error"]
     in_full = await s.dispatch("take_payment", {"method_id": pm, "amount": 1000.00, "purpose": "pay_in_full"})
     assert "already went through" in in_full["error"]
-    offer = await s.dispatch("evaluate_settlement_offer", {"offer": 750.00})
-    assert "already went through" in offer["error"]
     assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
 
 
 async def test_concurrent_duplicate_settlement_charges_charge_once(pg_dsn, make_session) -> None:
-    s = await _accepted_settlement(pg_dsn, make_session)
+    s = await _settlement_call(pg_dsn, make_session)
     pm = await card(s)
     results = await asyncio.gather(
         s.dispatch("take_payment", {"method_id": pm, **SETTLE_750}),
@@ -729,23 +750,14 @@ async def test_concurrent_duplicate_payments_in_full_charge_once(pg_dsn, make_se
     assert [p["amount_cents"] for p in rows(pg_dsn, "payments")] == [18500]
 
 
-async def test_a_declined_settlement_charge_gives_the_authorization_back(pg_dsn, make_session) -> None:
-    s = await _accepted_settlement(pg_dsn, make_session)
+async def test_a_declined_settlement_charge_releases_the_charge_for_a_retry(pg_dsn, make_session) -> None:
+    s = await _settlement_call(pg_dsn, make_session)
     declined = await s.dispatch("take_payment", {"method_id": await card(s, DECLINED_CARD), **SETTLE_750})
     assert declined["status"] == "declined"
-    assert s.state.settlement_agreed_cents == 75000 and s.state.charged_payment_id is None
+    assert s.state.charged_payment_id is None and s.state.charge_in_flight is False
     retried = await s.dispatch("take_payment", {"method_id": await card(s), **SETTLE_750})
     assert retried["status"] == "approved"
-    assert s.state.settlement_agreed_cents is None
     assert [p["status"] for p in rows(pg_dsn, "payments")] == ["declined", "approved"]
-
-
-async def test_settlement_offer_at_the_balance_is_a_payment_in_full(pg_dsn, make_session) -> None:
-    seed_world(pg_dsn)
-    s = await make_session()
-    await unlocked(s)
-    result = await s.dispatch("evaluate_settlement_offer", {"offer": 185.00})
-    assert (result["decision"], result["amount"]) == ("pay_in_full", "$185.00")
 
 
 async def test_lump_settlement_writes_payment_arrangement_and_letter(pg_dsn, make_session) -> None:
@@ -760,16 +772,6 @@ async def test_lump_settlement_writes_payment_arrangement_and_letter(pg_dsn, mak
     s = await make_session()
     await unlocked(s)
     method_id = await card(s)
-    countered = await s.dispatch("evaluate_settlement_offer", {"offer": 750.00})
-    assert (countered["decision"], countered["amount"]) == ("counter", "$875.00")
-    not_agreed = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount": 750.00, "purpose": "settlement"}
-    )
-    assert "evaluate_settlement_offer" in not_agreed["error"]
-    countered = await s.dispatch("evaluate_settlement_offer", {"offer": 750.00})
-    assert (countered["decision"], countered["amount"]) == ("counter", "$815.00")  # mid $812.50, up to $5
-    accepted = await s.dispatch("evaluate_settlement_offer", {"offer": 750.00})  # two counters used, >= floor
-    assert (accepted["decision"], accepted["amount"]) == ("accept", "$750.00")
     ok = await s.dispatch("take_payment", {"method_id": method_id, "amount": 750.00, "purpose": "settlement"})
     assert ok["status"] == "approved" and ok["remaining_balance"] == "$250.00"
     (arr,) = rows(pg_dsn, "arrangements")
@@ -831,7 +833,7 @@ async def test_nothing_is_taken_from_an_account_the_ledger_has_closed(pg_dsn, ma
     again = await s.dispatch(
         "take_payment", {"method_id": await card(s), "amount": 185.00, "purpose": "pay_in_full"}
     )
-    assert "already went through" in again["error"]
+    assert "already went through" in again["error"]  # the call's one charge is taken
     promise = await s.dispatch("record_promise", {"amount": 10.00, "due_on": "2027-02-19", "method": "check"})
     assert "Nothing is owed" in promise["error"]
 
