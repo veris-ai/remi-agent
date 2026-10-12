@@ -126,6 +126,9 @@ class RemiCall:
     letters_queued: set[str] = field(default_factory=set)
     payment_methods: dict[str, SavedMethod] = field(default_factory=dict)  # tokenized on this call
     declined_methods: set[str] = field(default_factory=set)
+    charge_in_flight: bool = False  # a take_payment holds the call's one charge until the gateway answers
+    #: The call's charge once the gateway approved it (or its answer was lost): there is never a second.
+    charged_payment_id: str | None = None
     #: log_contact_attempt's note; the row itself is written once, when the call ends.
     contact_note: ContactNote | None = None
     #: The written row's disposition, once it is written (end_call, or finalize).
