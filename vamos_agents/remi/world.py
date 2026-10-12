@@ -94,7 +94,4 @@ class Account:
     sol_expires_on: date
     validation_notice_mailed_on: date
     time_barred_notice_mailed_on: date | None
-    settlement_floor_pct: int
-    max_plan_months: int
-    min_instalment_cents: int
     status: str

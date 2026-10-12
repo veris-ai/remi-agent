@@ -13,9 +13,14 @@ is Remi's one client for them:
   the answer (approved only when a hardship is recorded on the account).
 
 The money tools take an option id, never a free amount, and ``checked_option``
-is the code gate every one of them applies before it writes or charges anything. The
-World refuses off-menu writes too (an error whose message starts ``policy:``);
-``PolicyRefused`` carries that refusal to the model, never hidden.
+is the code gate every one of them applies before it writes or charges anything.
+The World refuses off-menu money too, inside ``gateway_charge`` before any payment
+row and in a trigger on ``arrangements`` (SQLSTATE 23514, message ``policy: ...``);
+``PolicyRefused`` carries that refusal to the model, logged, never hidden.
+
+The menu is priced from the account's balance at the start of the call and is
+not repriced after a payment, so it is compared with the ledger only before the
+call's first charge (``tools.options.current_menu``).
 """
 
 from __future__ import annotations
@@ -35,6 +40,8 @@ logger = logging.getLogger(__name__)
 OptionKind = Literal["pay_in_full", "plan", "settlement"]
 PAY_IN_FULL = "pif"
 POLICY_ERROR_PREFIX = "policy:"
+#: The World's off-menu refusal: check_violation, message "policy: ...".
+POLICY_REFUSAL_SQLSTATE = "23514"
 TO_A_PERSON = "Anything outside the creditor's options goes to a person (transfer_to_human)."
 
 
@@ -185,13 +192,20 @@ async def request_approval(db: Database, account_id: str, option_id: str) -> App
         raise MenuUnavailable("the approval request did not go through") from err
 
 
+def raise_policy_refusal(err: psycopg.Error, what: str) -> None:
+    """Raise the World's off-menu refusal (SQLSTATE 23514, ``policy: ...``) as ``PolicyRefused``, logged;
+    return for any other error, which the caller re-raises."""
+    message = (err.diag.message_primary or "") if err.diag else ""
+    if err.sqlstate != POLICY_REFUSAL_SQLSTATE or not message.startswith(POLICY_ERROR_PREFIX):
+        return
+    logger.error("the World refused %s: %s", what, message)
+    raise PolicyRefused(message.removeprefix(POLICY_ERROR_PREFIX).strip()) from err
+
+
 async def guarded_insert(tx: Transaction, table: str, row: dict[str, Any]) -> None:
-    """``tx.insert``, with the World's policy refusal (``policy: ...``) raised as ``PolicyRefused``."""
+    """``tx.insert``, with the World's policy refusal raised as ``PolicyRefused``."""
     try:
         await tx.insert(table, row)
     except psycopg.Error as err:
-        message = (err.diag.message_primary or "") if err.diag else ""
-        if not message.startswith(POLICY_ERROR_PREFIX):
-            raise
-        logger.error("the World refused %s on %s: %s", table, row.get("account_id"), message)
-        raise PolicyRefused(message.removeprefix(POLICY_ERROR_PREFIX).strip()) from err
+        raise_policy_refusal(err, f"{table} on {row.get('account_id')}")
+        raise

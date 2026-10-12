@@ -1,6 +1,6 @@
 """The creditor's menu: Remi offers, charges and promises only what the World's decision engine approves.
 
-Against the real Postgres with the decision-engine double (``fixtures/policy_engine_double.sql``):
+Against the real Postgres with the World's own decision engine (``creditor_policy.sql``, vendored):
 the ladder as the model sees it, menu-only enforcement in code (off-menu ids, settlements before a
 hardship, approval tiers without or after a denied approval), the World's own refusal surfaced,
 plans on the ledger's schedule, the transfer and one-charge guards, and the opening that carries
@@ -21,7 +21,7 @@ from vamos_agents.remi.tools import REGISTRY
 from vamos_voice.session import CallSession
 
 from . import support
-from .support import DECLINED_CARD, menu, rows, seed_menu, seed_world
+from .support import DECLINED_CARD, rows, seed_world
 from .test_tools import DISCLOSED, VERIFY, card, open_call, unlocked
 
 pytestmark = pytest.mark.postgres
@@ -30,11 +30,12 @@ BALANCE_1000 = {"current_balance_cents": 100000}
 HARDSHIP = {"kind": "hardship", "hardship_reason": "job_loss"}
 
 
-async def _call(pg_dsn: str, make_session: Any, *, answer: dict[str, Any] | None = None) -> CallSession:
-    """A verified, unlocked call on a $1,000.00 balance; the default menu unless ``answer`` is given."""
-    seed_world(pg_dsn, account=BALANCE_1000)
-    if answer is not None:
-        seed_menu(pg_dsn, "TAS-420101", answer)
+async def _call(
+    pg_dsn: str, make_session: Any, *, policy: dict[str, Any] | None = None, **account: Any
+) -> CallSession:
+    """A verified, unlocked call on a $1,000.00 balance under ``support.TEST_POLICY`` (with ``policy``'s
+    fields), priced by the World's own decision engine."""
+    seed_world(pg_dsn, account={**BALANCE_1000, **account}, policy=policy)
     s = await make_session()
     await unlocked(s)
     return s
@@ -58,7 +59,7 @@ async def test_the_options_are_locked_until_verification_and_disclosures(pg_dsn,
         assert "disclosures" in (await s.dispatch(tool, args))["error"]
     await s.dispatch("get_debt_details", DISCLOSED)
     assert "options" in await s.dispatch("get_payment_options", {})
-    assert rows(pg_dsn, "policy_double_approvals") == []
+    assert rows(pg_dsn, "approval_requests") == []
 
 
 async def test_verification_hands_over_the_disclosures_with_their_wording(pg_dsn, make_session) -> None:
@@ -102,6 +103,8 @@ async def test_the_ladder_is_in_order_in_dollars_without_percentages(pg_dsn, mak
     assert [o["option_id"] for o in ladder["options"]] == [
         "pif",
         "plan_3",
+        "plan_4",
+        "plan_5",
         "plan_6",
         "settle_10",
         "settle_20",
@@ -120,14 +123,14 @@ async def test_the_ladder_is_in_order_in_dollars_without_percentages(pg_dsn, mak
 
 
 async def test_a_creditor_without_settlements_says_so(pg_dsn, make_session) -> None:
-    s = await _call(pg_dsn, make_session, answer=menu(100000, settlement_allowed=False))
+    s = await _call(pg_dsn, make_session, policy={"settlement_allowed": False, "settlement_tiers": []})
     ladder = await s.dispatch("get_payment_options", {})
-    assert [o["kind"] for o in ladder["options"]] == ["pay_in_full", "plan", "plan"]
+    assert [o["kind"] for o in ladder["options"]] == ["pay_in_full"] + ["plan"] * 4
     assert "allows no settlement" in ladder["settlement"] and "transfer_to_human" in ladder["settlement"]
 
 
 async def test_a_menu_out_of_step_with_the_ledger_is_refused_and_logged(pg_dsn, make_session, caplog) -> None:
-    s = await _call(pg_dsn, make_session, answer=menu(99000))
+    s = await _call(pg_dsn, make_session, placed_balance_cents=99000)
     refused = await s.dispatch("get_payment_options", {})
     assert "cannot be read" in refused["error"] and "transfer_to_human" in refused["error"]
     assert "the ledger holds 100000" in caplog.text
@@ -176,10 +179,13 @@ async def test_off_menu_and_locked_options_are_refused_before_anything_is_charge
 async def test_a_denied_approval_is_never_chargeable(pg_dsn, make_session) -> None:
     """The double approves only with a hardship flag on the account; one recorded on a past call counts for
     the World, but Remi needs the hardship heard on this call before it even asks."""
-    s = await _call(pg_dsn, make_session, answer=menu(100000, settlement_requires_hardship=False))
+    s = await _call(pg_dsn, make_session, policy={"settlement_requires_hardship": False})
     pm = await card(s)
     denied = await s.dispatch("request_approval", {"option_id": "settle_30"})
-    assert (denied["approved"], denied["reason"]) == (False, "no hardship on file")
+    assert (denied["approved"], denied["reason"]) == (
+        False,
+        "a settlement that needs approval needs a recorded hardship on the account",
+    )
     assert "not offered" in denied["allowed_now"]
     again = await s.dispatch("request_approval", {"option_id": "settle_30"})
     assert again["approved"] is False and again["reason"] == "already decided on this call"
@@ -187,14 +193,14 @@ async def test_a_denied_approval_is_never_chargeable(pg_dsn, make_session) -> No
     assert "approval was denied" in refused["error"]
     ladder = {o["option_id"]: o for o in (await s.dispatch("get_payment_options", {}))["options"]}
     assert "denied" in ladder["settle_30"]["status"]
-    assert [a["approved"] for a in rows(pg_dsn, "policy_double_approvals")] == [False]
+    assert [a["approved"] for a in rows(pg_dsn, "approval_requests")] == [False]
     assert rows(pg_dsn, "payments") == []
 
 
 async def test_approval_needs_the_hardship_first_then_the_tier_can_be_taken(pg_dsn, make_session) -> None:
     s = await _call(pg_dsn, make_session)
     early = await s.dispatch("request_approval", {"option_id": "settle_30"})
-    assert "hardship recorded first" in early["error"] and rows(pg_dsn, "policy_double_approvals") == []
+    assert "hardship recorded first" in early["error"] and rows(pg_dsn, "approval_requests") == []
     assert (
         "not an option that needs approval"
         in (await s.dispatch("request_approval", {"option_id": "settle_10"}))["error"]
@@ -211,23 +217,22 @@ async def test_approval_needs_the_hardship_first_then_the_tier_can_be_taken(pg_d
 async def test_the_worlds_off_menu_refusal_reaches_the_model_and_the_log(
     pg_dsn, make_session, caplog
 ) -> None:
-    """Remi's own gate is bypassed here (a forged approval), so the World's refusal is what is tested: the
-    charge already went through, and the result says both, never hiding the refusal."""
+    """Remi's own gate is bypassed here (a forged approval), so the World's refusal is what is tested:
+    gateway_charge refuses before any payment row, the model hears why, and the call's charge is free."""
     s = await _call(pg_dsn, make_session)
     await _hardship(s)
-    s.state.approvals["settle_30"] = True  # not logged in the World
-    paid = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "settle_30"})
-    assert paid["status"] == "approved"
-    assert "refused it as outside the creditor's policy" in paid["settlement_record"]
-    assert "needs a logged approval" in paid["settlement_record"]
-    assert "the World refused arrangements" in caplog.text
-    assert rows(pg_dsn, "arrangements") == []
+    s.state.approvals["settle_30"] = True  # never asked of the World
+    refused = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "settle_30"})
+    assert "refused it as outside the creditor's policy" in refused["error"]
+    assert "needs an approval from request_approval first" in refused["error"]
+    assert "the World refused gateway_charge" in caplog.text
+    assert rows(pg_dsn, "payments") == [] and rows(pg_dsn, "arrangements") == []
+    assert s.state.charged_payment_id is None and s.state.charge_in_flight is False
+    assert support.LEDGER.writes == []
 
 
 async def test_a_creditor_without_settlements_refuses_them(pg_dsn, make_session) -> None:
-    answer = menu(100000)
-    answer["settlement_allowed"] = False  # a tier listed anyway: the flag still decides
-    s = await _call(pg_dsn, make_session, answer=answer)
+    s = await _call(pg_dsn, make_session, policy={"settlement_allowed": False})  # tiers listed anyway
     await _hardship(s)
     refused = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "settle_10"})
     assert "allows no settlement" in refused["error"]
@@ -383,12 +388,23 @@ async def test_a_plan_re_ages_the_loan_and_records_the_ledgers_schedule(pg_dsn, 
 
 
 async def test_a_plan_whose_ledger_schedule_is_not_the_option_is_taken_back(
-    pg_dsn, make_session, caplog
+    pg_dsn, make_session, caplog, monkeypatch
 ) -> None:
+    from dataclasses import replace
+
+    from vamos_agents.remi.tools import money
+
     seed_world(pg_dsn, account={"current_balance_cents": 26500})
-    answer = menu(26500)
-    answer["options"][2]["monthly_cents"] = 4500  # plan_6 priced at $45.00, the ledger spreads $44.17
-    seed_menu(pg_dsn, "TAS-420101", answer)
+    priced = money.current_menu
+
+    async def mispriced(session: Any, debt: Any) -> Any:  # plan_6 at $45.00; the ledger spreads $44.17
+        menu = await priced(session, debt)
+        return replace(
+            menu,
+            options=tuple(replace(o, monthly_cents=4500) if o.id == "plan_6" else o for o in menu.options),
+        )
+
+    monkeypatch.setattr(money, "current_menu", mispriced)
     s = await make_session()
     await unlocked(s)
     refused = await s.dispatch(
@@ -423,7 +439,11 @@ async def test_a_plan_the_agency_cannot_record_is_taken_back_from_the_ledger(
 
 
 async def test_a_plan_with_a_down_payment_charges_it_then_spreads_the_rest(pg_dsn, make_session) -> None:
-    s = await _call(pg_dsn, make_session, answer=menu(100000, plans=(3,), down_cents=10000))
+    s = await _call(
+        pg_dsn,
+        make_session,
+        policy={"plan_down_pct": 10, "plan_max_months": [{"balance_up_to_cents": None, "months": 3}]},
+    )
     pm = await card(s)
     first = await s.dispatch(
         "create_arrangement", {"option_id": "plan_3", "method_id": pm, "first_due_on": "2027-03-01"}
@@ -437,6 +457,9 @@ async def test_a_plan_with_a_down_payment_charges_it_then_spreads_the_rest(pg_ds
         "create_arrangement", {"option_id": "plan_3", "method_id": pm, "first_due_on": "2027-03-01"}
     )
     assert [i["amount"] for i in made["instalments"]] == ["$300.00"] * 3
+    # The World prices the menu from the balance at the start of the call and does not reprice it: after the
+    # call's charge it is shown, not refused as out of step with the ledger.
+    assert "options" in await s.dispatch("get_payment_options", {})
     assert [op for op, _ in support.LEDGER.writes] == ["repayment", "reAge"]
     assert s.state.outcomes == {"plan"}
 
@@ -444,7 +467,11 @@ async def test_a_plan_with_a_down_payment_charges_it_then_spreads_the_rest(pg_ds
 async def test_a_down_payment_that_did_not_post_sets_up_no_plan(
     pg_dsn, make_session, monkeypatch, caplog
 ) -> None:
-    s = await _call(pg_dsn, make_session, answer=menu(100000, plans=(3,), down_cents=10000))
+    s = await _call(
+        pg_dsn,
+        make_session,
+        policy={"plan_down_pct": 10, "plan_max_months": [{"balance_up_to_cents": None, "months": 3}]},
+    )
     pm = await card(s)
 
     async def unreachable(*_a: Any, **_k: Any) -> Any:

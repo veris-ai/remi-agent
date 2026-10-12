@@ -42,9 +42,11 @@ NO_SETTLEMENT = (
 
 
 async def current_menu(session: RemiCall, debt: Debt) -> engine.Menu:
-    """The menu now, refused (and logged) when its balance is not the ledger's: its amounts would be wrong."""
+    """The menu now, refused (and logged) when, before the call's first charge, its balance is not the
+    ledger's: its amounts would be wrong. The World prices it from the balance at the start of the call and
+    does not reprice it after a payment, so once something was charged the two differ by design."""
     menu = await session.read_menu()
-    if menu.balance_cents != debt.balance_cents:
+    if session.charged_payment_id is None and menu.balance_cents != debt.balance_cents:
         logger.error(
             "payment options for %s price a balance of %d cents; the ledger holds %d",
             session.context.account_id,

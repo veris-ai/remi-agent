@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate collections_world.sql from veris-ai/utility-bench: the World's schema, its payment
-# gateway and its rows, concatenated in the order the World is seeded (seed.seed_sql); and
-# collections_ledger.json: every account's money, which the World keeps in its Fineract ledger
-# (collections_bench/world/fineract.py seeds it from the same manifest).
+# gateway, the creditors' decision engine and its rows, concatenated in the order the World is
+# seeded (seed.seed_sql); and collections_ledger.json: every account's money, which the World keeps
+# in its Fineract ledger (collections_bench/world/fineract.py seeds it from the same manifest).
 #
 #   vamos_agents/remi/tests/fixtures/resync_world.sh <utility-bench checkout> [ref, default origin/main]
 #
@@ -18,18 +18,20 @@ ledger="$here/collections_ledger.json"
 parts=(
   collections_bench/generated/world/schema.sql
   collections_bench/world/gateway.sql
+  collections_bench/world/creditor_policy.sql
   collections_bench/generated/world/rows.sql
 )
 
 {
   cat <<EOF
--- The VAmoS Debt Collection World's database, vendored for Remi's tests: schema, payment gateway
--- and rows, in the order the World is seeded (collections_bench/world/seed.py, seed_sql).
+-- The VAmoS Debt Collection World's database, vendored for Remi's tests: schema, payment gateway,
+-- the creditors' decision engine and rows, in the order the World is seeded (collections_bench/world/seed.py, seed_sql).
 --
 -- Source: veris-ai/utility-bench @ $sha
 --   ${parts[0]}
 --   ${parts[1]}
 --   ${parts[2]}
+--   ${parts[3]}
 -- Test data, not a migration: Remi never imports utility-bench and never runs this at runtime.
 --
 -- Resync: vamos_agents/remi/tests/fixtures/resync_world.sh <utility-bench checkout> [ref]

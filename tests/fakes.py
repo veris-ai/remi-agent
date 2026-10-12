@@ -101,7 +101,7 @@ class FakeRemiDb:
         self.events.append("sql:accounts")
         return Account(
             account_id, "con_1", "cred_1", "9921", date(2025, 3, 1), date(2030, 11, 1), date(2025, 3, 5), None,
-            60, 12, 2_500, "active",
+            "active",
         )  # fmt: skip
 
     async def consumer(self, consumer_id: str) -> Any:

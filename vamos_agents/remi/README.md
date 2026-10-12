@@ -182,8 +182,12 @@ hardship on the account; logged). The prompt runs that ladder in order, offers
 only its amounts, never reveals percentages or limits, asks approval before an
 approval tier, and hands anything outside it to a person. Code enforces the
 same: the money tools take an `option_id`, never an amount
-(`menu.checked_option`), and the World refuses off-menu settlement and plan
-writes itself (`policy: ...`, raised as `menu.PolicyRefused`, never swallowed).
+(`menu.checked_option`), and the World refuses off-menu money itself: inside
+`gateway_charge` before any payment row, and in a trigger on `arrangements`
+(SQLSTATE 23514, `policy: ...`, raised as `menu.PolicyRefused`, logged, never
+swallowed). The menu is priced from the balance at the start of the call and
+is not repriced after a payment, so Remi compares it with the ledger only
+before the call's first charge.
 Remi needs the hardship heard on this call before a settlement that requires
 one, even if one is on file from an earlier call.
 
@@ -293,9 +297,9 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   sees, off-menu and locked options refused before any charge, approvals (denied is never chargeable),
   the World's refusal surfaced, plans on the ledger's schedule (and a down payment), the transfer and
   one-charge guards, the disclosures on verification, the prompt routing each intent to its tool.
-- `tests/fixtures/policy_engine_double.sql`: a minimal, clearly marked test double of the World's
-  decision engine (`payment_options`, `request_approval`, the off-menu settlement refusal) until
-  utility-bench ships the real functions; `support.menu` builds a contract-shaped answer per test.
+- The decision engine is the World's own SQL (`collections_bench/world/creditor_policy.sql`, vendored
+  into `collections_world.sql` by `resync_world.sh`); `seed_world` gives the account
+  `support.TEST_POLICY` (overridable per test) priced from the ledger's balance.
 - `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
 - `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, no account change, no direct writes.
 - `tests/fixtures/collections_ledger.json`: every account's money from the same utility-bench commit, loaded into the in-memory ledger by `seed_full_world` (`resync_world.sh` writes both fixtures).

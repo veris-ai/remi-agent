@@ -15,11 +15,10 @@ owns nothing, so the gateway's write guards bind: a direct write to
 ``payment_methods`` or ``payments``, or any read of the processor's vault,
 fails the test.
 
-One part of the World is a double for now: the creditor's decision engine
-(``payment_options``, ``request_approval``, and its refusal of off-menu
-settlements), in ``fixtures/policy_engine_double.sql``, until utility-bench
-ships the real functions. Each seed gives the account a ``menu`` (override it
-with ``seed_menu``).
+The World's SQL includes the creditors' decision engine (``payment_options``,
+``request_approval`` and the guards that refuse off-menu money). ``seed_world``
+gives its account ``TEST_POLICY`` (override fields with ``policy=``), priced
+from the ledger's balance as the World prices it.
 """
 
 from __future__ import annotations
@@ -39,8 +38,6 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from vamos_agents.remi import policy
-
 from .fake_ledger import FakeLedger
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -49,9 +46,6 @@ WORLD_SQL = (FIXTURES / "collections_world.sql").read_text()
 LEDGER_ACCOUNTS: dict[str, dict[str, Any]] = json.loads((FIXTURES / "collections_ledger.json").read_text())[
     "accounts"
 ]
-#: A test double of the World's decision engine (payment_options, request_approval), until utility-bench
-#: ships it: see the file's header. Loaded after the World's schema; menus are seeded per test.
-POLICY_ENGINE_DOUBLE_SQL = (FIXTURES / "policy_engine_double.sql").read_text()
 ROWS_MARKER = "-- ===== collections_bench/generated/world/rows.sql ====="
 #: The schema and the gateway (the database), and the World's ~110 accounts (its rows).
 DATABASE_SQL, ROWS_SQL = WORLD_SQL.split(ROWS_MARKER)
@@ -136,9 +130,7 @@ ACCOUNT = {
     "sol_expires_on": date(2028, 3, 15),
     "validation_notice_mailed_on": date(2027, 1, 5),
     "time_barred_notice_mailed_on": None,
-    "settlement_floor_pct": 70,
-    "max_plan_months": 12,
-    "min_instalment_cents": 2500,
+    "policy_id": "pol_test",
     "status": "active",
 }
 #: TAS-420101's money, in the ledger: what ``seed_world``'s ``account`` overrides of these keys change.
@@ -149,6 +141,25 @@ MONEY = {
     "fees_since_charge_off_cents": 0,
     "paid_since_charge_off_cents": 0,
     "last_payment_on": None,
+}
+#: The creditor policy seeded accounts get: plans of 3 to 6 months with no down payment, then settlement
+#: tiers of 10 and 20% off, and 30% off with a supervisor's approval, each only after a recorded hardship.
+TEST_POLICY: dict[str, Any] = {
+    "policy_id": "pol_test",
+    "name": "Remi test ladder",
+    "plan_min_months": 3,
+    "plan_max_months": [{"balance_up_to_cents": None, "months": 6}],
+    "plan_down_pct": 0,
+    "plan_min_monthly_cents": 2500,
+    "settlement_allowed": True,
+    "settlement_requires_hardship": True,
+    "settlement_tiers": [
+        {"discount_pct": 10, "requires_approval": False},
+        {"discount_pct": 20, "requires_approval": False},
+        {"discount_pct": 30, "requires_approval": True},
+    ],
+    "settlement_due_within_days": 7,
+    "unable_to_pay": "transfer",
 }
 #: The ledger every call in a test reaches; rebuilt by each seed.
 LEDGER = FakeLedger()
@@ -195,6 +206,10 @@ LETTER_HISTORY = [
 ]
 
 
+def _jsonb(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: Jsonb(v) if isinstance(v, list) else v for k, v in row.items()}
+
+
 def _insert(conn: psycopg.Connection, table: str, row: dict[str, Any]) -> None:
     cols = ", ".join(row)
     marks = ", ".join(["%s"] * len(row))
@@ -210,10 +225,13 @@ def seed_world(
     history: list[dict[str, Any]] | None = None,
     creditor_address: str | None = "PO Box 4410, Wilmington, DE 19850",
     creditor_kind: str = "bank_card",
+    policy: dict[str, Any] | None = None,
 ) -> None:
     """Reset the database (schema and gateway) and seed one agency, one creditor and one account
     (TAS-420101 by default, as the World has it), with the given overrides; the overrides of ``MONEY``'s
-    keys (and a ``current_balance_cents``, as a charge-off balance with nothing else) seed the ledger."""
+    keys (and a ``current_balance_cents``, as a charge-off balance with nothing else) seed the ledger. The
+    account's creditor policy is ``TEST_POLICY`` with ``policy``'s fields, and its ``placed_balance_cents``
+    (what the menu is priced from) the ledger's balance unless overridden."""
     overrides = dict(account or {})
     money = {**MONEY, **{k: overrides.pop(k) for k in list(overrides) if k in MONEY}}
     if "current_balance_cents" in overrides:
@@ -244,12 +262,14 @@ def seed_world(
         )
         _insert(conn, "consumers", {**CONSUMER, **(consumer or {})})
         _insert(conn, "phones", {**PHONE, **(phone or {})})
-        _insert(conn, "accounts", {**ACCOUNT, **overrides})
+        _insert(conn, "creditor_policies", _jsonb({**TEST_POLICY, **(policy or {})}))
+        account_id = (ACCOUNT | overrides)["account_id"]
+        _insert(
+            conn, "accounts", {**ACCOUNT, "placed_balance_cents": LEDGER.balance(account_id), **overrides}
+        )
         for row in LETTER_HISTORY if history is None else history:
             _insert(conn, "contact_attempts", row)
         _grant_app(conn)
-    account_id = (ACCOUNT | overrides)["account_id"]
-    seed_menu(dsn, account_id, menu(LEDGER.balance(account_id)))
 
 
 def seed_full_world(dsn: str) -> None:
@@ -281,61 +301,6 @@ def _reset_ledger(accounts: dict[str, dict[str, Any]]) -> None:
 def _reset(conn: psycopg.Connection) -> None:
     conn.execute("drop schema public cascade; create schema public;")
     conn.execute(DATABASE_SQL)
-    conn.execute(POLICY_ENGINE_DOUBLE_SQL)
-
-
-def menu(
-    balance_cents: int,
-    *,
-    settlement_allowed: bool = True,
-    settlement_requires_hardship: bool = True,
-    plans: tuple[int, ...] = (3, 6),
-    down_cents: int = 0,
-    tiers: tuple[tuple[int, bool], ...] = ((10, False), (20, False), (30, True)),
-) -> dict[str, Any]:
-    """A payment_options answer in the contract's shape: pay in full, ``plans`` (months; equal instalments as
-    the ledger spreads the balance after ``down_cents``), then the settlement ``tiers`` (discount percent,
-    requires approval), lowest discount first."""
-    options: list[dict[str, Any]] = [{"id": "pif", "kind": "pay_in_full", "amount_cents": balance_cents}]
-    for months in plans:
-        options.append(
-            {
-                "id": f"plan_{months}",
-                "kind": "plan",
-                "months": months,
-                "down_cents": down_cents,
-                "monthly_cents": policy.instalment_cents(balance_cents - down_cents, months)[0],
-            }
-        )
-    if settlement_allowed:
-        for pct, approval in tiers:
-            options.append(
-                {
-                    "id": f"settle_{pct}",
-                    "kind": "settlement",
-                    "discount_pct": pct,
-                    "amount_cents": balance_cents - balance_cents * pct // 100,
-                    "requires_approval": approval,
-                    "due_within_days": 7,
-                }
-            )
-    return {
-        "creditor": "Ashcombe Bank, N.A.",
-        "balance_cents": balance_cents,
-        "settlement_allowed": settlement_allowed,
-        "settlement_requires_hardship": settlement_requires_hardship,
-        "options": options,
-    }
-
-
-def seed_menu(dsn: str, account_id: str, answer: dict[str, Any]) -> None:
-    """What the decision-engine double answers for ``account_id`` (replacing any earlier answer)."""
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(
-            "insert into policy_double_menus (account_id, menu) values (%s, %s) "
-            "on conflict (account_id) do update set menu = excluded.menu",
-            (account_id, Jsonb(answer)),
-        )
 
 
 def _grant_app(conn: psycopg.Connection) -> None:

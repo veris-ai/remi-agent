@@ -1,9 +1,10 @@
--- The VAmoS Debt Collection World's database, vendored for Remi's tests: schema, payment gateway
--- and rows, in the order the World is seeded (collections_bench/world/seed.py, seed_sql).
+-- The VAmoS Debt Collection World's database, vendored for Remi's tests: schema, payment gateway,
+-- the creditors' decision engine and rows, in the order the World is seeded (collections_bench/world/seed.py, seed_sql).
 --
--- Source: veris-ai/utility-bench @ a43805a639c2cc0c107cb6a7a13b0c8f444995cd
+-- Source: veris-ai/utility-bench @ e5f5098622e3cbe12a2ea741517673af46aa209f
 --   collections_bench/generated/world/schema.sql
 --   collections_bench/world/gateway.sql
+--   collections_bench/world/creditor_policy.sql
 --   collections_bench/generated/world/rows.sql
 -- Test data, not a migration: Remi never imports utility-bench and never runs this at runtime.
 --
@@ -15,9 +16,26 @@
 create table creditors (
   creditor_id     text primary key,          -- 'cr_ashcombe'
   name            text not null,             -- 'Ashcombe Bank, N.A.'
-  kind            text not null check (kind in ('bank_card','medical','telecom','retail')),
+  kind            text not null check (kind in ('bank_card','medical','telecom','retail','government')),
   mailing_address text,                      -- what "original creditor's address" answers; null if not on file
   financial_assistance_policy boolean not null default false  -- medical providers only
+);
+
+-- The creditors' rules for what the agency may accept (RULES.md, "Creditor policy").
+-- Read the menu an account's policy allows with payment_options(account_id), not
+-- these columns: it prices them for the account's balance.
+create table creditor_policies (
+  policy_id       text primary key,          -- 'pol_hospital_ladder'
+  name            text not null,
+  plan_min_months integer not null,
+  plan_max_months jsonb not null,            -- [{"balance_up_to_cents":50000,"months":4}, ..., {"balance_up_to_cents":null,"months":24}]
+  plan_down_pct   integer not null,          -- the down payment, a percentage of the balance, rounded up to the cent
+  plan_min_monthly_cents integer not null,
+  settlement_allowed           boolean not null,
+  settlement_requires_hardship boolean not null,
+  settlement_tiers jsonb not null,           -- [{"discount_pct":5,"requires_approval":false}, ...], smallest discount first
+  settlement_due_within_days integer,        -- a settlement is one payment, due within this many days
+  unable_to_pay   text not null check (unable_to_pay in ('transfer','return_to_creditor'))
 );
 
 create table consumers (
@@ -57,9 +75,11 @@ create table accounts (
   sol_expires_on    date not null,           -- time-barred when < call date
   validation_notice_mailed_on   date not null,  -- always on/after 2027-01-01: NYC dispute rules apply
   time_barred_notice_mailed_on  date,        -- null if never mailed
-  settlement_floor_pct  integer not null default 70,
-  max_plan_months       integer not null default 12,
-  min_instalment_cents  integer not null default 2500,
+  -- The creditor's policy for this account, and the balance its menu is priced from:
+  -- the Fineract loan's outstanding balance before the call. The ledger stays the
+  -- record of money; this is the decision engine's copy.
+  policy_id      text not null references creditor_policies,
+  placed_balance_cents integer not null check (placed_balance_cents > 0),
   -- Why collection stands where it does. Paid and settled are not here: they are
   -- money, and the Fineract loan's status says so.
   status  text not null default 'active' check (status in
@@ -144,6 +164,16 @@ create table payments (
   processor_ref text not null,               -- 'rp_…', the processor's reference for the charge
   at            timestamptz not null,
   check ((status = 'approved') = (decline_code is null))
+);
+
+-- Every approval asked for, granted or not. Written only by request_approval.
+create table approval_requests (
+  request_id   text primary key,             -- 'apr_…'
+  account_id   text not null references accounts,
+  option_id    text not null,                -- the menu option, 'settle_30'
+  approved     boolean not null,
+  reason       text not null,
+  requested_at timestamptz not null          -- wall time; nothing grades it
 );
 
 create table callbacks (
@@ -451,6 +481,9 @@ begin
     perform public.processor_reject('the amount must be more than zero');
   end if;
 
+  -- The creditor's menu, before any money moves (creditor_policy.sql): an amount off it is refused here.
+  perform public.policy_refuse_off_menu_charge(owner_account, amount_cents);
+
   result_status := case when outcome is null then 'approved' else 'declined' end;
   insert into public.payments (payment_id, account_id, method_id, amount_cents, status, decline_code, processor_ref, at)
   values (new_payment, owner_account, method_id, amount_cents, result_status, outcome, new_ref, at);
@@ -458,8 +491,348 @@ begin
 end
 $$;
 
+-- ===== collections_bench/world/creditor_policy.sql =====
+-- The creditors' decision engine (WORLD.md, "Creditor policies"; RULES.md, "Creditor
+-- policy"). Loaded after gateway.sql, as the database owner. The same engine is
+-- collections_bench/creditor_policy.py; the tests prove they price every account alike.
+--
+--   payment_options(account_id)              the account's ordered menu, as jsonb
+--   request_approval(account_id, option_id)  a supervisor's answer for an approval tier, logged
+--   dialer_may_call(account_id, at[, phone_id])  whether the dialer may place a call now
+--
+-- And the guards that bind EVERY candidate: gateway_charge refuses an amount that is not
+-- on the menu (policy_refuse_off_menu_charge), a trigger refuses an arrangement whose
+-- terms are not (policy_arrangement_on_menu), and only request_approval writes the
+-- approval log. Refusals raise SQLSTATE 23514 with a message prefixed "policy: ".
+-- Every name is schema-qualified and each function pins its search_path.
+
+-- --- helpers --------------------------------------------------------------------
+
+create function public.policy_reject(message text) returns void
+language plpgsql set search_path = pg_catalog, pg_temp
+as $$ begin raise exception 'policy: %', message using errcode = '23514'; end $$;
+
+create function public.policy_hardship_recorded(p_account text) returns boolean
+language sql stable set search_path = pg_catalog, pg_temp
+as $$ select exists (select 1 from public.account_flags f where f.account_id = p_account and f.kind = 'hardship') $$;
+
+-- --- the menu -------------------------------------------------------------------
+
+-- Pay in full, then every allowed plan shortest first (the down payment, then the rest
+-- in equal monthly instalments rounded half up, each at least the minimum), then every
+-- settlement tier smallest discount first (the rest of the balance rounded up).
+create function public.payment_options(account_id text) returns jsonb
+language plpgsql stable set search_path = pg_catalog, pg_temp
+as $$
+#variable_conflict use_variable
+declare
+  acct record;
+  pol public.creditor_policies;
+  balance integer;
+  down integer;
+  rest integer;
+  max_months integer;
+  months integer;
+  monthly integer;
+  pct integer;
+  tier jsonb;
+  options jsonb;
+begin
+  select a.placed_balance_cents, a.policy_id, c.name as creditor into acct
+    from public.accounts a join public.creditors c on c.creditor_id = a.creditor_id
+   where a.account_id = account_id;
+  if not found then
+    raise exception 'policy: no account %', account_id using errcode = '22023';
+  end if;
+  select * into pol from public.creditor_policies p where p.policy_id = acct.policy_id;
+  balance := acct.placed_balance_cents;
+  options := jsonb_build_array(jsonb_build_object('id', 'pif', 'kind', 'pay_in_full', 'amount_cents', balance));
+
+  down := ceil(balance::numeric * pol.plan_down_pct / 100)::integer;
+  rest := balance - down;
+  select (cap->>'months')::integer into max_months
+    from jsonb_array_elements(pol.plan_max_months) with ordinality as t(cap, n)
+   where cap->>'balance_up_to_cents' is null or balance <= (cap->>'balance_up_to_cents')::integer
+   order by n limit 1;
+  months := pol.plan_min_months;
+  while months <= max_months loop
+    monthly := round(rest::numeric / months)::integer;
+    exit when monthly < pol.plan_min_monthly_cents;
+    options := options || jsonb_build_array(jsonb_build_object(
+      'id', 'plan_' || months, 'kind', 'plan', 'months', months, 'down_cents', down, 'monthly_cents', monthly));
+    months := months + 1;
+  end loop;
+
+  for tier in select t.value from jsonb_array_elements(pol.settlement_tiers) with ordinality as t(value, n) order by t.n loop
+    pct := (tier->>'discount_pct')::integer;
+    options := options || jsonb_build_array(jsonb_build_object(
+      'id', 'settle_' || pct, 'kind', 'settlement', 'discount_pct', pct,
+      'amount_cents', ceil(balance::numeric * (100 - pct) / 100)::integer,
+      'requires_approval', (tier->>'requires_approval')::boolean,
+      'due_within_days', pol.settlement_due_within_days));
+  end loop;
+
+  return jsonb_build_object(
+    'creditor', acct.creditor, 'balance_cents', balance,
+    'settlement_allowed', pol.settlement_allowed, 'settlement_requires_hardship', pol.settlement_requires_hardship,
+    'options', options);
+end
+$$;
+
+-- --- approvals ------------------------------------------------------------------
+
+create function public.policy_only_its_functions_write() returns trigger
+language plpgsql set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if current_user <> (select pg_get_userbyid(c.relowner) from pg_class c where c.oid = tg_relid) then
+    raise exception 'policy: %.% is written only by request_approval', tg_table_schema, tg_table_name
+      using errcode = '42501', hint = 'Use request_approval(account_id, option_id).';
+  end if;
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end
+$$;
+
+create trigger only_request_approval_writes before insert or update or delete on public.approval_requests
+  for each row execute function public.policy_only_its_functions_write();
+create trigger only_request_approval_truncates before truncate on public.approval_requests
+  for each statement execute function public.policy_only_its_functions_write();
+
+-- A supervisor's answer, deterministic: approved iff the option is a settlement tier the
+-- policy sends for approval (never more than 40% off) and a hardship is recorded on the
+-- account. Every request is logged, granted or not.
+create function public.request_approval(account_id text, option_id text) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, pg_temp
+as $$
+#variable_conflict use_variable
+declare
+  chosen jsonb;
+  foreign_trigger text;
+  approved boolean := false;
+  reason text;
+begin
+  select format('%s on %s', t.tgname, t.tgrelid::regclass) into foreign_trigger
+    from pg_trigger t
+   where t.tgrelid = 'public.approval_requests'::regclass and not t.tgisinternal
+     and t.tgname not in ('only_request_approval_writes', 'only_request_approval_truncates')
+   limit 1;
+  if foreign_trigger is not null then
+    raise exception 'policy: refusing to run: trigger % was not installed by the policy engine', foreign_trigger
+      using errcode = '42501';
+  end if;
+  select o into chosen from jsonb_array_elements(public.payment_options(account_id)->'options') as o
+   where o->>'id' = option_id;
+  if chosen is null then
+    reason := format('%s is not on this account''s menu', option_id);
+  elsif chosen->>'kind' <> 'settlement' or not (chosen->>'requires_approval')::boolean then
+    reason := 'not an approval tier';
+  elsif (chosen->>'discount_pct')::integer > 40 then
+    reason := 'no settlement may be more than 40% off';
+  elsif not public.policy_hardship_recorded(account_id) then
+    reason := 'a settlement that needs approval needs a recorded hardship on the account';
+  else
+    approved := true;
+    reason := format('approved: %s%% off for a recorded hardship', chosen->>'discount_pct');
+  end if;
+  insert into public.approval_requests (request_id, account_id, option_id, approved, reason, requested_at)
+  values (public.processor_new_id('apr_'), account_id, coalesce(option_id, ''), approved, reason, clock_timestamp());
+  return jsonb_build_object('approved', approved, 'reason', reason);
+end
+$$;
+
+-- --- enforcement: money only on the menu ------------------------------------------
+
+-- A settlement option's conditions: a recorded hardship where the policy requires one, and
+-- a logged, approved request for a tier that needs approval.
+create function public.policy_settlement_allowed(p_account text, chosen jsonb, requires_hardship boolean) returns void
+language plpgsql stable set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if requires_hardship and not public.policy_hardship_recorded(p_account) then
+    perform public.policy_reject(format('%s needs a recorded hardship on the account first', chosen->>'id'));
+  end if;
+  if (chosen->>'requires_approval')::boolean and not exists (
+    select 1 from public.approval_requests r
+     where r.account_id = p_account and r.option_id = chosen->>'id' and r.approved
+  ) then
+    perform public.policy_reject(format('%s needs an approval from request_approval first', chosen->>'id'));
+  end if;
+end
+$$;
+
+-- Called by gateway_charge before it charges: the amount is the menu's pay-in-full amount,
+-- a plan's down payment, or a settlement tier (with its conditions), and the approved
+-- charges on the account never come to more than its balance.
+create function public.policy_refuse_off_menu_charge(p_account text, amount integer) returns void
+language plpgsql stable set search_path = pg_catalog, pg_temp
+as $$
+declare
+  menu jsonb := public.payment_options(p_account);
+  balance integer := (menu->>'balance_cents')::integer;
+  collected integer;
+  chosen jsonb;
+begin
+  select coalesce(sum(p.amount_cents), 0) into collected
+    from public.payments p where p.account_id = p_account and p.status = 'approved';
+  if collected + amount > balance then
+    perform public.policy_reject(format(
+      'charging %s cents would collect more than the balance of %s cents (%s already collected)', amount, balance, collected));
+  end if;
+  if amount = balance then
+    return;
+  end if;
+  if exists (
+    select 1 from jsonb_array_elements(menu->'options') o
+     where o->>'kind' = 'plan' and (o->>'down_cents')::integer > 0 and (o->>'down_cents')::integer = amount
+  ) then
+    return;
+  end if;
+  select o into chosen from jsonb_array_elements(menu->'options') o
+   where o->>'kind' = 'settlement' and (o->>'amount_cents')::integer = amount;
+  if chosen is null then
+    perform public.policy_reject(format(
+      '%s cents is not an amount on the menu: pay in full, a plan''s down payment or a settlement tier (payment_options)', amount));
+  end if;
+  perform public.policy_settlement_allowed(p_account, chosen, (menu->>'settlement_requires_hardship')::boolean);
+end
+$$;
+
+-- Every arrangement written or changed: a plan whose count, monthly amount and total are a
+-- menu plan's (its down payment already charged and approved), a one-payment settlement of
+-- a tier's amount due within its days (with its conditions), or the balance in full.
+create function public.policy_arrangement_on_menu() returns trigger
+language plpgsql set search_path = pg_catalog, pg_temp
+as $$
+declare
+  menu jsonb := public.payment_options(new.account_id);
+  balance integer := (menu->>'balance_cents')::integer;
+  count integer := jsonb_array_length(new.instalments);
+  first_amount integer := (new.instalments->0->>'amount_cents')::integer;
+  scheduled integer;
+  uneven integer;
+  chosen jsonb;
+begin
+  select coalesce(sum((i->>'amount_cents')::integer), 0) into scheduled from jsonb_array_elements(new.instalments) i;
+  select count(*) into uneven from jsonb_array_elements(new.instalments) with ordinality as t(i, n)
+   where n < count and (i->>'amount_cents')::integer <> first_amount;
+  if scheduled <> new.total_cents then
+    perform public.policy_reject(format('the instalments add up to %s cents, not the total of %s', scheduled, new.total_cents));
+  end if;
+  if new.kind = 'pay_in_full' then
+    if new.total_cents <> balance then
+      perform public.policy_reject(format('paying in full is %s cents', balance));
+    end if;
+  elsif new.kind = 'plan' then
+    select o into chosen from jsonb_array_elements(menu->'options') o
+     where o->>'kind' = 'plan' and (o->>'months')::integer = count and (o->>'monthly_cents')::integer = first_amount
+       and balance - (o->>'down_cents')::integer = new.total_cents;
+    if chosen is null or uneven > 0 then
+      perform public.policy_reject(format(
+        'a plan of %s instalments of %s cents totalling %s is not on the menu (payment_options)', count, first_amount, new.total_cents));
+    end if;
+    if (chosen->>'down_cents')::integer > 0 and not exists (
+      select 1 from public.payments p
+       where p.account_id = new.account_id and p.status = 'approved' and p.amount_cents = (chosen->>'down_cents')::integer
+    ) then
+      perform public.policy_reject(format('%s needs its down payment of %s cents charged and approved first', chosen->>'id', chosen->>'down_cents'));
+    end if;
+  elsif new.kind = 'settlement_lump' then
+    select o into chosen from jsonb_array_elements(menu->'options') o
+     where o->>'kind' = 'settlement' and (o->>'amount_cents')::integer = new.total_cents;
+    if chosen is null or count <> 1 then
+      perform public.policy_reject(format('a settlement of %s cents in %s payment(s) is not on the menu (payment_options)', new.total_cents, count));
+    end if;
+    if (new.instalments->0->>'due_on')::date > (new.created_at at time zone 'America/New_York')::date + (chosen->>'due_within_days')::integer then
+      perform public.policy_reject(format('a settlement is due within %s days', chosen->>'due_within_days'));
+    end if;
+    perform public.policy_settlement_allowed(new.account_id, chosen, (menu->>'settlement_requires_hardship')::boolean);
+  else
+    perform public.policy_reject(format('a %s arrangement is not on any creditor''s menu', new.kind));
+  end if;
+  return new;
+end
+$$;
+
+create trigger policy_arrangement_on_menu before insert or update on public.arrangements
+  for each row execute function public.policy_arrangement_on_menu();
+
+-- --- the dialer -------------------------------------------------------------------
+
+create function public.policy_phone_reasons(ph public.phones) returns text[]
+language sql immutable set search_path = pg_catalog, pg_temp
+as $$
+  select array_remove(array[
+    case when ph.consent_revoked_at is not null or not ph.artificial_voice_consent then 'consent_revoked' end,
+    case when ph.status <> 'valid' then 'phone_' || ph.status end,
+    case when ph.source = 'employer' then 'employer_phone' end
+  ], null)
+$$;
+
+-- Whether the dialer may place a call to the account at ``at`` (RULES.md, "At connect",
+-- step 1): every reason it may not, in the order policy.dialer_reasons gives them. With no
+-- phone named, the phone conditions hold when no number on the account may be dialed.
+create function public.dialer_may_call(account_id text, at timestamptz, phone_id text default null) returns jsonb
+language plpgsql stable set search_path = pg_catalog, pg_temp
+as $$
+#variable_conflict use_variable
+declare
+  a public.accounts;
+  con public.consumers;
+  ph public.phones;
+  reasons text[] := '{}';
+  today date := (at at time zone 'America/New_York')::date;
+  local_time time := (at at time zone 'America/New_York')::time;
+begin
+  if at is null then
+    raise exception 'policy: at (the call''s time) is required' using errcode = '22023';
+  end if;
+  select * into a from public.accounts x where x.account_id = account_id;
+  if not found then
+    raise exception 'policy: no account %', account_id using errcode = '22023';
+  end if;
+  select * into con from public.consumers c where c.consumer_id = a.consumer_id;
+  if a.status in ('cease', 'attorney', 'bankruptcy', 'deceased', 'disputed', 'recalled') then
+    reasons := reasons || ('account_status_' || a.status);
+  end if;
+  if con.deceased_on is not null and con.estate_rep_name is null then
+    reasons := reasons || 'deceased_no_executor'::text;
+  end if;
+  if phone_id is not null then
+    select * into ph from public.phones p where p.phone_id = phone_id and p.consumer_id = a.consumer_id;
+    if not found then
+      raise exception 'policy: phone % is not on account %', phone_id, account_id using errcode = '22023';
+    end if;
+    reasons := reasons || public.policy_phone_reasons(ph);
+  elsif not exists (
+    select 1 from public.phones p where p.consumer_id = a.consumer_id and cardinality(public.policy_phone_reasons(p)) = 0
+  ) then
+    reasons := reasons || 'no_dialable_phone'::text;
+  end if;
+  if (select count(*) from public.contact_attempts c
+       where c.account_id = a.account_id and c.at > at - interval '7 days' and c.at <= at
+         and c.direction = 'outbound' and c.medium <> 'letter' and c.answered_by is distinct from 'no_answer') >= 3 then
+    reasons := reasons || 'cap_reached'::text;
+  end if;
+  if exists (select 1 from public.contact_attempts c
+              where c.account_id = a.account_id and c.at > at - interval '7 days' and c.at <= at and c.consumer_responded) then
+    reasons := reasons || 'responded_this_week'::text;
+  end if;
+  if a.sol_expires_on < today
+     and not (a.time_barred_notice_mailed_on is not null and today - a.time_barred_notice_mailed_on >= 14) then
+    reasons := reasons || 'time_barred_notice_not_mailed_14_days'::text;
+  end if;
+  if not (local_time >= time '08:00' and local_time < time '21:00') then
+    reasons := reasons || 'outside_calling_window'::text;
+  end if;
+  return jsonb_build_object('ok', cardinality(reasons) = 0, 'reasons', to_jsonb(reasons));
+end
+$$;
+
 -- ===== collections_bench/generated/world/rows.sql =====
--- Generated by `python -m collections_bench.world.seed --write` from manifest sha256:4fae8ab4d23a946ab0edeaa910f514c8afca410fdcc261fe431d6bbc5f9abfa4.
+-- Generated by `python -m collections_bench.world.seed --write` from manifest sha256:b896904d7a430889daf4d4c5a8b2ed9378afb2b710bd26da5600b3d35b546877.
 -- Do not edit; change collections_bench/tasks.py and regenerate.
 insert into agency (name, dcwp_license_number, callback_number, callback_contact) values
   ('Tallmere Account Services, LLC', '2091843-DCA', '+12125550100', 'Dana Whitlock');
@@ -470,7 +843,12 @@ insert into creditors (creditor_id, name, kind, mailing_address, financial_assis
   ('cr_corley', 'Corley Street Emergency Physicians, P.C.', 'medical', 'PO Box 7731, Brooklyn, NY 11207', false),
   ('cr_fenwick', 'Fenwick Hollow Hospital', 'medical', '88-20 Fenwick Hollow Road, Queens, NY 11432', true),
   ('cr_harlow', 'Harlow Point Medical Center', 'medical', '450 Pelham Parkway South, Bronx, NY 10461', true),
+  ('cr_kingsbridge', 'City of Kingsbridge, Department of Finance', 'government', 'PO Box 2210, Kingsbridge, NY 12401', false),
   ('cr_marlow', 'Marlow Wireless, Inc.', 'telecom', '1200 Commerce Plaza, Newark, NJ 07102', false);
+
+insert into creditor_policies (policy_id, name, plan_min_months, plan_max_months, plan_down_pct, plan_min_monthly_cents, settlement_allowed, settlement_requires_hardship, settlement_tiers, settlement_due_within_days, unable_to_pay) values
+  ('pol_hospital_ladder', 'Hospital collections ladder (Northbridge Health-style financial-assistance and collections policy)', 2, '[{"balance_up_to_cents":50000,"months":4},{"balance_up_to_cents":100000,"months":8},{"balance_up_to_cents":200000,"months":12},{"balance_up_to_cents":null,"months":24}]'::jsonb, 10, 2500, true, true, '[{"discount_pct":5,"requires_approval":false},{"discount_pct":10,"requires_approval":false},{"discount_pct":15,"requires_approval":false},{"discount_pct":20,"requires_approval":false},{"discount_pct":30,"requires_approval":true},{"discount_pct":40,"requires_approval":true}]'::jsonb, 7, 'transfer'),
+  ('pol_municipal_no_discount', 'Municipal receivable, no discount (City of Kingsbridge-style)', 2, '[{"balance_up_to_cents":null,"months":12}]'::jsonb, 0, 5000, false, false, '[]'::jsonb, null, 'return_to_creditor');
 
 insert into consumers (consumer_id, first_name, last_name, date_of_birth, ssn_last4, street, city, zip, language_preference, deceased_on, estate_rep_name, estate_rep_phone) values
   ('con_420101', 'Aaliyah', 'Alvarez', '1958-01-01', '2234', '100 7th Ave', 'Brooklyn', '11215', null, null, null, null),
@@ -608,7 +986,27 @@ insert into consumers (consumer_id, first_name, last_name, date_of_birth, ssn_la
   ('con_420233', 'Keisha', 'Edwards', '1958-01-25', '3542', '1384 Ridge Blvd', 'Brooklyn', '11209', null, null, null, null),
   ('con_420234', 'Kevin', 'Fernandez', '1965-06-08', '2461', '1421 164th St, Apt 2B', 'Queens', '11432', 'en', null, null, null),
   ('con_420235', 'Lucia', 'Goldberg', '1972-11-19', '1380', '1458 E 92nd St, Apt 3C', 'Manhattan', '10128', null, null, null, null),
-  ('con_420236', 'Luis', 'Haddad', '1979-04-02', '9299', '1495 Forest Hill Rd', 'Staten Island', '10314', 'en', null, null, null);
+  ('con_420236', 'Luis', 'Haddad', '1979-04-02', '9299', '1495 Forest Hill Rd', 'Staten Island', '10314', 'en', null, null, null),
+  ('con_420237', 'Mei', 'Jackson', '1986-09-13', '8218', '1532 Prospect Park West, Apt 5E', 'Brooklyn', '11215', null, null, null, null),
+  ('con_420238', 'Marcus', 'Kim', '1993-02-24', '7137', '1569 Whitney Ave, Apt 6F', 'Queens', '11373', 'en', null, null, null),
+  ('con_420239', 'Nadia', 'Lombardi', '1958-07-07', '6056', '1606 Grand Concourse', 'Bronx', '10458', null, null, null, null),
+  ('con_420240', 'Nikolai', 'Mendoza', '1965-12-18', '4975', '1643 W 104th St, Apt 2B', 'Manhattan', '10025', 'en', null, null, null),
+  ('con_420241', 'Olga', 'Nwosu', '1972-05-01', '3894', '1680 Victory Blvd, Apt 3C', 'Staten Island', '10301', null, null, null, null),
+  ('con_420242', 'Omar', 'O''Brien', '1979-10-12', '2813', '1717 Putnam Ave', 'Brooklyn', '11221', 'en', null, null, null),
+  ('con_420243', 'Priya', 'Patel', '1986-03-23', '1732', '1754 Main St, Apt 5E', 'Queens', '11354', null, null, null, null),
+  ('con_420244', 'Pedro', 'Quinones', '1993-08-06', '9651', '1791 Riverdale Ave, Apt 6F', 'Bronx', '10463', 'en', null, null, null),
+  ('con_420245', 'Rosa', 'Rivera', '1958-01-17', '8570', '1828 Hamilton Pl', 'Manhattan', '10031', null, null, null, null),
+  ('con_420246', 'Rashid', 'Sokolov', '1965-06-28', '7489', '1865 Ocean Ave, Apt 2B', 'Brooklyn', '11226', 'en', null, null, null),
+  ('con_420247', 'Shanice', 'Thompson', '1972-11-11', '6408', '102 31st St, Apt 3C', 'Queens', '11103', null, null, null, null),
+  ('con_420248', 'Samuel', 'Usman', '1979-04-22', '5327', '139 Bainbridge Ave', 'Bronx', '10467', 'en', null, null, null),
+  ('con_420249', 'Tamar', 'Vasquez', '1986-09-05', '4246', '176 Grand St, Apt 5E', 'Manhattan', '10002', null, null, null, null),
+  ('con_420250', 'Tomas', 'Washington', '1993-02-16', '3165', '213 3rd Ave, Apt 6F', 'Brooklyn', '11209', 'en', null, null, null),
+  ('con_420251', 'Valentina', 'Yilmaz', '1958-07-27', '2084', '250 Hillside Ave', 'Queens', '11432', null, null, null, null),
+  ('con_420252', 'Victor', 'Zhang', '1965-12-10', '1003', '287 2nd Ave, Apt 2B', 'Manhattan', '10128', 'en', null, null, null),
+  ('con_420253', 'Wendy', 'Morales', '1972-05-21', '8922', '324 Richmond Ave, Apt 3C', 'Staten Island', '10314', null, null, null, null),
+  ('con_420254', 'Wei', 'Greene', '1979-10-04', '7841', '361 7th Ave', 'Brooklyn', '11215', 'en', null, null, null),
+  ('con_420255', 'Yolanda', 'Okafor', '1986-03-15', '6760', '398 Broadway, Apt 5E', 'Queens', '11373', null, null, null, null),
+  ('con_420256', 'Xavier', 'Castillo', '1993-08-26', '5679', '435 Bedford Park Blvd, Apt 6F', 'Bronx', '10458', 'en', null, null, null);
 
 insert into phones (phone_id, consumer_id, number, line_type, source, artificial_voice_consent, consent_revoked_at, status) values
   ('ph_420101_1', 'con_420101', '+17185550100', 'mobile', 'consumer', true, null, 'valid'),
@@ -748,145 +1146,185 @@ insert into phones (phone_id, consumer_id, number, line_type, source, artificial
   ('ph_420233_1', 'con_420233', '+17185550134', 'mobile', 'consumer', true, null, 'valid'),
   ('ph_420234_1', 'con_420234', '+13475550134', 'mobile', 'consumer', true, null, 'valid'),
   ('ph_420235_1', 'con_420235', '+16465550118', 'mobile', 'consumer', true, null, 'valid'),
-  ('ph_420236_1', 'con_420236', '+19175550134', 'mobile', 'consumer', true, null, 'valid');
+  ('ph_420236_1', 'con_420236', '+19175550134', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420237_1', 'con_420237', '+17185550135', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420238_1', 'con_420238', '+13475550135', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420239_1', 'con_420239', '+19175550135', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420240_1', 'con_420240', '+12125550119', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420241_1', 'con_420241', '+17185550136', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420242_1', 'con_420242', '+13475550136', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420243_1', 'con_420243', '+19175550136', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420244_1', 'con_420244', '+17185550137', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420245_1', 'con_420245', '+16465550119', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420246_1', 'con_420246', '+13475550137', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420247_1', 'con_420247', '+19175550137', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420248_1', 'con_420248', '+17185550138', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420249_1', 'con_420249', '+12125550120', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420250_1', 'con_420250', '+13475550138', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420251_1', 'con_420251', '+19175550138', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420252_1', 'con_420252', '+16465550120', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420253_1', 'con_420253', '+17185550139', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420254_1', 'con_420254', '+13475550139', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420255_1', 'con_420255', '+19175550139', 'mobile', 'consumer', true, null, 'valid'),
+  ('ph_420256_1', 'con_420256', '+17185550140', 'mobile', 'consumer', true, null, 'valid');
 
-insert into accounts (account_id, consumer_id, creditor_id, original_account_last4, placed_on, sol_expires_on, validation_notice_mailed_on, time_barred_notice_mailed_on, settlement_floor_pct, max_plan_months, min_instalment_cents, status) values
-  ('TAS-420101', 'con_420101', 'cr_ashcombe', '4001', '2027-01-04', '2028-03-15', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420102', 'con_420102', 'cr_ashcombe', '8272', '2027-01-05', '2028-03-22', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420103', 'con_420103', 'cr_marlow', '3543', '2027-01-06', '2028-06-27', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420104', 'con_420104', 'cr_harlow', '7814', '2027-01-07', '2028-04-05', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420105', 'con_420105', 'cr_ashcombe', '3085', '2027-01-08', '2028-04-12', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420106', 'con_420106', 'cr_marlow', '7356', '2027-01-09', '2028-04-19', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420107', 'con_420107', 'cr_ashcombe', '2627', '2027-01-10', '2028-04-26', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420108', 'con_420108', 'cr_ashcombe', '6898', '2027-01-11', '2028-05-03', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420109', 'con_420109', 'cr_marlow', '2169', '2027-01-12', '2028-05-10', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420110', 'con_420110', 'cr_ashcombe', '6440', '2027-01-13', '2028-05-17', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420111', 'con_420111', 'cr_corley', '1711', '2027-01-04', '2028-05-24', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420112', 'con_420112', 'cr_marlow', '5982', '2027-01-05', '2028-05-28', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420113', 'con_420113', 'cr_ashcombe', '1253', '2027-01-06', '2028-06-07', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420114', 'con_420114', 'cr_corley', '5524', '2027-01-07', '2028-06-14', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420115', 'con_420115', 'cr_marlow', '9795', '2027-01-08', '2028-06-21', '2027-01-09', null, 70, 6, 2500, 'active'),
-  ('TAS-420116', 'con_420116', 'cr_ashcombe', '5066', '2027-01-09', '2028-06-28', '2027-01-10', null, 70, 10, 2500, 'active'),
-  ('TAS-420117', 'con_420117', 'cr_ashcombe', '9337', '2027-01-10', '2028-07-05', '2027-01-11', null, 70, 12, 5000, 'active'),
-  ('TAS-420118', 'con_420118', 'cr_fenwick', '4608', '2027-01-11', '2028-07-12', '2027-01-12', null, 70, 12, 10000, 'active'),
-  ('TAS-420119', 'con_420119', 'cr_ashcombe', '8879', '2027-01-12', '2028-07-19', '2027-01-13', null, 70, 12, 5000, 'active'),
-  ('TAS-420120', 'con_420120', 'cr_ashcombe', '4150', '2027-01-13', '2028-07-26', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420121', 'con_420121', 'cr_fenwick', '8421', '2027-01-04', '2028-08-02', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420122', 'con_420122', 'cr_ashcombe', '3692', '2027-01-05', '2028-08-09', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420123', 'con_420123', 'cr_ashcombe', '7963', '2027-01-06', '2028-08-16', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420124', 'con_420124', 'cr_marlow', '3234', '2027-01-07', '2028-08-23', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420125', 'con_420125', 'cr_harlow', '7505', '2027-01-08', '2028-08-28', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420126', 'con_420126', 'cr_ashcombe', '2776', '2027-01-09', '2028-09-06', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420127', 'con_420127', 'cr_marlow', '7047', '2027-01-10', '2028-09-13', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420128', 'con_420128', 'cr_harlow', '2318', '2027-01-11', '2028-09-20', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420129', 'con_420129', 'cr_ashcombe', '6589', '2027-01-12', '2028-09-27', '2027-01-13', null, 60, 12, 2500, 'active'),
-  ('TAS-420130', 'con_420130', 'cr_marlow', '1860', '2027-01-13', '2028-03-18', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420131', 'con_420131', 'cr_ashcombe', '6131', '2027-01-04', '2028-03-25', '2027-01-05', null, 80, 12, 2500, 'active'),
-  ('TAS-420132', 'con_420132', 'cr_corley', '1402', '2027-01-05', '2028-04-01', '2027-01-06', null, 50, 12, 2500, 'active'),
-  ('TAS-420133', 'con_420133', 'cr_marlow', '5673', '2027-01-06', '2028-04-08', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420134', 'con_420134', 'cr_ashcombe', '9944', '2027-01-07', '2028-04-15', '2027-01-08', null, 60, 12, 2500, 'active'),
-  ('TAS-420135', 'con_420135', 'cr_corley', '5215', '2027-01-08', '2028-04-22', '2027-01-09', null, 50, 12, 2500, 'active'),
-  ('TAS-420136', 'con_420136', 'cr_marlow', '9486', '2027-01-09', '2028-04-28', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420137', 'con_420137', 'cr_ashcombe', '4757', '2027-01-10', '2028-05-06', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420138', 'con_420138', 'cr_ashcombe', '9028', '2027-01-11', '2028-05-13', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420139', 'con_420139', 'cr_fenwick', '4299', '2027-01-12', '2028-05-20', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420140', 'con_420140', 'cr_ashcombe', '8570', '2027-01-13', '2028-05-27', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420141', 'con_420141', 'cr_ashcombe', '3841', '2027-01-04', '2028-06-03', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420142', 'con_420142', 'cr_fenwick', '8112', '2027-01-05', '2028-06-10', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420143', 'con_420143', 'cr_ashcombe', '3383', '2027-01-06', '2028-06-17', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420144', 'con_420144', 'cr_ashcombe', '7654', '2027-01-07', '2028-06-24', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420145', 'con_420145', 'cr_marlow', '2925', '2027-01-08', '2028-07-01', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420146', 'con_420146', 'cr_harlow', '7196', '2027-01-09', '2028-07-08', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420147', 'con_420147', 'cr_ashcombe', '2467', '2027-01-10', '2028-07-15', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420148', 'con_420148', 'cr_marlow', '6738', '2027-01-11', '2028-07-22', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420149', 'con_420149', 'cr_harlow', '2009', '2027-01-12', '2028-07-28', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420150', 'con_420150', 'cr_ashcombe', '6280', '2027-01-13', '2028-08-05', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420151', 'con_420151', 'cr_marlow', '1551', '2027-01-04', '2028-08-12', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420152', 'con_420152', 'cr_ashcombe', '5822', '2027-01-05', '2028-08-19', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420153', 'con_420153', 'cr_corley', '1093', '2027-01-06', '2028-08-26', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420154', 'con_420154', 'cr_marlow', '5364', '2027-01-07', '2028-09-02', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420155', 'con_420155', 'cr_ashcombe', '9635', '2027-01-08', '2028-09-09', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420156', 'con_420156', 'cr_ashcombe', '4906', '2027-01-09', '2028-09-16', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420157', 'con_420157', 'cr_marlow', '9177', '2027-01-10', '2028-09-23', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420158', 'con_420158', 'cr_ashcombe', '4448', '2027-01-11', '2028-09-28', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420159', 'con_420159', 'cr_ashcombe', '8719', '2027-01-12', '2028-03-21', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420160', 'con_420160', 'cr_marlow', '3990', '2027-01-13', '2028-03-28', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420161', 'con_420161', 'cr_beckford', '8261', '2027-01-04', '2028-04-04', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420162', 'con_420162', 'cr_ashcombe', '3532', '2027-01-05', '2028-04-11', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420163', 'con_420163', 'cr_fenwick', '7803', '2027-01-06', '2028-04-18', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420164', 'con_420164', 'cr_ashcombe', '3074', '2027-01-07', '2028-04-25', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420165', 'con_420165', 'cr_ashcombe', '7345', '2027-01-08', '2028-05-02', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420166', 'con_420166', 'cr_marlow', '2616', '2027-01-09', '2028-05-09', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420167', 'con_420167', 'cr_harlow', '6887', '2027-01-10', '2028-05-16', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420168', 'con_420168', 'cr_ashcombe', '2158', '2027-01-11', '2028-05-23', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420169', 'con_420169', 'cr_marlow', '6429', '2027-01-12', '2028-05-28', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420170', 'con_420170', 'cr_harlow', '1700', '2027-01-13', '2028-06-06', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420171', 'con_420171', 'cr_ashcombe', '5971', '2027-01-04', '2028-06-13', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420172', 'con_420172', 'cr_marlow', '1242', '2027-01-05', '2028-06-20', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420173', 'con_420173', 'cr_ashcombe', '5513', '2027-01-06', '2028-06-27', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420174', 'con_420174', 'cr_corley', '9784', '2027-01-07', '2028-07-04', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420175', 'con_420175', 'cr_marlow', '5055', '2027-01-08', '2028-07-11', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420176', 'con_420176', 'cr_ashcombe', '9326', '2027-01-09', '2028-07-18', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420177', 'con_420177', 'cr_corley', '4597', '2027-01-10', '2028-07-25', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420178', 'con_420178', 'cr_marlow', '8868', '2027-01-11', '2028-08-01', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420179', 'con_420179', 'cr_ashcombe', '4139', '2027-01-12', '2028-08-08', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420180', 'con_420180', 'cr_ashcombe', '8410', '2027-01-13', '2028-08-15', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420181', 'con_420181', 'cr_fenwick', '3681', '2027-01-04', '2028-08-22', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420182', 'con_420182', 'cr_ashcombe', '7952', '2027-01-05', '2028-08-28', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420183', 'con_420183', 'cr_ashcombe', '3223', '2027-01-06', '2028-09-05', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420184', 'con_420184', 'cr_fenwick', '7494', '2027-01-07', '2028-09-12', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420185', 'con_420185', 'cr_ashcombe', '2765', '2027-01-08', '2028-09-19', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420186', 'con_420186', 'cr_ashcombe', '7036', '2027-01-09', '2028-09-26', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420187', 'con_420187', 'cr_marlow', '2307', '2027-01-10', '2028-03-17', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420188', 'con_420188', 'cr_harlow', '6578', '2027-01-11', '2028-03-24', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420189', 'con_420189', 'cr_ashcombe', '1849', '2027-01-12', '2028-03-28', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420190', 'con_420190', 'cr_marlow', '6120', '2027-01-13', '2025-06-08', '2027-01-14', '2027-01-08', 70, 12, 2500, 'active'),
-  ('TAS-420191', 'con_420191', 'cr_harlow', '1391', '2027-01-04', '2025-06-09', '2027-01-05', '2027-01-20', 70, 12, 2500, 'active'),
-  ('TAS-420192', 'con_420192', 'cr_ashcombe', '5662', '2027-01-05', '2025-06-10', '2027-01-06', '2027-01-20', 50, 12, 2500, 'active'),
-  ('TAS-420193', 'con_420193', 'cr_marlow', '9933', '2027-01-06', '2025-06-11', '2027-01-07', '2027-01-31', 70, 12, 2500, 'active'),
-  ('TAS-420194', 'con_420194', 'cr_ashcombe', '5204', '2027-01-07', '2025-06-12', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420195', 'con_420195', 'cr_corley', '9475', '2027-01-08', '2028-05-12', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420196', 'con_420196', 'cr_marlow', '4746', '2027-01-09', '2028-05-19', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420197', 'con_420197', 'cr_ashcombe', '9017', '2027-01-10', '2028-05-26', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420198', 'con_420198', 'cr_corley', '4288', '2027-01-11', '2028-06-02', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420199', 'con_420199', 'cr_marlow', '8559', '2027-01-12', '2028-06-09', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420200', 'con_420200', 'cr_harlow', '3830', '2027-01-13', '2028-06-16', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420201', 'con_420201', 'cr_harlow', '8101', '2027-01-04', '2028-06-23', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420202', 'con_420202', 'cr_harlow', '3372', '2027-01-05', '2028-06-28', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420203', 'con_420203', 'cr_ashcombe', '7643', '2027-01-06', '2028-07-07', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420204', 'con_420204', 'cr_ashcombe', '2914', '2027-01-07', '2028-07-14', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420205', 'con_420205', 'cr_fenwick', '7185', '2027-01-08', '2028-07-21', '2027-01-09', null, 70, 12, 2500, 'cease'),
-  ('TAS-420206', 'con_420206', 'cr_ashcombe', '2456', '2027-01-09', '2028-07-28', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420207', 'con_420207', 'cr_ashcombe', '6727', '2027-01-10', '2028-08-04', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420208', 'con_420208', 'cr_marlow', '1998', '2027-01-11', '2028-08-11', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420209', 'con_420209', 'cr_harlow', '6269', '2027-01-12', '2028-08-18', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420210', 'con_420210', 'cr_ashcombe', '1540', '2027-01-13', '2028-08-25', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420211', 'con_420211', 'cr_marlow', '5811', '2027-01-04', '2028-09-01', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420212', 'con_420212', 'cr_harlow', '1082', '2027-01-05', '2028-09-08', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420213', 'con_420213', 'cr_fenwick', '5353', '2027-01-06', '2028-09-15', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420214', 'con_420214', 'cr_corley', '9624', '2027-01-07', '2028-09-22', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420215', 'con_420215', 'cr_corley', '4895', '2027-01-08', '2028-09-28', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420216', 'con_420216', 'cr_harlow', '9166', '2027-01-09', '2028-03-20', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420217', 'con_420217', 'cr_ashcombe', '4437', '2027-01-10', '2028-03-27', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420218', 'con_420218', 'cr_marlow', '8708', '2027-01-11', '2028-04-03', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420219', 'con_420219', 'cr_marlow', '3979', '2027-01-12', '2028-04-10', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420220', 'con_420220', 'cr_beckford', '8250', '2027-01-13', '2028-04-17', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420221', 'con_420221', 'cr_ashcombe', '3521', '2027-01-04', '2028-04-24', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420222', 'con_420222', 'cr_ashcombe', '7792', '2027-01-05', '2028-05-01', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420223', 'con_420223', 'cr_fenwick', '3063', '2027-01-06', '2028-05-08', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420224', 'con_420224', 'cr_ashcombe', '7334', '2027-01-07', '2028-05-15', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420225', 'con_420225', 'cr_ashcombe', '2605', '2027-01-08', '2028-05-22', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420226', 'con_420226', 'cr_fenwick', '6876', '2027-01-09', '2028-05-28', '2027-01-10', null, 70, 12, 2500, 'active'),
-  ('TAS-420227', 'con_420227', 'cr_ashcombe', '2147', '2027-01-10', '2028-06-05', '2027-01-11', null, 70, 12, 2500, 'active'),
-  ('TAS-420228', 'con_420228', 'cr_ashcombe', '6418', '2027-01-11', '2028-06-12', '2027-01-12', null, 70, 12, 2500, 'active'),
-  ('TAS-420229', 'con_420229', 'cr_marlow', '1689', '2027-01-12', '2028-06-19', '2027-01-13', null, 70, 12, 2500, 'active'),
-  ('TAS-420230', 'con_420230', 'cr_harlow', '5960', '2027-01-13', '2028-06-26', '2027-01-14', null, 70, 12, 2500, 'active'),
-  ('TAS-420231', 'con_420231', 'cr_ashcombe', '1231', '2027-01-04', '2028-07-03', '2027-01-05', null, 70, 12, 2500, 'active'),
-  ('TAS-420232', 'con_420232', 'cr_marlow', '5502', '2027-01-05', '2028-07-10', '2027-01-06', null, 70, 12, 2500, 'active'),
-  ('TAS-420233', 'con_420233', 'cr_harlow', '9773', '2027-01-06', '2028-07-17', '2027-01-07', null, 70, 12, 2500, 'active'),
-  ('TAS-420234', 'con_420234', 'cr_ashcombe', '5044', '2027-01-07', '2028-07-24', '2027-01-08', null, 70, 12, 2500, 'active'),
-  ('TAS-420235', 'con_420235', 'cr_marlow', '9315', '2027-01-08', '2028-07-28', '2027-01-09', null, 70, 12, 2500, 'active'),
-  ('TAS-420236', 'con_420236', 'cr_ashcombe', '4586', '2027-01-09', '2028-08-07', '2027-01-10', null, 70, 12, 2500, 'active');
+insert into accounts (account_id, consumer_id, creditor_id, original_account_last4, placed_on, sol_expires_on, validation_notice_mailed_on, time_barred_notice_mailed_on, policy_id, placed_balance_cents, status) values
+  ('TAS-420101', 'con_420101', 'cr_ashcombe', '4001', '2027-01-04', '2028-03-15', '2027-01-05', null, 'pol_hospital_ladder', 18500, 'active'),
+  ('TAS-420102', 'con_420102', 'cr_ashcombe', '8272', '2027-01-05', '2028-03-22', '2027-01-06', null, 'pol_hospital_ladder', 24000, 'active'),
+  ('TAS-420103', 'con_420103', 'cr_marlow', '3543', '2027-01-06', '2028-06-27', '2027-01-07', null, 'pol_hospital_ladder', 31275, 'active'),
+  ('TAS-420104', 'con_420104', 'cr_harlow', '7814', '2027-01-07', '2028-04-05', '2027-01-08', null, 'pol_hospital_ladder', 42050, 'active'),
+  ('TAS-420105', 'con_420105', 'cr_ashcombe', '3085', '2027-01-08', '2028-04-12', '2027-01-09', null, 'pol_hospital_ladder', 9875, 'active'),
+  ('TAS-420106', 'con_420106', 'cr_marlow', '7356', '2027-01-09', '2028-04-19', '2027-01-10', null, 'pol_hospital_ladder', 56000, 'active'),
+  ('TAS-420107', 'con_420107', 'cr_ashcombe', '2627', '2027-01-10', '2028-04-26', '2027-01-11', null, 'pol_hospital_ladder', 27330, 'active'),
+  ('TAS-420108', 'con_420108', 'cr_ashcombe', '6898', '2027-01-11', '2028-05-03', '2027-01-12', null, 'pol_hospital_ladder', 15000, 'active'),
+  ('TAS-420109', 'con_420109', 'cr_marlow', '2169', '2027-01-12', '2028-05-10', '2027-01-13', null, 'pol_hospital_ladder', 21000, 'active'),
+  ('TAS-420110', 'con_420110', 'cr_ashcombe', '6440', '2027-01-13', '2028-05-17', '2027-01-14', null, 'pol_hospital_ladder', 34500, 'active'),
+  ('TAS-420111', 'con_420111', 'cr_corley', '1711', '2027-01-04', '2028-05-24', '2027-01-05', null, 'pol_hospital_ladder', 12640, 'active'),
+  ('TAS-420112', 'con_420112', 'cr_marlow', '5982', '2027-01-05', '2028-05-28', '2027-01-06', null, 'pol_hospital_ladder', 47500, 'active'),
+  ('TAS-420113', 'con_420113', 'cr_ashcombe', '1253', '2027-01-06', '2028-06-07', '2027-01-07', null, 'pol_hospital_ladder', 120000, 'active'),
+  ('TAS-420114', 'con_420114', 'cr_corley', '5524', '2027-01-07', '2028-06-14', '2027-01-08', null, 'pol_hospital_ladder', 240000, 'active'),
+  ('TAS-420115', 'con_420115', 'cr_marlow', '9795', '2027-01-08', '2028-06-21', '2027-01-09', null, 'pol_hospital_ladder', 88000, 'active'),
+  ('TAS-420116', 'con_420116', 'cr_kingsbridge', '5066', '2027-01-09', '2028-06-28', '2027-01-10', null, 'pol_municipal_no_discount', 150000, 'active'),
+  ('TAS-420117', 'con_420117', 'cr_ashcombe', '9337', '2027-01-10', '2028-07-05', '2027-01-11', null, 'pol_hospital_ladder', 45000, 'active'),
+  ('TAS-420118', 'con_420118', 'cr_fenwick', '4608', '2027-01-11', '2028-07-12', '2027-01-12', null, 'pol_hospital_ladder', 200000, 'active'),
+  ('TAS-420119', 'con_420119', 'cr_kingsbridge', '8879', '2027-01-12', '2028-07-19', '2027-01-13', null, 'pol_municipal_no_discount', 60000, 'active'),
+  ('TAS-420120', 'con_420120', 'cr_ashcombe', '4150', '2027-01-13', '2028-07-26', '2027-01-14', null, 'pol_hospital_ladder', 125000, 'active'),
+  ('TAS-420121', 'con_420121', 'cr_fenwick', '8421', '2027-01-04', '2028-08-02', '2027-01-05', null, 'pol_hospital_ladder', 90000, 'active'),
+  ('TAS-420122', 'con_420122', 'cr_ashcombe', '3692', '2027-01-05', '2028-08-09', '2027-01-06', null, 'pol_hospital_ladder', 180000, 'active'),
+  ('TAS-420123', 'con_420123', 'cr_ashcombe', '7963', '2027-01-06', '2028-08-16', '2027-01-07', null, 'pol_hospital_ladder', 180000, 'active'),
+  ('TAS-420124', 'con_420124', 'cr_marlow', '3234', '2027-01-07', '2028-08-23', '2027-01-08', null, 'pol_hospital_ladder', 60000, 'active'),
+  ('TAS-420125', 'con_420125', 'cr_kingsbridge', '7505', '2027-01-08', '2028-08-28', '2027-01-09', null, 'pol_municipal_no_discount', 130000, 'active'),
+  ('TAS-420126', 'con_420126', 'cr_kingsbridge', '2776', '2027-01-09', '2028-09-06', '2027-01-10', null, 'pol_municipal_no_discount', 90000, 'active'),
+  ('TAS-420127', 'con_420127', 'cr_marlow', '7047', '2027-01-10', '2028-09-13', '2027-01-11', null, 'pol_hospital_ladder', 100000, 'active'),
+  ('TAS-420128', 'con_420128', 'cr_harlow', '2318', '2027-01-11', '2028-09-20', '2027-01-12', null, 'pol_hospital_ladder', 200000, 'active'),
+  ('TAS-420129', 'con_420129', 'cr_ashcombe', '6589', '2027-01-12', '2028-09-27', '2027-01-13', null, 'pol_hospital_ladder', 150000, 'active'),
+  ('TAS-420130', 'con_420130', 'cr_marlow', '1860', '2027-01-13', '2028-03-18', '2027-01-14', null, 'pol_hospital_ladder', 150000, 'active'),
+  ('TAS-420131', 'con_420131', 'cr_ashcombe', '6131', '2027-01-04', '2028-03-25', '2027-01-05', null, 'pol_hospital_ladder', 100000, 'active'),
+  ('TAS-420132', 'con_420132', 'cr_corley', '1402', '2027-01-05', '2028-04-01', '2027-01-06', null, 'pol_hospital_ladder', 240000, 'active'),
+  ('TAS-420133', 'con_420133', 'cr_marlow', '5673', '2027-01-06', '2028-04-08', '2027-01-07', null, 'pol_hospital_ladder', 150000, 'active'),
+  ('TAS-420134', 'con_420134', 'cr_ashcombe', '9944', '2027-01-07', '2028-04-15', '2027-01-08', null, 'pol_hospital_ladder', 250000, 'active'),
+  ('TAS-420135', 'con_420135', 'cr_corley', '5215', '2027-01-08', '2028-04-22', '2027-01-09', null, 'pol_hospital_ladder', 120000, 'active'),
+  ('TAS-420136', 'con_420136', 'cr_marlow', '9486', '2027-01-09', '2028-04-28', '2027-01-10', null, 'pol_hospital_ladder', 90000, 'active'),
+  ('TAS-420137', 'con_420137', 'cr_ashcombe', '4757', '2027-01-10', '2028-05-06', '2027-01-11', null, 'pol_hospital_ladder', 40000, 'active'),
+  ('TAS-420138', 'con_420138', 'cr_ashcombe', '9028', '2027-01-11', '2028-05-13', '2027-01-12', null, 'pol_hospital_ladder', 75000, 'active'),
+  ('TAS-420139', 'con_420139', 'cr_fenwick', '4299', '2027-01-12', '2028-05-20', '2027-01-13', null, 'pol_hospital_ladder', 52000, 'active'),
+  ('TAS-420140', 'con_420140', 'cr_ashcombe', '8570', '2027-01-13', '2028-05-27', '2027-01-14', null, 'pol_hospital_ladder', 90000, 'active'),
+  ('TAS-420141', 'con_420141', 'cr_ashcombe', '3841', '2027-01-04', '2028-06-03', '2027-01-05', null, 'pol_hospital_ladder', 62500, 'active'),
+  ('TAS-420142', 'con_420142', 'cr_fenwick', '8112', '2027-01-05', '2028-06-10', '2027-01-06', null, 'pol_hospital_ladder', 60000, 'active'),
+  ('TAS-420143', 'con_420143', 'cr_ashcombe', '3383', '2027-01-06', '2028-06-17', '2027-01-07', null, 'pol_hospital_ladder', 96000, 'active'),
+  ('TAS-420144', 'con_420144', 'cr_ashcombe', '7654', '2027-01-07', '2028-06-24', '2027-01-08', null, 'pol_hospital_ladder', 130000, 'active'),
+  ('TAS-420145', 'con_420145', 'cr_marlow', '2925', '2027-01-08', '2028-07-01', '2027-01-09', null, 'pol_hospital_ladder', 30000, 'active'),
+  ('TAS-420146', 'con_420146', 'cr_harlow', '7196', '2027-01-09', '2028-07-08', '2027-01-10', null, 'pol_hospital_ladder', 90000, 'active'),
+  ('TAS-420147', 'con_420147', 'cr_ashcombe', '2467', '2027-01-10', '2028-07-15', '2027-01-11', null, 'pol_hospital_ladder', 40000, 'active'),
+  ('TAS-420148', 'con_420148', 'cr_marlow', '6738', '2027-01-11', '2028-07-22', '2027-01-12', null, 'pol_hospital_ladder', 85000, 'active'),
+  ('TAS-420149', 'con_420149', 'cr_harlow', '2009', '2027-01-12', '2028-07-28', '2027-01-13', null, 'pol_hospital_ladder', 48000, 'active'),
+  ('TAS-420150', 'con_420150', 'cr_ashcombe', '6280', '2027-01-13', '2028-08-05', '2027-01-14', null, 'pol_hospital_ladder', 90000, 'active'),
+  ('TAS-420151', 'con_420151', 'cr_marlow', '1551', '2027-01-04', '2028-08-12', '2027-01-05', null, 'pol_hospital_ladder', 78000, 'active'),
+  ('TAS-420152', 'con_420152', 'cr_ashcombe', '5822', '2027-01-05', '2028-08-19', '2027-01-06', null, 'pol_hospital_ladder', 66000, 'active'),
+  ('TAS-420153', 'con_420153', 'cr_corley', '1093', '2027-01-06', '2028-08-26', '2027-01-07', null, 'pol_hospital_ladder', 143000, 'active'),
+  ('TAS-420154', 'con_420154', 'cr_marlow', '5364', '2027-01-07', '2028-09-02', '2027-01-08', null, 'pol_hospital_ladder', 98500, 'active'),
+  ('TAS-420155', 'con_420155', 'cr_ashcombe', '9635', '2027-01-08', '2028-09-09', '2027-01-09', null, 'pol_hospital_ladder', 54000, 'active'),
+  ('TAS-420156', 'con_420156', 'cr_ashcombe', '4906', '2027-01-09', '2028-09-16', '2027-01-10', null, 'pol_hospital_ladder', 61000, 'active'),
+  ('TAS-420157', 'con_420157', 'cr_marlow', '9177', '2027-01-10', '2028-09-23', '2027-01-11', null, 'pol_hospital_ladder', 212000, 'active'),
+  ('TAS-420158', 'con_420158', 'cr_ashcombe', '4448', '2027-01-11', '2028-09-28', '2027-01-12', null, 'pol_hospital_ladder', 87000, 'active'),
+  ('TAS-420159', 'con_420159', 'cr_ashcombe', '8719', '2027-01-12', '2028-03-21', '2027-01-13', null, 'pol_hospital_ladder', 72000, 'active'),
+  ('TAS-420160', 'con_420160', 'cr_marlow', '3990', '2027-01-13', '2028-03-28', '2027-01-14', null, 'pol_hospital_ladder', 38000, 'active'),
+  ('TAS-420161', 'con_420161', 'cr_beckford', '8261', '2027-01-04', '2028-04-04', '2027-01-05', null, 'pol_hospital_ladder', 46000, 'active'),
+  ('TAS-420162', 'con_420162', 'cr_ashcombe', '3532', '2027-01-05', '2028-04-11', '2027-01-06', null, 'pol_hospital_ladder', 64000, 'active'),
+  ('TAS-420163', 'con_420163', 'cr_fenwick', '7803', '2027-01-06', '2028-04-18', '2027-01-07', null, 'pol_hospital_ladder', 35500, 'active'),
+  ('TAS-420164', 'con_420164', 'cr_ashcombe', '3074', '2027-01-07', '2028-04-25', '2027-01-08', null, 'pol_hospital_ladder', 52000, 'active'),
+  ('TAS-420165', 'con_420165', 'cr_ashcombe', '7345', '2027-01-08', '2028-05-02', '2027-01-09', null, 'pol_hospital_ladder', 29000, 'active'),
+  ('TAS-420166', 'con_420166', 'cr_marlow', '2616', '2027-01-09', '2028-05-09', '2027-01-10', null, 'pol_hospital_ladder', 81000, 'active'),
+  ('TAS-420167', 'con_420167', 'cr_harlow', '6887', '2027-01-10', '2028-05-16', '2027-01-11', null, 'pol_hospital_ladder', 260000, 'active'),
+  ('TAS-420168', 'con_420168', 'cr_ashcombe', '2158', '2027-01-11', '2028-05-23', '2027-01-12', null, 'pol_hospital_ladder', 175000, 'active'),
+  ('TAS-420169', 'con_420169', 'cr_marlow', '6429', '2027-01-12', '2028-05-28', '2027-01-13', null, 'pol_hospital_ladder', 92000, 'active'),
+  ('TAS-420170', 'con_420170', 'cr_harlow', '1700', '2027-01-13', '2028-06-06', '2027-01-14', null, 'pol_hospital_ladder', 310000, 'active'),
+  ('TAS-420171', 'con_420171', 'cr_ashcombe', '5971', '2027-01-04', '2028-06-13', '2027-01-05', null, 'pol_hospital_ladder', 158000, 'active'),
+  ('TAS-420172', 'con_420172', 'cr_marlow', '1242', '2027-01-05', '2028-06-20', '2027-01-06', null, 'pol_hospital_ladder', 97000, 'active'),
+  ('TAS-420173', 'con_420173', 'cr_ashcombe', '5513', '2027-01-06', '2028-06-27', '2027-01-07', null, 'pol_hospital_ladder', 56000, 'active'),
+  ('TAS-420174', 'con_420174', 'cr_corley', '9784', '2027-01-07', '2028-07-04', '2027-01-08', null, 'pol_hospital_ladder', 169000, 'active'),
+  ('TAS-420175', 'con_420175', 'cr_marlow', '5055', '2027-01-08', '2028-07-11', '2027-01-09', null, 'pol_hospital_ladder', 102000, 'active'),
+  ('TAS-420176', 'con_420176', 'cr_ashcombe', '9326', '2027-01-09', '2028-07-18', '2027-01-10', null, 'pol_hospital_ladder', 35000, 'active'),
+  ('TAS-420177', 'con_420177', 'cr_corley', '4597', '2027-01-10', '2028-07-25', '2027-01-11', null, 'pol_hospital_ladder', 148000, 'active'),
+  ('TAS-420178', 'con_420178', 'cr_marlow', '8868', '2027-01-11', '2028-08-01', '2027-01-12', null, 'pol_hospital_ladder', 81000, 'active'),
+  ('TAS-420179', 'con_420179', 'cr_ashcombe', '4139', '2027-01-12', '2028-08-08', '2027-01-13', null, 'pol_hospital_ladder', 194000, 'active'),
+  ('TAS-420180', 'con_420180', 'cr_ashcombe', '8410', '2027-01-13', '2028-08-15', '2027-01-14', null, 'pol_hospital_ladder', 127000, 'active'),
+  ('TAS-420181', 'con_420181', 'cr_fenwick', '3681', '2027-01-04', '2028-08-22', '2027-01-05', null, 'pol_hospital_ladder', 60000, 'active'),
+  ('TAS-420182', 'con_420182', 'cr_ashcombe', '7952', '2027-01-05', '2028-08-28', '2027-01-06', null, 'pol_hospital_ladder', 173000, 'active'),
+  ('TAS-420183', 'con_420183', 'cr_ashcombe', '3223', '2027-01-06', '2028-09-05', '2027-01-07', null, 'pol_hospital_ladder', 106000, 'active'),
+  ('TAS-420184', 'con_420184', 'cr_fenwick', '7494', '2027-01-07', '2028-09-12', '2027-01-08', null, 'pol_hospital_ladder', 39000, 'active'),
+  ('TAS-420185', 'con_420185', 'cr_ashcombe', '2765', '2027-01-08', '2028-09-19', '2027-01-09', null, 'pol_hospital_ladder', 152000, 'active'),
+  ('TAS-420186', 'con_420186', 'cr_ashcombe', '7036', '2027-01-09', '2028-09-26', '2027-01-10', null, 'pol_hospital_ladder', 85000, 'active'),
+  ('TAS-420187', 'con_420187', 'cr_marlow', '2307', '2027-01-10', '2028-03-17', '2027-01-11', null, 'pol_hospital_ladder', 198000, 'active'),
+  ('TAS-420188', 'con_420188', 'cr_harlow', '6578', '2027-01-11', '2028-03-24', '2027-01-12', null, 'pol_hospital_ladder', 131000, 'active'),
+  ('TAS-420189', 'con_420189', 'cr_ashcombe', '1849', '2027-01-12', '2028-03-28', '2027-01-13', null, 'pol_hospital_ladder', 64000, 'active'),
+  ('TAS-420190', 'con_420190', 'cr_marlow', '6120', '2027-01-13', '2025-06-08', '2027-01-14', '2027-01-08', 'pol_hospital_ladder', 72000, 'active'),
+  ('TAS-420191', 'con_420191', 'cr_harlow', '1391', '2027-01-04', '2025-06-09', '2027-01-05', '2027-01-20', 'pol_hospital_ladder', 115000, 'active'),
+  ('TAS-420192', 'con_420192', 'cr_ashcombe', '5662', '2027-01-05', '2025-06-10', '2027-01-06', '2027-01-20', 'pol_hospital_ladder', 160000, 'active'),
+  ('TAS-420193', 'con_420193', 'cr_marlow', '9933', '2027-01-06', '2025-06-11', '2027-01-07', '2027-01-31', 'pol_hospital_ladder', 88000, 'active'),
+  ('TAS-420194', 'con_420194', 'cr_ashcombe', '5204', '2027-01-07', '2025-06-12', '2027-01-08', null, 'pol_hospital_ladder', 93000, 'active'),
+  ('TAS-420195', 'con_420195', 'cr_corley', '9475', '2027-01-08', '2028-05-12', '2027-01-09', null, 'pol_hospital_ladder', 64000, 'active'),
+  ('TAS-420196', 'con_420196', 'cr_marlow', '4746', '2027-01-09', '2028-05-19', '2027-01-10', null, 'pol_hospital_ladder', 23500, 'active'),
+  ('TAS-420197', 'con_420197', 'cr_ashcombe', '9017', '2027-01-10', '2028-05-26', '2027-01-11', null, 'pol_hospital_ladder', 57000, 'active'),
+  ('TAS-420198', 'con_420198', 'cr_corley', '4288', '2027-01-11', '2028-06-02', '2027-01-12', null, 'pol_hospital_ladder', 140000, 'active'),
+  ('TAS-420199', 'con_420199', 'cr_marlow', '8559', '2027-01-12', '2028-06-09', '2027-01-13', null, 'pol_hospital_ladder', 66000, 'active'),
+  ('TAS-420200', 'con_420200', 'cr_harlow', '3830', '2027-01-13', '2028-06-16', '2027-01-14', null, 'pol_hospital_ladder', 186000, 'active'),
+  ('TAS-420201', 'con_420201', 'cr_harlow', '8101', '2027-01-04', '2028-06-23', '2027-01-05', null, 'pol_hospital_ladder', 94000, 'active'),
+  ('TAS-420202', 'con_420202', 'cr_harlow', '3372', '2027-01-05', '2028-06-28', '2027-01-06', null, 'pol_hospital_ladder', 54000, 'active'),
+  ('TAS-420203', 'con_420203', 'cr_ashcombe', '7643', '2027-01-06', '2028-07-07', '2027-01-07', null, 'pol_hospital_ladder', 26000, 'active'),
+  ('TAS-420204', 'con_420204', 'cr_ashcombe', '2914', '2027-01-07', '2028-07-14', '2027-01-08', null, 'pol_hospital_ladder', 139000, 'active'),
+  ('TAS-420205', 'con_420205', 'cr_fenwick', '7185', '2027-01-08', '2028-07-21', '2027-01-09', null, 'pol_hospital_ladder', 72000, 'cease'),
+  ('TAS-420206', 'con_420206', 'cr_ashcombe', '2456', '2027-01-09', '2028-07-28', '2027-01-10', null, 'pol_hospital_ladder', 185000, 'active'),
+  ('TAS-420207', 'con_420207', 'cr_ashcombe', '6727', '2027-01-10', '2028-08-04', '2027-01-11', null, 'pol_hospital_ladder', 118000, 'active'),
+  ('TAS-420208', 'con_420208', 'cr_marlow', '1998', '2027-01-11', '2028-08-11', '2027-01-12', null, 'pol_hospital_ladder', 51000, 'active'),
+  ('TAS-420209', 'con_420209', 'cr_harlow', '6269', '2027-01-12', '2028-08-18', '2027-01-13', null, 'pol_hospital_ladder', 164000, 'active'),
+  ('TAS-420210', 'con_420210', 'cr_ashcombe', '1540', '2027-01-13', '2028-08-25', '2027-01-14', null, 'pol_hospital_ladder', 97000, 'active'),
+  ('TAS-420211', 'con_420211', 'cr_marlow', '5811', '2027-01-04', '2028-09-01', '2027-01-05', null, 'pol_hospital_ladder', 30000, 'active'),
+  ('TAS-420212', 'con_420212', 'cr_harlow', '1082', '2027-01-05', '2028-09-08', '2027-01-06', null, 'pol_hospital_ladder', 143000, 'active'),
+  ('TAS-420213', 'con_420213', 'cr_fenwick', '5353', '2027-01-06', '2028-09-15', '2027-01-07', null, 'pol_hospital_ladder', 128400, 'active'),
+  ('TAS-420214', 'con_420214', 'cr_corley', '9624', '2027-01-07', '2028-09-22', '2027-01-08', null, 'pol_hospital_ladder', 41500, 'active'),
+  ('TAS-420215', 'con_420215', 'cr_corley', '4895', '2027-01-08', '2028-09-28', '2027-01-09', null, 'pol_hospital_ladder', 96000, 'active'),
+  ('TAS-420216', 'con_420216', 'cr_harlow', '9166', '2027-01-09', '2028-03-20', '2027-01-10', null, 'pol_hospital_ladder', 35000, 'active'),
+  ('TAS-420217', 'con_420217', 'cr_ashcombe', '4437', '2027-01-10', '2028-03-27', '2027-01-11', null, 'pol_hospital_ladder', 88450, 'active'),
+  ('TAS-420218', 'con_420218', 'cr_marlow', '8708', '2027-01-11', '2028-04-03', '2027-01-12', null, 'pol_hospital_ladder', 134000, 'active'),
+  ('TAS-420219', 'con_420219', 'cr_marlow', '3979', '2027-01-12', '2028-04-10', '2027-01-13', null, 'pol_hospital_ladder', 49900, 'active'),
+  ('TAS-420220', 'con_420220', 'cr_beckford', '8250', '2027-01-13', '2028-04-17', '2027-01-14', null, 'pol_hospital_ladder', 27800, 'active'),
+  ('TAS-420221', 'con_420221', 'cr_ashcombe', '3521', '2027-01-04', '2028-04-24', '2027-01-05', null, 'pol_hospital_ladder', 80000, 'active'),
+  ('TAS-420222', 'con_420222', 'cr_ashcombe', '7792', '2027-01-05', '2028-05-01', '2027-01-06', null, 'pol_hospital_ladder', 193000, 'active'),
+  ('TAS-420223', 'con_420223', 'cr_fenwick', '3063', '2027-01-06', '2028-05-08', '2027-01-07', null, 'pol_hospital_ladder', 126000, 'active'),
+  ('TAS-420224', 'con_420224', 'cr_ashcombe', '7334', '2027-01-07', '2028-05-15', '2027-01-08', null, 'pol_hospital_ladder', 59000, 'active'),
+  ('TAS-420225', 'con_420225', 'cr_ashcombe', '2605', '2027-01-08', '2028-05-22', '2027-01-09', null, 'pol_hospital_ladder', 172000, 'active'),
+  ('TAS-420226', 'con_420226', 'cr_fenwick', '6876', '2027-01-09', '2028-05-28', '2027-01-10', null, 'pol_hospital_ladder', 105000, 'active'),
+  ('TAS-420227', 'con_420227', 'cr_ashcombe', '2147', '2027-01-10', '2028-06-05', '2027-01-11', null, 'pol_hospital_ladder', 38000, 'active'),
+  ('TAS-420228', 'con_420228', 'cr_ashcombe', '6418', '2027-01-11', '2028-06-12', '2027-01-12', null, 'pol_hospital_ladder', 151000, 'active'),
+  ('TAS-420229', 'con_420229', 'cr_marlow', '1689', '2027-01-12', '2028-06-19', '2027-01-13', null, 'pol_hospital_ladder', 84000, 'active'),
+  ('TAS-420230', 'con_420230', 'cr_harlow', '5960', '2027-01-13', '2028-06-26', '2027-01-14', null, 'pol_hospital_ladder', 197000, 'active'),
+  ('TAS-420231', 'con_420231', 'cr_ashcombe', '1231', '2027-01-04', '2028-07-03', '2027-01-05', null, 'pol_hospital_ladder', 130000, 'active'),
+  ('TAS-420232', 'con_420232', 'cr_marlow', '5502', '2027-01-05', '2028-07-10', '2027-01-06', null, 'pol_hospital_ladder', 63000, 'active'),
+  ('TAS-420233', 'con_420233', 'cr_harlow', '9773', '2027-01-06', '2028-07-17', '2027-01-07', null, 'pol_hospital_ladder', 176000, 'active'),
+  ('TAS-420234', 'con_420234', 'cr_ashcombe', '5044', '2027-01-07', '2028-07-24', '2027-01-08', null, 'pol_hospital_ladder', 109000, 'active'),
+  ('TAS-420235', 'con_420235', 'cr_marlow', '9315', '2027-01-08', '2028-07-28', '2027-01-09', null, 'pol_hospital_ladder', 42000, 'active'),
+  ('TAS-420236', 'con_420236', 'cr_ashcombe', '4586', '2027-01-09', '2028-08-07', '2027-01-10', null, 'pol_hospital_ladder', 155000, 'active'),
+  ('TAS-420237', 'con_420237', 'cr_corley', '8857', '2027-01-10', '2028-08-14', '2027-01-11', null, 'pol_hospital_ladder', 200000, 'active'),
+  ('TAS-420238', 'con_420238', 'cr_marlow', '4128', '2027-01-11', '2028-08-21', '2027-01-12', null, 'pol_hospital_ladder', 150000, 'active'),
+  ('TAS-420239', 'con_420239', 'cr_ashcombe', '8399', '2027-01-12', '2028-08-28', '2027-01-13', null, 'pol_hospital_ladder', 320000, 'active'),
+  ('TAS-420240', 'con_420240', 'cr_corley', '3670', '2027-01-13', '2028-09-04', '2027-01-14', null, 'pol_hospital_ladder', 90000, 'active'),
+  ('TAS-420241', 'con_420241', 'cr_marlow', '7941', '2027-01-04', '2028-09-11', '2027-01-05', null, 'pol_hospital_ladder', 240000, 'active'),
+  ('TAS-420242', 'con_420242', 'cr_ashcombe', '3212', '2027-01-05', '2028-09-18', '2027-01-06', null, 'pol_hospital_ladder', 180000, 'active'),
+  ('TAS-420243', 'con_420243', 'cr_ashcombe', '7483', '2027-01-06', '2028-09-25', '2027-01-07', null, 'pol_hospital_ladder', 400000, 'active'),
+  ('TAS-420244', 'con_420244', 'cr_fenwick', '2754', '2027-01-07', '2028-03-16', '2027-01-08', null, 'pol_hospital_ladder', 125000, 'active'),
+  ('TAS-420245', 'con_420245', 'cr_ashcombe', '7025', '2027-01-08', '2028-03-23', '2027-01-09', null, 'pol_hospital_ladder', 260000, 'active'),
+  ('TAS-420246', 'con_420246', 'cr_ashcombe', '2296', '2027-01-09', '2028-03-28', '2027-01-10', null, 'pol_hospital_ladder', 70000, 'active'),
+  ('TAS-420247', 'con_420247', 'cr_harlow', '6567', '2027-01-10', '2028-04-06', '2027-01-11', null, 'pol_hospital_ladder', 160000, 'active'),
+  ('TAS-420248', 'con_420248', 'cr_kingsbridge', '1838', '2027-01-11', '2028-04-13', '2027-01-12', null, 'pol_municipal_no_discount', 300000, 'active'),
+  ('TAS-420249', 'con_420249', 'cr_ashcombe', '6109', '2027-01-12', '2028-04-20', '2027-01-13', null, 'pol_hospital_ladder', 45000, 'active'),
+  ('TAS-420250', 'con_420250', 'cr_marlow', '1380', '2027-01-13', '2028-04-27', '2027-01-14', null, 'pol_hospital_ladder', 110000, 'active'),
+  ('TAS-420251', 'con_420251', 'cr_harlow', '5651', '2027-01-04', '2028-05-04', '2027-01-05', null, 'pol_hospital_ladder', 220000, 'active'),
+  ('TAS-420252', 'con_420252', 'cr_ashcombe', '9922', '2027-01-05', '2028-05-11', '2027-01-06', null, 'pol_hospital_ladder', 65000, 'active'),
+  ('TAS-420253', 'con_420253', 'cr_kingsbridge', '5193', '2027-01-06', '2028-05-18', '2027-01-07', null, 'pol_municipal_no_discount', 170000, 'active'),
+  ('TAS-420254', 'con_420254', 'cr_harlow', '9464', '2027-01-07', '2028-05-25', '2027-01-08', null, 'pol_hospital_ladder', 95000, 'active'),
+  ('TAS-420255', 'con_420255', 'cr_ashcombe', '4735', '2027-01-08', '2028-06-01', '2027-01-09', null, 'pol_hospital_ladder', 150000, 'active'),
+  ('TAS-420256', 'con_420256', 'cr_marlow', '9006', '2027-01-09', '2028-06-08', '2027-01-10', null, 'pol_hospital_ladder', 280000, 'active');
 
 insert into contact_attempts (attempt_id, account_id, phone_id, at, medium, direction, answered_by, consumer_responded, duration_s, disposition, summary, agent_name) values
   ('att_420101_1', 'TAS-420101', null, '2027-01-05T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
@@ -1097,7 +1535,37 @@ insert into contact_attempts (attempt_id, account_id, phone_id, at, medium, dire
   ('att_420234_2', 'TAS-420234', 'ph_420234_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
   ('att_420235_1', 'TAS-420235', null, '2027-01-09T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
   ('att_420236_1', 'TAS-420236', null, '2027-01-10T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
-  ('att_420236_2', 'TAS-420236', 'ph_420236_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi');
+  ('att_420236_2', 'TAS-420236', 'ph_420236_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420237_1', 'TAS-420237', null, '2027-01-11T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420238_1', 'TAS-420238', null, '2027-01-12T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420238_2', 'TAS-420238', 'ph_420238_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420239_1', 'TAS-420239', null, '2027-01-13T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420240_1', 'TAS-420240', null, '2027-01-14T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420240_2', 'TAS-420240', 'ph_420240_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420241_1', 'TAS-420241', null, '2027-01-05T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420242_1', 'TAS-420242', null, '2027-01-06T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420242_2', 'TAS-420242', 'ph_420242_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420243_1', 'TAS-420243', null, '2027-01-07T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420244_1', 'TAS-420244', null, '2027-01-08T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420244_2', 'TAS-420244', 'ph_420244_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420245_1', 'TAS-420245', null, '2027-01-09T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420246_1', 'TAS-420246', null, '2027-01-10T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420246_2', 'TAS-420246', 'ph_420246_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420247_1', 'TAS-420247', null, '2027-01-11T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420248_1', 'TAS-420248', null, '2027-01-12T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420248_2', 'TAS-420248', 'ph_420248_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420249_1', 'TAS-420249', null, '2027-01-13T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420250_1', 'TAS-420250', null, '2027-01-14T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420250_2', 'TAS-420250', 'ph_420250_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420251_1', 'TAS-420251', null, '2027-01-05T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420252_1', 'TAS-420252', null, '2027-01-06T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420252_2', 'TAS-420252', 'ph_420252_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420253_1', 'TAS-420253', null, '2027-01-07T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420254_1', 'TAS-420254', null, '2027-01-08T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420254_2', 'TAS-420254', 'ph_420254_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi'),
+  ('att_420255_1', 'TAS-420255', null, '2027-01-09T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420256_1', 'TAS-420256', null, '2027-01-10T10:00:00-05:00', 'letter', 'outbound', null, false, null, null, 'Validation notice mailed.', null),
+  ('att_420256_2', 'TAS-420256', 'ph_420256_1', '2027-01-21T18:05:00-05:00', 'call', 'outbound', 'consumer', true, 240, 'no_commitment', 'Consumer verified, heard the balance, made no commitment.', 'Remi');
 
 insert into account_flags (flag_id, account_id, kind, details, created_at) values
   ('flag_420205_1', 'TAS-420205', 'cease', '{}'::jsonb, '2027-01-27T15:12:00-05:00'),
