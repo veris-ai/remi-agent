@@ -1,7 +1,7 @@
 -- The VAmoS Debt Collection World's database, vendored for Remi's tests: schema, payment gateway,
 -- the creditors' decision engine and rows, in the order the World is seeded (collections_bench/world/seed.py, seed_sql).
 --
--- Source: veris-ai/utility-bench @ e5f5098622e3cbe12a2ea741517673af46aa209f
+-- Source: veris-ai/utility-bench @ 6d3b2d6fe8e2d0785491a24a00a46bd8b1b3af3b
 --   collections_bench/generated/world/schema.sql
 --   collections_bench/world/gateway.sql
 --   collections_bench/world/creditor_policy.sql
