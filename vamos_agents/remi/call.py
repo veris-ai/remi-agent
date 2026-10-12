@@ -33,6 +33,7 @@ from .context import CallContext
 from .db import Database, Transaction
 from .gates import Gate
 from .ledger import Debt, Ledger, LedgerUnavailable
+from .menu import Menu, Option, payment_options
 from .payments import SavedMethod
 from .world import Account, Agency, Consumer, ContactAttempt, Creditor, Phone
 
@@ -129,6 +130,12 @@ class RemiCall:
     charge_in_flight: bool = False  # a take_payment holds the call's one charge until the gateway answers
     #: The call's charge once the gateway approved it (or its answer was lost): there is never a second.
     charged_payment_id: str | None = None
+    #: The creditor's options as the World last answered them (get_payment_options and every money tool).
+    menu: Menu | None = None
+    #: Supervisor answers on this call, per approval-tier option id: True approved, False denied.
+    approvals: dict[str, bool] = field(default_factory=dict)
+    #: The plan whose down payment take_payment charged on this call; its arrangement follows on these terms.
+    down_payment_for: Option | None = None
     #: log_contact_attempt's note; the row itself is written once, when the call ends.
     contact_note: ContactNote | None = None
     #: The written row's disposition, once it is written (end_call, or finalize).
@@ -205,6 +212,11 @@ class RemiCall:
                 "callback or a person (transfer_to_human)."
             ) from err
         return self.debt
+
+    async def read_menu(self) -> Menu:
+        """The creditor's options for this account, now; kept on the call."""
+        self.menu = await payment_options(self.db, self.context.account_id)
+        return self.menu
 
     def stop_collection(self, reason: str) -> None:
         self.collection_stopped_by = self.collection_stopped_by or reason

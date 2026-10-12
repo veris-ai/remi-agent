@@ -38,7 +38,7 @@ def render_instructions(context: CallContext, agency: Agency) -> str:
     when = context.call_time
     return _TEMPLATE.substitute(
         agent_name=AGENT_NAME,
-        business_name=agency.name.removesuffix(", LLC"),
+        business_name=agency.business_name,
         call_date_long=f"{when:%A}, {when:%B} {when.day}, {when.year}",
         call_time_long=f"{_clock_time(context)} on {when:%A}, {when:%B} {when.day}, {when.year}",
         callback_number_spoken=_spoken_digits(agency.callback_number),

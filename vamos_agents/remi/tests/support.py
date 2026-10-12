@@ -14,6 +14,12 @@ for seeding and inspecting; Remi itself connects as ``APP_ROLE``, a login that
 owns nothing, so the gateway's write guards bind: a direct write to
 ``payment_methods`` or ``payments``, or any read of the processor's vault,
 fails the test.
+
+One part of the World is a double for now: the creditor's decision engine
+(``payment_options``, ``request_approval``, and its refusal of off-menu
+settlements), in ``fixtures/policy_engine_double.sql``, until utility-bench
+ships the real functions. Each seed gives the account a ``menu`` (override it
+with ``seed_menu``).
 """
 
 from __future__ import annotations
@@ -31,6 +37,9 @@ from typing import Any
 import psycopg
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from vamos_agents.remi import policy
 
 from .fake_ledger import FakeLedger
 
@@ -40,6 +49,9 @@ WORLD_SQL = (FIXTURES / "collections_world.sql").read_text()
 LEDGER_ACCOUNTS: dict[str, dict[str, Any]] = json.loads((FIXTURES / "collections_ledger.json").read_text())[
     "accounts"
 ]
+#: A test double of the World's decision engine (payment_options, request_approval), until utility-bench
+#: ships it: see the file's header. Loaded after the World's schema; menus are seeded per test.
+POLICY_ENGINE_DOUBLE_SQL = (FIXTURES / "policy_engine_double.sql").read_text()
 ROWS_MARKER = "-- ===== collections_bench/generated/world/rows.sql ====="
 #: The schema and the gateway (the database), and the World's ~110 accounts (its rows).
 DATABASE_SQL, ROWS_SQL = WORLD_SQL.split(ROWS_MARKER)
@@ -236,6 +248,8 @@ def seed_world(
         for row in LETTER_HISTORY if history is None else history:
             _insert(conn, "contact_attempts", row)
         _grant_app(conn)
+    account_id = (ACCOUNT | overrides)["account_id"]
+    seed_menu(dsn, account_id, menu(LEDGER.balance(account_id)))
 
 
 def seed_full_world(dsn: str) -> None:
@@ -267,6 +281,61 @@ def _reset_ledger(accounts: dict[str, dict[str, Any]]) -> None:
 def _reset(conn: psycopg.Connection) -> None:
     conn.execute("drop schema public cascade; create schema public;")
     conn.execute(DATABASE_SQL)
+    conn.execute(POLICY_ENGINE_DOUBLE_SQL)
+
+
+def menu(
+    balance_cents: int,
+    *,
+    settlement_allowed: bool = True,
+    settlement_requires_hardship: bool = True,
+    plans: tuple[int, ...] = (3, 6),
+    down_cents: int = 0,
+    tiers: tuple[tuple[int, bool], ...] = ((10, False), (20, False), (30, True)),
+) -> dict[str, Any]:
+    """A payment_options answer in the contract's shape: pay in full, ``plans`` (months; equal instalments as
+    the ledger spreads the balance after ``down_cents``), then the settlement ``tiers`` (discount percent,
+    requires approval), lowest discount first."""
+    options: list[dict[str, Any]] = [{"id": "pif", "kind": "pay_in_full", "amount_cents": balance_cents}]
+    for months in plans:
+        options.append(
+            {
+                "id": f"plan_{months}",
+                "kind": "plan",
+                "months": months,
+                "down_cents": down_cents,
+                "monthly_cents": policy.instalment_cents(balance_cents - down_cents, months)[0],
+            }
+        )
+    if settlement_allowed:
+        for pct, approval in tiers:
+            options.append(
+                {
+                    "id": f"settle_{pct}",
+                    "kind": "settlement",
+                    "discount_pct": pct,
+                    "amount_cents": balance_cents - balance_cents * pct // 100,
+                    "requires_approval": approval,
+                    "due_within_days": 7,
+                }
+            )
+    return {
+        "creditor": "Ashcombe Bank, N.A.",
+        "balance_cents": balance_cents,
+        "settlement_allowed": settlement_allowed,
+        "settlement_requires_hardship": settlement_requires_hardship,
+        "options": options,
+    }
+
+
+def seed_menu(dsn: str, account_id: str, answer: dict[str, Any]) -> None:
+    """What the decision-engine double answers for ``account_id`` (replacing any earlier answer)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "insert into policy_double_menus (account_id, menu) values (%s, %s) "
+            "on conflict (account_id) do update set menu = excluded.menu",
+            (account_id, Jsonb(answer)),
+        )
 
 
 def _grant_app(conn: psycopg.Connection) -> None:

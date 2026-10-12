@@ -394,7 +394,8 @@ async def _hardship(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.outcomes.add("hardship")
     return {
         "recorded": "hardship",
-        "allowed_now": "The hardship plan may be offered: up to 24 months, at least $10.00 a month. Never "
+        "allowed_now": "If no plan fits, the creditor's settlement options may now be considered "
+        "(get_payment_options); if the creditor allows none, a person can handle it (transfer_to_human). Never "
         "borrowing, a credit card or selling property, and no pressing for the full balance.",
     }
 

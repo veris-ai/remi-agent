@@ -9,7 +9,9 @@ Writes go through ``Transaction.insert``/``update`` with table and column names
 checked against WORLD.md's schema and quoted as identifiers, so no value is
 ever spliced into SQL. ``payment_methods`` and ``payments`` are not writable:
 only the World's gateway functions write them, reached through
-``Transaction.call_gateway`` (see ``payments``). Timestamps are always passed in
+``Transaction.call_gateway`` (see ``payments``). The creditor's payment menu and
+supervisor approvals are the World's decision-engine functions, reached through
+``policy_function`` (see ``menu``). Timestamps are always passed in
 from ``CallClock``; nothing here calls ``now()``.
 """
 
@@ -83,6 +85,8 @@ KEYS = {
 JSON_COLUMNS = frozenset({"details", "instalments"})
 #: WORLD.md's payment gateway: the only way a payment method or payment is written.
 GATEWAY_FUNCTIONS = frozenset({"gateway_tokenize_card", "gateway_tokenize_ach", "gateway_charge"})
+#: The World's decision engine: the creditor's payment menu and supervisor approvals (see ``menu``).
+POLICY_FUNCTIONS = frozenset({"payment_options", "request_approval"})
 
 
 class NotFound(LookupError):
@@ -143,6 +147,23 @@ class Transaction:
             raise NotFound(f"{function} answered no row")
         return row
 
+    async def policy_function(self, function: str, args: dict[str, Any]) -> Any:
+        """``select <policy function>(name => value, ...)``: its jsonb answer.
+
+        Only the World's two decision-engine functions (see ``menu``); names are identifiers and every
+        value is bound. Errors propagate (``menu`` maps them)."""
+        if function not in POLICY_FUNCTIONS:
+            raise ValueError(f"{function} is not a decision-engine function")
+        query = sql.SQL("select {}({}) as answer").format(
+            sql.Identifier("public", function),
+            sql.SQL(", ").join(sql.SQL("{} => %s").format(sql.Identifier(name)) for name in args),
+        )
+        cursor = await self._conn.execute(query, list(args.values()))
+        row = await cursor.fetchone()
+        if row is None or row["answer"] is None:
+            raise NotFound(f"{function} answered nothing")
+        return row["answer"]
+
 
 class Database:
     """The collections database for this call. Construct with ``connect``."""
@@ -173,6 +194,11 @@ class Database:
     async def transaction(self) -> AsyncIterator[Transaction]:
         async with self._lock, self._conn.transaction():
             yield Transaction(self._conn)
+
+    async def policy_function(self, function: str, args: dict[str, Any]) -> Any:
+        """One decision-engine call in its own transaction (``request_approval`` logs the answer)."""
+        async with self.transaction() as tx:
+            return await tx.policy_function(function, args)
 
     async def _one(self, query: str, params: tuple[Any, ...], what: str) -> dict[str, Any]:
         async with self._lock:

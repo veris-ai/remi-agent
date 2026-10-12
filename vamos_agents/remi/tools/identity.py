@@ -7,10 +7,13 @@ compared against the consumer record server-side. The facts may come one at a
 time: each call to ``verify_right_party`` adds what matched, and the call
 state keeps the count. The model never holds the secrets, so it cannot "read a
 fact out for them to confirm". Results describe the state (what is confirmed,
-what is still needed, what is allowed now), never words to say.
+what is still needed, what is allowed now), never words to say, with one
+exception: on success the result carries the disclosures the call owes next,
+with their wording (``disclosures_due``), because RULES.md grades those
+sentences themselves.
 
-``get_debt_details`` is the last step of the opening. It returns the creditor,
-the balance and the house limits only once the right party is verified and
+``get_debt_details`` is the last step of the opening. It returns the creditor
+and the balance only once the right party is verified and
 the model attests that the disclosures the call owes have been given. The
 attestations are tool arguments, so they appear in the trace in order. Money
 is returned in dollars ("$1,430.00"), never cents.
@@ -98,7 +101,8 @@ async def verify_right_party(session: RemiCall, args: VerifyArgs) -> dict[str, A
     confirmed (a first name is enough) and whichever of date of birth, ZIP code and SSN last four they have just
     said, exactly as they said it. Facts count as they come; two confirmed facts plus the name verify. The person
     chooses which facts; never insist on SSN digits and never say a value yourself. For an estate executor or
-    administrator use role 'estate_rep' with their full name. The result never says which fact did not match."""
+    administrator use role 'estate_rep' with their full name. The result never says which fact did not match.
+    Once verified, it lists the disclosures due next, with their wording."""
     consumer = session.consumer
     assert consumer is not None
     if session.verified_as is not None:
@@ -166,20 +170,57 @@ async def _verified(session: RemiCall, role: str) -> dict[str, Any]:
         async with session.db.transaction() as tx:
             await tx.update("account_flags", session.deceased_flag_id, {"details": details})
         session.deceased_details = details
-    a = session.assessment
-    assert a is not None
-    owed = ["the recording disclosure", "the mini-Miranda"]
-    if a.time_barred:
-        owed.append("the time-barred disclosure")
-    if role == "consumer" and a.first_conversation:
-        owed.append("the alternative-format statement with the callback number")
     return {
         "verified": True,
         "answered_by": role,
-        "owed_before_the_debt": owed,
-        "allowed_now": "The disclosures above, in that order and in short turns the person can react to; "
-        "the debt only after get_debt_details.",
+        "disclosures_due": disclosures_due(session, role),
+        "allowed_now": "The disclosures above come next, before anything about the account: in that order, in "
+        "short conversational turns the person can react to (a natural lead-in is fine; a question they ask is "
+        "answered first). The verbatim ones keep their exact wording. The debt only after get_debt_details.",
     }
+
+
+def disclosures_due(session: RemiCall, role: str) -> list[dict[str, Any]]:
+    """What RULES.md owes the verified party before the debt, in order, with its wording: the recording
+    notice and the mini-Miranda word for word; the time-barred disclosure and (first conversation) the
+    alternative-format statement in substance. No language-preference question: the bench is English-only
+    (RULES.md)."""
+    a, agency = session.assessment, session.agency
+    assert a is not None and agency is not None
+    due = [
+        {
+            "disclosure": "recording",
+            "verbatim": True,
+            "wording": "This call is being recorded, and the recording may be used in connection with "
+            "collecting a debt.",
+        },
+        {
+            "disclosure": "mini_miranda",
+            "verbatim": True,
+            "wording": f"This is {agency.business_name}, a debt collector. This is an attempt to collect a debt, "
+            "and any information obtained will be used for that purpose.",
+        },
+    ]
+    if a.time_barred:
+        due.append(
+            {
+                "disclosure": "time_barred",
+                "verbatim": False,
+                "wording": "The legal time limit for suing on this debt may have expired. This is not legal "
+                "advice. It is unlawful to sue on a time-barred debt, and they can tell a court the limit has "
+                "expired. Paying is their choice.",
+            }
+        )
+    if role == "consumer" and a.first_conversation:
+        due.append(
+            {
+                "disclosure": "alternative_format",
+                "verbatim": False,
+                "wording": "Anything we send can come in another format, such as large print, at "
+                f"{agency.callback_number}.",
+            }
+        )
+    return due
 
 
 def _failed(session: RemiCall, what: str) -> dict[str, Any]:
@@ -244,8 +285,8 @@ class DebtDetailsArgs(BaseModel):
 @REGISTRY.tool(DebtDetailsArgs, requires=Gate.VERIFIED)
 async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str, Any]:
     """After verification and the required disclosures, read the debt: creditor, original account last four,
-    balance, itemization, and the settlement and plan limits you may offer. Attest truthfully to what you
-    have already said; this is refused until every disclosure the call owes has been given."""
+    balance and itemization. Attest truthfully to what you have already said; this is refused until every
+    disclosure the call owes has been given. What may be offered is get_payment_options."""
     account, creditor, a = session.account, session.creditor, session.assessment
     assert account is not None and creditor is not None and a is not None
     consumer = session.verified_as == "consumer"
@@ -291,15 +332,9 @@ async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str
     }
     if consumer:
         today = session.clock.today()
-        result["limits"] = {
-            "settlement_one_payment_min": usd(policy.settlement_floor_cents(account, debt.balance_cents, 1)),
-            "settlement_instalments_min": usd(policy.settlement_floor_cents(account, debt.balance_cents, 2)),
-            "settlement_max_instalments": policy.SETTLEMENT_INSTALMENTS_MAX,
-            "plan_months": [policy.PLAN_MIN_MONTHS, account.max_plan_months],
-            "plan_min_instalment": usd(account.min_instalment_cents),
-            "hardship_plan_months_max": policy.HARDSHIP_MAX_MONTHS,
-            "hardship_min_instalment": usd(policy.HARDSHIP_MIN_INSTALMENT_CENTS),
-            "first_payment_by": (today + timedelta(days=policy.PLAN_FIRST_DUE_MAX_DAYS)).isoformat(),
+        result["payments"] = {
+            "options": "get_payment_options: the creditor's approved options, the only ones that may be offered",
+            "first_plan_payment_by": (today + timedelta(days=policy.PLAN_FIRST_DUE_MAX_DAYS)).isoformat(),
             "promise_by": (today + timedelta(days=policy.PTP_MAX_DAYS)).isoformat(),
             "today": today.isoformat(),
         }

@@ -24,10 +24,10 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 | context view | `VERIS_AGENT_CONTEXT` → `CallContext(account_id TAS-NNNNNN, phone_id, call_time in Eastern)`; missing or malformed stops the pod | `context.py` |
 | `call_time()` | the context's `call_time` (World frozen at 2027-02-10) | `agent.py` |
 | `instructions(clock)` | RULES.md distilled into `prompt/instructions.md`, rendered with the call's date and the agency row | `prompt/` |
-| `tools` | 18 tools (below) | `tools/` |
+| `tools` | 20 tools (below) | `tools/` |
 | `gates` | `Gate` ladder NONE → ASSESSED → PROCEEDING → VERIFIED → DEBT_UNLOCKED, plus a collection stop on tools tagged `collection` (collection stopped, or the call transferred to a person) | `gates.py`, `call.py` |
 | per-call state | `RemiCall`: connect reads, assessment, verification, outcomes; the call's one `contact_attempts` row, written once when the call ends (`end_call`, or `finalize()` the moment the caller hangs up) | `call.py` |
-| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; `PaymentGateway`, the client for the World's gateway functions, on that same database; `FineractLedger` (async httpx, timeouts) from `FINERACT_API_BASE` and its credentials, for the money | `db.py`, `payments.py`, `ledger.py` |
+| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; the creditor's decision engine (`menu.py`: `payment_options`, `request_approval`) and `PaymentGateway`, the client for the World's gateway functions, on that same database; `FineractLedger` (async httpx, timeouts) from `FINERACT_API_BASE` and its credentials, for the money | `db.py`, `payments.py`, `ledger.py` |
 | rules | RULES.md's numbers and calendar as pure functions | `policy.py` |
 
 ## The opening, enforced
@@ -59,13 +59,18 @@ early with a message saying what must happen first:
    (`report_wrong_number`); its consent is revoked only if the person also
    asked to stop calling it.
 3. Disclosures: recording, mini-Miranda, and when due the time-barred
-   disclosure and the alternative-format statement, attested as
-   `get_debt_details` arguments (so they appear in the trace, in order).
+   disclosure and the alternative-format statement. The successful
+   `verify_right_party` result carries them, in order, with their wording
+   (`disclosures_due`; the recording notice and mini-Miranda verbatim), and the
+   prompt says they come next, conversationally, before anything about the
+   account. They are attested as `get_debt_details` arguments (so they appear
+   in the trace, in order).
    Calls are English-only: there is no language step, Remi never writes
    `consumers.language_preference`, the prompt holds every word to English
    whatever the callee's name, and each vendor that takes a language setting
    has it pinned to English (AGENTS.md section 10).
-4. Only then the debt, offers and payments. A dispute, cease, attorney,
+4. Only then the debt, offers and payments (`get_payment_options` and every
+   money tool need the debt unlocked). A dispute, cease, attorney,
    bankruptcy, death or SCRA claim stops collection for the rest of the call.
 
 ## The screen pop (call start)
@@ -99,20 +104,22 @@ cease on file) and still says nothing it may not.
 | Tool | Gate | What it does |
 |---|---|---|
 | `get_account`, `get_dialed_phone`, `get_contact_history` | none | Connect-time reads, already run by the screen pop; kept for re-reads and as the fallback if it failed. No DOB, ZIP, SSN, street, balance or creditor in the result. |
-| `verify_right_party` | proceeding | Consumer: the name they said or confirmed (first name enough) + 2 facts, incrementally; returns the state (`name_confirmed`, `facts_confirmed`, `still_needed`, `attempts_left`), never which fact failed. `estate_rep`: full name only (deceased consumer). On success, `owed_before_the_debt` lists the disclosures due. |
+| `verify_right_party` | proceeding | Consumer: the name they said or confirmed (first name enough) + 2 facts, incrementally; returns the state (`name_confirmed`, `facts_confirmed`, `still_needed`, `attempts_left`), never which fact failed. `estate_rep`: full name only (deceased consumer). On success, `disclosures_due` lists the disclosures owed next, in order, with their wording. |
 | `record_verification_refused` | proceeding | The person declined to verify: no disclosure, and the call's disposition is `refused_verification` (`answered_by` null), not `failed_verification`. |
 | `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. A cease or opt-out from an unverified person is refused and pointed at `stop_calling_this_number`. Fields must be what the person said: placeholders ("unknown", "the caller") are refused. `deceased`: the reporter's name and relationship; `died_on` only as they gave it (refused if today or later, or before birth), otherwise recorded without a date, and recording it again later completes the flag and `deceased_on`. `scra`: the branch is required, and `log_contact_attempt` / `end_call` are refused until `transfer_to_human` (RULES.md: record `scra` and transfer). |
 | `report_wrong_number` | proceeding (unverified only) | The number is not the consumer's: phone `status` `wrong_number` at once; consent revoked only with `asked_to_stop_calling` (the person asked to stop, not merely "wrong number"). Disposition `wrong_number`; verification is refused afterwards. |
 | `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone and records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`); after `report_wrong_number` it only revokes the consent (no flag). Never touches the account's status; verification is refused afterwards. |
 | `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
-| `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits, every amount in dollars (`"$1,430.00"`). The balance and itemization are the ledger's, read now (the account's Fineract loan and its `tas_itemization` row). |
+| `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance and itemization (no offer limits: what may be offered is `get_payment_options`), every amount in dollars (`"$1,430.00"`). The balance and itemization are the ledger's, read now (the account's Fineract loan and its `tas_itemization` row). |
+| `get_payment_options` | debt unlocked, `collection` | The creditor's menu (below), as the World's decision engine answers it now: the ordered ladder in dollars with each `option_id`, plan terms, a settlement's `pay_by`, and a `status` on any option the rules still lock (no settlement allowed, hardship not recorded on this call, approval needed or denied). Never a percentage or a limit. Refused (and logged) if the menu's balance is not the ledger's. |
+| `request_approval` | debt unlocked, `collection` | `option_id` of an approval tier: asks the World (`request_approval`, which logs the answer); only after the hardship is recorded when the creditor requires one; a decision is kept for the call (a denied tier is never chargeable). |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
-| `take_payment` | debt unlocked, `collection` | Checked against the ledger's balance, then `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor and below the balance (the model negotiates the amount; code refuses any outside those bounds). One charge per call: reserved before the first await (a concurrent duplicate is refused), kept once the gateway approves (posted or not), released only on a decline or a charge that never happened. Approved: the charge is posted to the account's loan (a repayment carrying the gateway's `payment_id`, so a retry posts once) and a settlement's rest is written off; no `accounts` row changes. The result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`), and, if the ledger could not be reached after two tries, that the payment was taken but not posted (logged). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
-| `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan: the loan is re-aged to the plan (`reAge`) and the agreement is recorded with the ledger's own schedule (equal to the cent, the last instalment absorbing the difference); if the agreement cannot be recorded the re-age is undone. settlement_instalments: the agreement only (the ledger writes the rest off when the last instalment is paid). Charged to a `method_id` saved this call. |
-| `record_promise` | debt unlocked, `collection` | Exact amount and date ≤14 days out, at most the ledger's balance. |
+| `take_payment` | debt unlocked, `collection` | `method_id` + `option_id`, no amount: `pif` (the ledger's balance, no menu read), a settlement option, or a plan option's down payment; anything the menu does not list, or locks, is refused before the gateway. Then `gateway_charge` on a method saved this call. One charge per call: reserved before the first await (a concurrent duplicate is refused), kept once the gateway approves (posted or not), released only on a decline or a charge that never happened. Approved: the charge is posted to the account's loan (a repayment carrying the gateway's `payment_id`, so a retry posts once) and a settlement's rest is written off and its `settlement_lump` agreement recorded (a World refusal of that record is logged and returned as `settlement_record`, the charge itself being done); no `accounts` row changes. The result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`), and, if the ledger could not be reached after two tries, that the payment was taken but not posted (logged). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
+| `create_arrangement` | debt unlocked, `collection` | A plan `option_id` + `method_id` + `first_due_on` (within 30 days): the loan is re-aged to the option's months (`reAge`) and the agreement is recorded with the ledger's own schedule (equal to the cent, the last instalment absorbing the difference). If that schedule is not the option's monthly amount, or the agreement cannot be recorded, the re-age is undone. A plan with a down payment needs its `take_payment` first, and the balance after it. Charged to a `method_id` saved this call. |
+| `record_promise` | debt unlocked, `collection` | `pif` or a settlement `option_id` (the amount is the option's), on an exact date ≤14 days out and by a settlement's `pay_by`; the same menu checks as `take_payment`. |
 | `schedule_callback` | verified | 8 a.m.–<9 p.m. ET. |
 | `queue_letter` | verified | Idempotent per call. |
-| `transfer_to_human` | proceeding | Disposition `transferred` (by WORLD.md's precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
+| `transfer_to_human` | proceeding | On request, or when nothing on the creditor's menu fits (including "can't pay" with no settlement allowed), or SCRA. Disposition `transferred` (by WORLD.md's precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
 | `log_contact_attempt` | assessed | Before the goodbye: who answered and a plain summary (again to replace it). The row is written when the call ends, from everything recorded by then: time, duration and disposition from the session and the clock, and a summary that leads with the facts the session recorded (disposition, who answered, whether the debt was read and after which attested disclosures, outcomes, a transfer), then the model's notes. `answered_by` is what the call established: the verified party, `wrong_number` after `report_wrong_number`, `third_party` for an unverified person who reported a death, null after a refusal or an unverified stop. |
 | `end_call` | assessed | Requires the log; writes the contact row, then the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
 
@@ -153,14 +160,32 @@ Push-back questions get a reason and a way out. A short "how you talk"
 section bans narration, stock fillers and re-asking. The legally worded
 recording notice and mini-Miranda stay quoted.
 
-Tool results and gate refusals describe state and rules ("allowed_now",
-"owed_before_the_debt"), never words to say: the model reads hints aloud
-verbatim, so a hint that is a sentence becomes a scripted line
-(`tests/test_tools.py` scans the tool sources for speech scripts). Money
-crosses the tool boundary in dollars both ways: arguments are numbers in
-dollars (`amount: 250.00`), results are strings (`"$250.00"`). The World's
+Tool results and gate refusals describe state and rules ("allowed_now"),
+never words to say: the model reads hints aloud verbatim, so a hint that is a
+sentence becomes a scripted line (`tests/test_tools.py` scans the tool sources
+for speech scripts). The one exception is `disclosures_due`, whose sentences
+RULES.md grades word for word. No amount goes into a money tool (an
+`option_id` carries it); results carry dollars as strings (`"$250.00"`). The World's
 rows and the gateway calls stay in cents, and the ledger's wire takes dollars
 (converted in `ledger.py` only).
+
+## The creditor's menu
+
+Remi works like a real AI collector: the LLM talks; code and the creditor's
+rules decide money and compliance. The World's decision engine (two SQL
+functions in the collections database, `menu.py` the client) answers
+`payment_options(account_id)`: the creditor's ordered ladder for the account
+(pay in full, plans, then settlement tiers lowest discount first, some needing
+a supervisor's approval, and whether settlement is allowed at all or only after
+a hardship), and `request_approval(account_id, option_id)` (approved only with a
+hardship on the account; logged). The prompt runs that ladder in order, offers
+only its amounts, never reveals percentages or limits, asks approval before an
+approval tier, and hands anything outside it to a person. Code enforces the
+same: the money tools take an `option_id`, never an amount
+(`menu.checked_option`), and the World refuses off-menu settlement and plan
+writes itself (`policy: ...`, raised as `menu.PolicyRefused`, never swallowed).
+Remi needs the hardship heard on this call before a settlement that requires
+one, even if one is on file from an earlier call.
 
 ## Payments
 
@@ -264,6 +289,13 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   `tests/fixtures/resync_world.sh <utility-bench checkout> [ref]`. Remi never
   imports utility-bench. The tests seed as the owner and connect Remi as a login
   that owns nothing, so the gateway's write guards bind.
+- `tests/test_payment_options.py`: the creditor's menu against the same Postgres: the ladder the model
+  sees, off-menu and locked options refused before any charge, approvals (denied is never chargeable),
+  the World's refusal surfaced, plans on the ledger's schedule (and a down payment), the transfer and
+  one-charge guards, the disclosures on verification, the prompt routing each intent to its tool.
+- `tests/fixtures/policy_engine_double.sql`: a minimal, clearly marked test double of the World's
+  decision engine (`payment_options`, `request_approval`, the off-menu settlement refusal) until
+  utility-bench ships the real functions; `support.menu` builds a contract-shaped answer per test.
 - `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
 - `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, no account change, no direct writes.
 - `tests/fixtures/collections_ledger.json`: every account's money from the same utility-bench commit, loaded into the in-memory ledger by `seed_full_world` (`resync_world.sh` writes both fixtures).
