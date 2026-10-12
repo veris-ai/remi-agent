@@ -226,6 +226,15 @@ def test_the_summary_is_asked_for_only_what_happened() -> None:
     assert "never what you meant or were told to say" in described
 
 
+def test_the_prompt_asks_for_the_full_balance_before_settling() -> None:
+    from importlib.resources import files
+
+    prompt = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
+    assert "Ask for the full balance first" in prompt
+    assert "ask once whether they can do more" in prompt
+    assert "never below the\n  minimum" in prompt
+
+
 async def test_three_failed_verifications_lock_the_call(pg_dsn, make_session) -> None:
     seed_world(pg_dsn)
     s = await make_session()
@@ -633,7 +642,7 @@ async def test_settlement_below_the_floor_is_countered_then_goes_to_a_person(pg_
     await unlocked(s)
     pm = await card(s)
     refused = await s.dispatch("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"})
-    assert "counter-offer an amount from the minimum up to the full balance" in refused["error"]
+    assert "counter-offer, starting near the full balance" in refused["error"]
     assert "No counter-offer is allowed" not in refused["error"]
     assert "transfer_to_human" in refused["error"]  # if the consumer will not reach the minimum
     await s.dispatch("transfer_to_human", {"reason": "settlement_below_floor"})

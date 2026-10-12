@@ -4,7 +4,7 @@ All four need the debt unlocked (verified consumer, disclosures given) and are
 refused once collection has stopped on the call. The house rules in
 ``policy`` decide every amount, term and date; a request outside them comes
 back as an error telling the model what to do instead: a settlement under the
-minimum is countered with an amount from the minimum up to the balance, and
+minimum is countered, starting near the balance and stepping down to the minimum, and
 any other term outside the rules goes to a person.
 
 Cards and bank accounts are saved and charged only through the collections
@@ -47,8 +47,8 @@ logger = logging.getLogger(__name__)
 
 TRANSFER_HINT = "No counter-offer is allowed; a person can handle it (transfer_to_human)."
 COUNTER_HINT = (
-    "Don't accept it: counter-offer an amount from the minimum up to the full balance. If the consumer will not "
-    "reach the minimum, a person can handle it (transfer_to_human)."
+    "Don't accept it: counter-offer, starting near the full balance and coming down in steps, never below the "
+    "minimum. If the consumer will not reach the minimum, a person can handle it (transfer_to_human)."
 )
 
 
