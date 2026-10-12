@@ -14,7 +14,9 @@ SQL functions, and ``PaymentGateway`` is Remi's one client for them:
   loan is the ledger's (``ledger.FineractLedger.post_payment``).
 
 The world decides approve or decline; a decline is a normal result, not an
-error. An invalid instrument, unknown method or out-of-range amount raises
+error. ``gateway_charge`` first checks the amount against the creditor's menu:
+an off-menu amount raises SQLSTATE 23514 (``policy: ...``) before any payment
+row, raised here as ``menu.PolicyRefused``. An invalid instrument, unknown method or out-of-range amount raises
 SQLSTATE 22023 with a message starting ``gateway:``; nothing is written, and
 the message becomes a ``ToolError`` the model can relay.
 
@@ -37,6 +39,7 @@ import psycopg
 from vamos_voice.tools import ToolError
 
 from .db import Transaction
+from .menu import raise_policy_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +139,9 @@ class PaymentGateway:
     async def _call(self, function: str, **args: object) -> dict[str, object]:
         try:
             return await self._tx.call_gateway(function, args)
+        except psycopg.errors.CheckViolation as err:  # SQLSTATE 23514: the creditor's menu refused the amount
+            raise_policy_refusal(err, function)
+            raise
         except psycopg.errors.InvalidParameterValue as err:  # SQLSTATE 22023
             message = err.diag.message_primary or ""
             if not message.startswith(GATEWAY_ERROR_PREFIX):

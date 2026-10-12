@@ -95,9 +95,7 @@ async def test_debt_tools_wait_for_verification_and_disclosures(pg_dsn, make_ses
     assert "verify_right_party" in (await s.dispatch("get_debt_details", DISCLOSED))["error"]
     assert (
         "verify_right_party"
-        in (await s.dispatch("take_payment", {"method_id": "x", "amount": 0.01, "purpose": "pay_in_full"}))[
-            "error"
-        ]
+        in (await s.dispatch("take_payment", {"method_id": "x", "option_id": "pif"}))["error"]
     )
     await s.dispatch("verify_right_party", VERIFY)
     refused = await s.dispatch(
@@ -105,28 +103,8 @@ async def test_debt_tools_wait_for_verification_and_disclosures(pg_dsn, make_ses
     )
     assert "alternative-format" in refused["error"] and "language" not in refused["error"]
     assert (
-        "disclosures"
-        in (await s.dispatch("take_payment", {"method_id": "x", "amount": 0.01, "purpose": "pay_in_full"}))[
-            "error"
-        ]
+        "disclosures" in (await s.dispatch("take_payment", {"method_id": "x", "option_id": "pif"}))["error"]
     )
-
-
-def test_the_model_negotiates_a_settlement_within_code_bounds() -> None:
-    """No settlement engine tool and no prescribed ladder: the prompt leaves the negotiation to the model,
-    and every money tool it names is registered (so every vendor gets the same set)."""
-    import re
-    from importlib.resources import files
-
-    from vamos_agents.remi.tools import REGISTRY
-
-    names = {t.name for t in REGISTRY.specs()}
-    text = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
-    assert "evaluate_settlement_offer" not in names and "evaluate_settlement_offer" not in text
-    assert "negotiate it as you judge best" in text and "Never reveal the minimum" in text
-    assert "counter-offer" not in text and not re.search(r"\b(midpoint|halfway|twice)\b", text)
-    for tool in ("get_debt_details", "add_payment_method", "take_payment", "transfer_to_human"):
-        assert tool in names and tool in text
 
 
 async def test_english_only_no_language_step(pg_dsn, make_session) -> None:
@@ -268,10 +246,10 @@ async def test_verification_takes_a_first_name_and_facts_one_at_a_time(pg_dsn, m
     assert "error" in await s.dispatch("get_debt_details", DISCLOSED)
     done = await s.dispatch("verify_right_party", {"name": "Aaliyah", "zip": "11215"})
     assert done["verified"] is True
-    assert done["owed_before_the_debt"] == [
-        "the recording disclosure",
-        "the mini-Miranda",
-        "the alternative-format statement with the callback number",
+    assert [d["disclosure"] for d in done["disclosures_due"]] == [
+        "recording",
+        "mini_miranda",
+        "alternative_format",
     ]
     assert "next" not in done and "Now give" not in str(done)
 
@@ -352,15 +330,19 @@ async def test_money_crosses_the_tools_in_dollars(pg_dsn, make_session) -> None:
     assert no_cents(details)
     assert details["current_balance"] == "$185.00"
     assert details["itemization"]["charge_off_balance"].startswith("$")
-    assert details["limits"]["hardship_min_instalment"] == "$10.00"
-    fraction = await s.dispatch(
-        "record_promise", {"amount": 10.005, "due_on": "2027-02-19", "method": "check"}
+    assert "limits" not in details, "what may be offered is the creditor's menu, not limits to negotiate in"
+    options = await s.dispatch("get_payment_options", {})
+    assert no_cents(options) and options["options"][0] == {
+        "option_id": "pif",
+        "kind": "pay_in_full",
+        "amount": "$185.00",
+    }
+    promise = await s.dispatch(
+        "record_promise", {"option_id": "pif", "due_on": "2027-02-19", "method": "check"}
     )
-    assert "dollars and cents" in fraction["error"]
-    promise = await s.dispatch("record_promise", {"amount": 50.25, "due_on": "2027-02-19", "method": "check"})
-    assert promise["amount"] == "$50.25" and no_cents(promise)
+    assert promise["amount"] == "$185.00" and no_cents(promise)
     (row,) = rows(pg_dsn, "promises_to_pay")
-    assert row["amount_cents"] == 5025, "the World still stores cents"
+    assert row["amount_cents"] == 18500, "the World still stores cents"
 
 
 #: REMI-001 (pay a small balance in full by card): the answer key's postconditions from
@@ -449,9 +431,7 @@ async def test_remi_001_pay_in_full_leaves_exactly_the_answer_key_rows(
     assert details["current_balance"] == "$185.00"
     method_id = await card(s)
     ticks.t += 60
-    paid = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
     told = paid.pop("allowed_now")
     assert paid == {
         "status": "approved",
@@ -522,22 +502,18 @@ async def test_card_decline_tells_the_model_why_then_a_promise(
     s = await make_session()
     await unlocked(s)
     method_id = await card(s, number)
-    declined = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    declined = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
     assert (declined["status"], declined["decline_code"]) == ("declined", decline_code)
     assert reason in declined["reason"] and "did not go through" in declined["allowed_now"]
     assert "promise" in declined["allowed_now"] and "bank account" in declined["allowed_now"]
-    again = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    again = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
     assert "already declined" in again["error"]
-    assert (await s.dispatch("record_promise", {"amount": 185.00, "due_on": "2027-02-25", "method": "card"}))[
-        "error"
-    ]
-    assert (await s.dispatch("record_promise", {"amount": 185.00, "due_on": "2027-02-19", "method": "card"}))[
-        "recorded"
-    ]
+    assert (
+        await s.dispatch("record_promise", {"option_id": "pif", "due_on": "2027-02-25", "method": "card"})
+    )["error"]
+    assert (
+        await s.dispatch("record_promise", {"option_id": "pif", "due_on": "2027-02-19", "method": "card"})
+    )["recorded"]
     assert (
         await s.dispatch(
             "log_contact_attempt",
@@ -560,8 +536,7 @@ async def test_card_decline_then_ach_pays_in_full(pg_dsn, make_session) -> None:
         "take_payment",
         {
             "method_id": await card(s, INSUFFICIENT_FUNDS_CARD),
-            "amount": 185.00,
-            "purpose": "pay_in_full",
+            "option_id": "pif",
         },
     )
     assert declined["status"] == "declined"
@@ -570,9 +545,7 @@ async def test_card_decline_then_ach_pays_in_full(pg_dsn, make_session) -> None:
         {"method": "ach", "routing_number": GOOD_BANK[0], "account_number": GOOD_BANK[1]},
     )
     assert (bank["method"], bank["last4"], bank["brand"]) == ("ach", "6789", None)
-    paid = await s.dispatch(
-        "take_payment", {"method_id": bank["method_id"], "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    paid = await s.dispatch("take_payment", {"method_id": bank["method_id"], "option_id": "pif"})
     assert paid["status"] == "approved" and paid["paid_with"] == "bank account ending 6789"
     assert (
         await s.dispatch(
@@ -602,9 +575,7 @@ async def test_ach_decline_is_reported(pg_dsn, make_session) -> None:
         "add_payment_method",
         {"method": "ach", "routing_number": DECLINING_BANK[0], "account_number": DECLINING_BANK[1]},
     )
-    declined = await s.dispatch(
-        "take_payment", {"method_id": bank["method_id"], "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    declined = await s.dispatch("take_payment", {"method_id": bank["method_id"], "option_id": "pif"})
     assert (declined["status"], declined["decline_code"], declined["declined"]) == (
         "declined",
         "insufficient_funds",
@@ -635,108 +606,11 @@ async def test_gateway_validation_errors_reach_the_model_and_write_nothing(
     assert "the card expired at the end of 01/2027" in expired["error"]
     missing = await s.dispatch("add_payment_method", {"method": "card", "card_number": GOOD_CARD})
     assert "expiry" in missing["error"]
-    over = await s.dispatch(
-        "take_payment", {"method_id": await card(s), "amount": 185.01, "purpose": "settlement"}
-    )
-    assert "full balance" in over["error"]  # refused by policy before the gateway is reached
+    off_menu = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "settle_99"})
+    assert "not one of the creditor's options" in off_menu["error"]  # refused before the gateway is reached
     assert [m["last4"] for m in rows(pg_dsn, "payment_methods")] == ["4242"]
     assert rows(pg_dsn, "payments") == []
     assert bad_luhn not in caplog.text and GOOD_CARD not in caplog.text
-
-
-async def test_settlement_below_the_floor_is_refused_then_goes_to_a_person(pg_dsn, make_session) -> None:
-    seed_world(pg_dsn, account={"current_balance_cents": 200000, "charge_off_balance_cents": 200000})
-    s = await make_session()
-    details = await unlocked(s)
-    assert details["limits"]["settlement_one_payment_min"] == "$1,400.00"  # Remi knows its minimum
-    pm = await card(s)
-    refused = await s.dispatch("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"})
-    assert (
-        "at least $1,400.00" in refused["error"] and "Don't accept less than the minimum" in refused["error"]
-    )
-    assert "counter" not in refused["error"].lower()  # no prescribed negotiation
-    assert "transfer_to_human" in refused["error"]  # if the consumer can't reach the minimum
-    await s.dispatch("transfer_to_human", {"reason": "settlement_below_floor"})
-    # The transfer is terminal: nothing more is negotiated or charged, at the minimum or in full.
-    for later in (
-        ("take_payment", {"method_id": pm, "amount": 1400.00, "purpose": "settlement"}),
-        ("take_payment", {"method_id": pm, "amount": 2000.00, "purpose": "pay_in_full"}),
-        ("record_promise", {"amount": 1400.00, "due_on": "2027-02-19", "method": "check"}),
-        ("add_payment_method", {"method": "ach", "routing_number": "021000021", "account_number": "1"}),
-    ):
-        refused = await s.dispatch(*later)
-        assert "transferred to a person" in refused["error"], (later, refused)
-    assert (
-        await s.dispatch(
-            "log_contact_attempt", {"answered_by": "consumer", "summary": "Wanted 40 percent; transferred."}
-        )
-    )["disposition"] == "transferred"
-    assert rows(pg_dsn, "payments") == [] and rows(pg_dsn, "arrangements") == []
-
-
-async def _settlement_call(pg_dsn, make_session) -> CallSession:
-    """A verified, unlocked call on a $1,000.00 balance whose one-payment settlement minimum is $700.00."""
-    seed_world(
-        pg_dsn,
-        account={
-            "current_balance_cents": 100000,
-            "charge_off_balance_cents": 100000,
-            "settlement_floor_pct": 70,
-        },
-    )
-    s = await make_session()
-    await unlocked(s)
-    return s
-
-
-SETTLE_750 = {"amount": 750.00, "purpose": "settlement"}
-
-
-async def test_the_settlement_minimum_is_enforced_in_code(pg_dsn, make_session) -> None:
-    """Whatever the model agreed, a settlement charge is below neither the minimum nor at the balance."""
-    s = await _settlement_call(pg_dsn, make_session)
-    pm = await card(s)
-    for dollars, why in ((699.99, "at least $700.00"), (1000.00, "full balance"), (1200.00, "full balance")):
-        refused = await s.dispatch(
-            "take_payment", {"method_id": pm, "amount": dollars, "purpose": "settlement"}
-        )
-        assert why in refused["error"], (dollars, refused)
-    assert rows(pg_dsn, "payments") == []
-    at_floor = await s.dispatch("take_payment", {"method_id": pm, "amount": 700.00, "purpose": "settlement"})
-    assert at_floor["status"] == "approved" and at_floor["remaining_balance"] == "$300.00"
-
-
-async def test_an_approved_settlement_the_ledger_cannot_post_is_never_charged_again(
-    pg_dsn, make_session, monkeypatch
-) -> None:
-    s = await _settlement_call(pg_dsn, make_session)
-    pm = await card(s)
-
-    async def unreachable(*_a: Any, **_k: Any) -> Any:
-        raise LedgerUnavailable("the ledger could not be reached: connection refused")
-
-    monkeypatch.setattr(support.LEDGER, "post_payment", unreachable)
-    paid = await s.dispatch("take_payment", {"method_id": pm, **SETTLE_750})
-    assert paid["status"] == "approved" and "posting it to the account's ledger failed" in paid["ledger"]
-    assert support.LEDGER.balance("TAS-420101") == 100000  # unposted: the ledger still says it is owed
-    again = await s.dispatch("take_payment", {"method_id": pm, **SETTLE_750})
-    assert "already went through" in again["error"]
-    in_full = await s.dispatch("take_payment", {"method_id": pm, "amount": 1000.00, "purpose": "pay_in_full"})
-    assert "already went through" in in_full["error"]
-    assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
-
-
-async def test_concurrent_duplicate_settlement_charges_charge_once(pg_dsn, make_session) -> None:
-    s = await _settlement_call(pg_dsn, make_session)
-    pm = await card(s)
-    results = await asyncio.gather(
-        s.dispatch("take_payment", {"method_id": pm, **SETTLE_750}),
-        s.dispatch("take_payment", {"method_id": pm, **SETTLE_750}),
-    )
-    assert sorted("error" in r for r in results) == [False, True], results
-    assert [r["status"] for r in results if "error" not in r] == ["approved"]
-    assert [p["amount_cents"] for p in rows(pg_dsn, "payments")] == [75000]
-    assert [op for op, _ in support.LEDGER.writes] == ["repayment", "writeoff"]
 
 
 async def test_concurrent_duplicate_payments_in_full_charge_once(pg_dsn, make_session) -> None:
@@ -744,58 +618,10 @@ async def test_concurrent_duplicate_payments_in_full_charge_once(pg_dsn, make_se
     s = await make_session()
     await unlocked(s)
     pm = await card(s)
-    full = {"method_id": pm, "amount": 185.00, "purpose": "pay_in_full"}
+    full = {"method_id": pm, "option_id": "pif"}
     results = await asyncio.gather(s.dispatch("take_payment", full), s.dispatch("take_payment", full))
     assert sorted("error" in r for r in results) == [False, True], results
     assert [p["amount_cents"] for p in rows(pg_dsn, "payments")] == [18500]
-
-
-async def test_a_declined_settlement_charge_releases_the_charge_for_a_retry(pg_dsn, make_session) -> None:
-    s = await _settlement_call(pg_dsn, make_session)
-    declined = await s.dispatch("take_payment", {"method_id": await card(s, DECLINED_CARD), **SETTLE_750})
-    assert declined["status"] == "declined"
-    assert s.state.charged_payment_id is None and s.state.charge_in_flight is False
-    retried = await s.dispatch("take_payment", {"method_id": await card(s), **SETTLE_750})
-    assert retried["status"] == "approved"
-    assert [p["status"] for p in rows(pg_dsn, "payments")] == ["declined", "approved"]
-
-
-async def test_lump_settlement_writes_payment_arrangement_and_letter(pg_dsn, make_session) -> None:
-    seed_world(
-        pg_dsn,
-        account={
-            "current_balance_cents": 100000,
-            "charge_off_balance_cents": 100000,
-            "settlement_floor_pct": 70,
-        },
-    )
-    s = await make_session()
-    await unlocked(s)
-    method_id = await card(s)
-    ok = await s.dispatch("take_payment", {"method_id": method_id, "amount": 750.00, "purpose": "settlement"})
-    assert ok["status"] == "approved" and ok["remaining_balance"] == "$250.00"
-    (arr,) = rows(pg_dsn, "arrangements")
-    assert (arr["kind"], arr["total_cents"], arr["instalments"], arr["method_id"]) == (
-        "settlement_lump",
-        75000,
-        [{"due_on": "2027-02-10", "amount_cents": 75000}],
-        method_id,
-    )
-    assert arr["confirmation_letter_due_by"] == date(2027, 2, 18)
-    assert [letter["kind"] for letter in rows(pg_dsn, "letters")] == ["plan_confirmation"]
-    (payment,) = rows(pg_dsn, "payments")
-    assert (payment["status"], payment["amount_cents"], payment["method_id"]) == (
-        "approved",
-        75000,
-        method_id,
-    )
-    assert rows(pg_dsn, "accounts")[0]["status"] == "active"  # settled is the ledger's: written off
-    assert [(op, w.get("amount_cents")) for op, w in support.LEDGER.writes] == [
-        ("repayment", 75000),
-        ("writeoff", 25000),
-    ]
-    assert support.LEDGER.writes[1][1]["external_id"] == f"wo_{payment['payment_id']}"
-    assert (support.LEDGER.balance("TAS-420101"), support.LEDGER.status("TAS-420101")) == (0, 601)
 
 
 async def test_an_approved_charge_the_ledger_cannot_take_is_reported_not_hidden(
@@ -811,16 +637,12 @@ async def test_an_approved_charge_the_ledger_cannot_take_is_reported_not_hidden(
         raise LedgerUnavailable("the ledger could not be reached: connection refused")
 
     monkeypatch.setattr(support.LEDGER, "post_payment", unreachable)
-    paid = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
     assert paid["status"] == "approved" and "posting it to the account's ledger failed" in paid["ledger"]
     assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
     assert support.LEDGER.balance("TAS-420101") == 18500
     assert "posting pay_" in caplog.text
-    again = await s.dispatch(
-        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    again = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
     assert "already went through" in again["error"]
     assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
 
@@ -829,12 +651,12 @@ async def test_nothing_is_taken_from_an_account_the_ledger_has_closed(pg_dsn, ma
     seed_world(pg_dsn)
     s = await make_session()
     await unlocked(s)
-    await s.dispatch("take_payment", {"method_id": await card(s), "amount": 185.00, "purpose": "pay_in_full"})
-    again = await s.dispatch(
-        "take_payment", {"method_id": await card(s), "amount": 185.00, "purpose": "pay_in_full"}
-    )
+    await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "pif"})
+    again = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "pif"})
     assert "already went through" in again["error"]  # the call's one charge is taken
-    promise = await s.dispatch("record_promise", {"amount": 10.00, "due_on": "2027-02-19", "method": "check"})
+    promise = await s.dispatch(
+        "record_promise", {"option_id": "pif", "due_on": "2027-02-19", "method": "check"}
+    )
     assert "Nothing is owed" in promise["error"]
 
 
@@ -845,81 +667,6 @@ async def test_an_unreachable_ledger_is_a_refusal_the_model_can_act_on(pg_dsn, m
     await verified(s)
     refused = await s.dispatch("get_debt_details", DISCLOSED)
     assert "ledger cannot be reached" in refused["error"] and "transfer_to_human" in refused["error"]
-
-
-async def test_a_plan_re_ages_the_loan_and_records_the_ledgers_schedule(pg_dsn, make_session) -> None:
-    seed_world(
-        pg_dsn, account={"current_balance_cents": 26500, "max_plan_months": 12, "min_instalment_cents": 2500}
-    )
-    s = await make_session()
-    await unlocked(s)
-    method_id = await card(s)
-    plan = {"kind": "plan", "method_id": method_id, "instalment_count": 6, "first_due_on": "2027-03-01"}
-    made = await s.dispatch("create_arrangement", plan)
-    assert [i["amount"] for i in made["instalments"]] == ["$44.17"] * 5 + ["$44.15"]
-    (arr,) = rows(pg_dsn, "arrangements")
-    assert (arr["kind"], arr["total_cents"]) == ("plan", 26500)
-    assert [i["amount_cents"] for i in arr["instalments"]] == [4417] * 5 + [4415]
-    assert arr["instalments"][-1]["due_on"] == "2027-08-01"
-    ((op, write),) = support.LEDGER.writes
-    assert (op, write["instalments"], write["first_due_on"], write["external_id"]) == (
-        "reAge",
-        6,
-        date(2027, 3, 1),
-        arr["arrangement_id"],
-    )
-    again = await s.dispatch("create_arrangement", {**plan, "instalment_count": 3})
-    assert "once a day" in again["error"]
-    assert len(rows(pg_dsn, "arrangements")) == 1
-
-
-async def test_a_plan_the_agency_cannot_record_is_taken_back_from_the_ledger(
-    pg_dsn, make_session, monkeypatch
-) -> None:
-    from vamos_agents.remi.tools import money
-
-    seed_world(pg_dsn, account={"current_balance_cents": 26500})
-    s = await make_session()
-    await unlocked(s)
-    method_id = await card(s)
-
-    async def refused(*_a: Any, **_k: Any) -> None:
-        raise RuntimeError("the database went away")
-
-    monkeypatch.setattr(money, "_insert_arrangement", refused)
-    failed = await s.dispatch(
-        "create_arrangement",
-        {"kind": "plan", "method_id": method_id, "instalment_count": 6, "first_due_on": "2027-03-01"},
-    )
-    assert "error" in failed
-    assert [op for op, _ in support.LEDGER.writes] == ["reAge", "undoReAge"]
-    assert rows(pg_dsn, "arrangements") == []
-
-
-async def test_hardship_plan_needs_the_hardship_recorded_first(pg_dsn, make_session) -> None:
-    seed_world(pg_dsn, account={"current_balance_cents": 96000, "charge_off_balance_cents": 96000})
-    s = await make_session()
-    await unlocked(s)
-    pm = await card(s)
-    plan = {
-        "kind": "hardship_plan",
-        "method_id": pm,
-        "instalment_count": 24,
-        "first_due_on": "2027-03-01",
-    }
-    assert "hardship recorded first" in (await s.dispatch("create_arrangement", plan))["error"]
-    await s.dispatch("record_flag", {"kind": "hardship", "hardship_reason": "job_loss"})
-    made = await s.dispatch("create_arrangement", plan)
-    assert len(made["instalments"]) == 24 and made["instalments"][0] == {
-        "due_on": "2027-03-01",
-        "amount": "$40.00",
-    }
-    assert (
-        await s.dispatch(
-            "log_contact_attempt", {"answered_by": "consumer", "summary": "Lost job; set up a hardship plan."}
-        )
-    )["disposition"] == "hardship_plan"
-    assert [f["details"] for f in rows(pg_dsn, "account_flags")] == [{"reason": "job_loss"}]
 
 
 # --- signals ---------------------------------------------------------------------------------
@@ -976,12 +723,14 @@ async def test_deceased_reported_by_the_executor(pg_dsn, make_session) -> None:
     details = await s.dispatch(
         "get_debt_details", {"recording_disclosure_given": True, "mini_miranda_given": True}
     )
-    assert "limits" not in details and details["current_balance"] == "$185.00"
+    assert "payments" not in details and details["current_balance"] == "$185.00"
     assert (
         "Collection stopped"
-        in (await s.dispatch("record_promise", {"amount": 1.00, "due_on": "2027-02-12", "method": "check"}))[
-            "error"
-        ]
+        in (
+            await s.dispatch(
+                "record_promise", {"option_id": "pif", "due_on": "2027-02-12", "method": "check"}
+            )
+        )["error"]
     )
     logged = await s.dispatch(
         "log_contact_attempt", {"answered_by": "estate_rep", "summary": "Executor reported the death."}
@@ -1072,9 +821,11 @@ async def test_scra_needs_the_branch_and_a_transfer_before_the_call_closes(pg_ds
     assert "transfer_to_human" in (await s.dispatch("end_call", {}))["error"]
     assert (
         "Collection stopped"
-        in (await s.dispatch("record_promise", {"amount": 10.0, "due_on": "2027-02-12", "method": "check"}))[
-            "error"
-        ]
+        in (
+            await s.dispatch(
+                "record_promise", {"option_id": "pif", "due_on": "2027-02-12", "method": "check"}
+            )
+        )["error"]
     )
     assert (await s.dispatch("transfer_to_human", {"reason": "scra"}))["transferred"] is True
     assert (await s.dispatch("log_contact_attempt", summary))["disposition"] == "transferred"

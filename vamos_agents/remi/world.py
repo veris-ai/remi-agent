@@ -25,6 +25,11 @@ class Agency:
     callback_number: str
     callback_contact: str
 
+    @property
+    def business_name(self) -> str:
+        """The name as said on a call ("Tallmere Account Services"), without the legal suffix."""
+        return self.name.removesuffix(", LLC")
+
 
 @dataclass(frozen=True)
 class Creditor:
@@ -89,7 +94,4 @@ class Account:
     sol_expires_on: date
     validation_notice_mailed_on: date
     time_barred_notice_mailed_on: date | None
-    settlement_floor_pct: int
-    max_plan_months: int
-    min_instalment_cents: int
     status: str

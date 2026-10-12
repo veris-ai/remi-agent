@@ -151,44 +151,14 @@ def test_clean_account_may_be_called() -> None:
     )
 
 
-def test_settlement_floors_round_up_and_add_ten_points_for_instalments() -> None:
-    account = _account(settlement_floor_pct=70)
-    balance = 200001  # the ledger's
-    assert policy.settlement_floor_cents(account, balance, 1) == 140001
-    assert policy.settlement_floor_cents(account, balance, 3) == 160001
-    assert policy.settlement_refusal(account, balance, 140000, 1).code == "below_floor"
-    assert policy.settlement_refusal(account, balance, 140001, 1) is None
-    assert policy.settlement_refusal(account, balance, 170000, 4).code == "too_many_settlement_instalments"
-    assert policy.settlement_refusal(account, balance, balance, 1).code == "not_a_settlement"
-
-
-def test_plan_rules() -> None:
-    account = _account(max_plan_months=12, min_instalment_cents=2500)
-    today = date(2027, 2, 10)
-    assert policy.plan_refusal(account, 120000, 12, date(2027, 3, 1), today, hardship=False) is None
-    assert (
-        policy.plan_refusal(account, 120000, 36, date(2027, 3, 1), today, hardship=False).code
-        == "term_above_maximum"
-    )
-    assert policy.plan_refusal(account, 120000, 24, date(2027, 3, 1), today, hardship=True) is None
-    assert (
-        policy.plan_refusal(account, 120000, 6, date(2027, 3, 20), today, hardship=False).code
-        == "first_payment_outside_30_days"
-    )
-    small = _account(min_instalment_cents=2500)
-    assert (
-        policy.plan_refusal(small, 10000, 5, date(2027, 3, 1), today, hardship=False).code
-        == "instalment_below_minimum"
-    )
-
-
-def test_promise_window_and_instalment_schedule() -> None:
+def test_promise_and_first_plan_payment_windows() -> None:
     today = date(2027, 2, 10)
     assert policy.ptp_refusal(date(2027, 2, 24), today) is None
     assert policy.ptp_refusal(date(2027, 2, 25), today) is not None
-    schedule = policy.monthly_instalments(120000, 3, date(2027, 1, 31))
-    assert [s["due_on"] for s in schedule] == ["2027-01-31", "2027-02-28", "2027-03-31"]
-    assert sum(s["amount_cents"] for s in schedule) == 120000
+    assert policy.first_due_refusal(date(2027, 3, 12), today) is None
+    assert policy.first_due_refusal(date(2027, 3, 13), today) is not None
+    assert policy.first_due_refusal(today, today) is not None
+    assert policy.add_months(date(2027, 1, 31), 1) == date(2027, 2, 28)
 
 
 def test_instalments_round_as_the_ledger_does() -> None:

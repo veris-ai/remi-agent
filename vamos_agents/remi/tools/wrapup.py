@@ -95,16 +95,14 @@ async def queue_letter(session: RemiCall, args: LetterArgs) -> dict[str, Any]:
 
 
 class TransferArgs(BaseModel):
-    reason: Literal[
-        "consumer_asked_for_person", "settlement_below_floor", "plan_outside_rules", "scra", "other"
-    ]
+    reason: Literal["consumer_asked_for_person", "outside_creditor_options", "scra", "other"]
 
 
 @REGISTRY.tool(TransferArgs, requires=Gate.PROCEEDING)
 async def transfer_to_human(session: RemiCall, args: TransferArgs) -> dict[str, Any]:
-    """Transfer the call to a person: on the first request for a person, and without being asked when the
-    consumer can't bring a settlement up to the minimum, wants a plan outside the house rules, or mentions
-    active military duty. Never loop back to offering your own help first."""
+    """Transfer the call to a person: on the first request for a person, and without being asked when nothing
+    on the creditor's options fits what the consumer can pay (including 'I can't pay' when the creditor allows
+    no settlement), or when they mention active military duty. Never loop back to offering your own help first."""
     session.transferred = True
     return {
         "transferred": True,

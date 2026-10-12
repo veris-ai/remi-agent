@@ -1,9 +1,11 @@
 """RULES.md's numeric and calendar rules, as pure functions Remi's tools enforce.
 
-The world enforces none of the collections policy (WORLD.md, "What the world
-does not enforce"): Postgres accepts a settlement below the floor or a callback
-at 11 p.m. Remi refuses those itself, here, so a model that misjudges a number
-gets a tool error it can act on instead of writing a violation into the world.
+The world enforces little of the collections policy (WORLD.md, "What the world
+does not enforce"): Postgres accepts a callback at 11 p.m. or a promise a month
+out. Remi refuses those itself, here, so a model that misjudges a date gets a
+tool error it can act on instead of writing a violation into the world. What a
+consumer may pay (amounts, plans, settlements) is not here: it is the
+creditor's menu, answered by the World's decision engine (``menu``).
 
 Every function takes the World's date or time explicitly (from ``CallClock``);
 nothing here reads a clock. This module is Remi's own reading of RULES.md and
@@ -12,7 +14,6 @@ must not import the benchmark's grader.
 
 from __future__ import annotations
 
-import math
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -23,12 +24,7 @@ from .context import EASTERN
 from .world import CLOSED_STATUSES, Account, ContactAttempt, Phone
 
 # --- house rules and the law, in the order RULES.md states them ---------------
-SETTLEMENT_INSTALMENTS_MAX = 3
-SETTLEMENT_INSTALMENTS_PREMIUM_PTS = 10
-PLAN_MIN_MONTHS = 2
 PLAN_FIRST_DUE_MAX_DAYS = 30
-HARDSHIP_MAX_MONTHS = 24
-HARDSHIP_MIN_INSTALMENT_CENTS = 1_000
 PTP_MAX_DAYS = 14
 CALL_WINDOW_START = time(8, 0)  # at or after
 CALL_WINDOW_END = time(21, 0)  # strictly before
@@ -219,23 +215,6 @@ def dollars(cents: int) -> str:
     return f"{sign}${whole:,}.{part:02d}"
 
 
-def to_cents(amount: float) -> int | None:
-    """Dollars from a tool argument to whole cents; None when it has fractions of a cent."""
-    cents = round(amount * 100)
-    return cents if abs(amount * 100 - cents) < 1e-6 else None
-
-
-def pct_of(balance_cents: int, pct: int) -> int:
-    """A percentage of a balance in whole cents, rounded up: a floor is never undercut by rounding."""
-    return math.ceil(balance_cents * pct / 100)
-
-
-def settlement_floor_cents(account: Account, balance_cents: int, instalments: int) -> int:
-    """The least a settlement may total: the floor for one payment, ten points more in instalments."""
-    premium = 0 if instalments == 1 else SETTLEMENT_INSTALMENTS_PREMIUM_PTS
-    return pct_of(balance_cents, account.settlement_floor_pct + premium)
-
-
 def add_months(start: date, months: int) -> date:
     month = start.month - 1 + months
     year = start.year + month // 12
@@ -251,14 +230,6 @@ def instalment_cents(total_cents: int, count: int) -> list[int]:
     return [each] * (count - 1) + [total_cents - each * (count - 1)]
 
 
-def monthly_instalments(total_cents: int, count: int, first_due_on: date) -> list[dict[str, object]]:
-    """Equal monthly instalments on the same day each month, rounded as ``instalment_cents``."""
-    return [
-        {"due_on": add_months(first_due_on, i).isoformat(), "amount_cents": amount}
-        for i, amount in enumerate(instalment_cents(total_cents, count))
-    ]
-
-
 # --- refusals: why an offer is outside the house rules, or None --------------------------
 
 
@@ -270,42 +241,12 @@ class Refusal:
     detail: str
 
 
-def plan_refusal(
-    account: Account, balance: int, months: int, first_due_on: date, today: date, *, hardship: bool
-) -> Refusal | None:
-    max_months = HARDSHIP_MAX_MONTHS if hardship else account.max_plan_months
-    minimum = HARDSHIP_MIN_INSTALMENT_CENTS if hardship else account.min_instalment_cents
-    if months < PLAN_MIN_MONTHS:
-        return Refusal("term_below_minimum", f"a plan needs at least {PLAN_MIN_MONTHS} monthly payments")
-    if months > max_months:
-        return Refusal("term_above_maximum", f"this account allows at most {max_months} monthly payments")
-    if balance // months < minimum:
-        return Refusal("instalment_below_minimum", f"each payment must be at least {dollars(minimum)}")
-    return first_due_refusal(first_due_on, today)
-
-
 def first_due_refusal(first_due_on: date, today: date) -> Refusal | None:
     if not today < first_due_on <= today + timedelta(days=PLAN_FIRST_DUE_MAX_DAYS):
         return Refusal(
             "first_payment_outside_30_days",
             f"the first payment must fall after today and on or before {today + timedelta(days=PLAN_FIRST_DUE_MAX_DAYS)}",
         )
-    return None
-
-
-def settlement_refusal(account: Account, balance: int, total_cents: int, instalments: int) -> Refusal | None:
-    if instalments > SETTLEMENT_INSTALMENTS_MAX:
-        return Refusal(
-            "too_many_settlement_instalments",
-            f"a settlement is at most {SETTLEMENT_INSTALMENTS_MAX} payments",
-        )
-    floor = settlement_floor_cents(account, balance, instalments)
-    if total_cents < floor:
-        return Refusal(
-            "below_floor", f"this settlement must total at least {dollars(floor)}; a person must handle less"
-        )
-    if total_cents >= balance:
-        return Refusal("not_a_settlement", "that is the full balance: use pay in full or a payment plan")
     return None
 
 

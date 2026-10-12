@@ -267,10 +267,11 @@ def test_the_stages_explain_the_check_and_verify_one_fact_at_a_time() -> None:
         "Three wrong answers end the call",
         "by their second push-back at\n   the latest",
         "2 1 2, 5 5 5, 0 1 0 0, where a person answers",
-        '"This call is being recorded, and the recording may be used in connection with collecting a debt."',
-        "an attempt to collect a debt",
-        "one item per turn",
-        "the\n   itemization only if asked",
+        "verify_right_party's result lists the disclosures due",
+        "before anything about the account",
+        "one per turn",
+        "Keep the exact wording",
+        "itemization only if asked",
     ):
         assert line in stages, line
 

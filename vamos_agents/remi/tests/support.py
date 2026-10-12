@@ -14,6 +14,11 @@ for seeding and inspecting; Remi itself connects as ``APP_ROLE``, a login that
 owns nothing, so the gateway's write guards bind: a direct write to
 ``payment_methods`` or ``payments``, or any read of the processor's vault,
 fails the test.
+
+The World's SQL includes the creditors' decision engine (``payment_options``,
+``request_approval`` and the guards that refuse off-menu money). ``seed_world``
+gives its account ``TEST_POLICY`` (override fields with ``policy=``), priced
+from the ledger's balance as the World prices it.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from typing import Any
 import psycopg
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from .fake_ledger import FakeLedger
 
@@ -124,9 +130,7 @@ ACCOUNT = {
     "sol_expires_on": date(2028, 3, 15),
     "validation_notice_mailed_on": date(2027, 1, 5),
     "time_barred_notice_mailed_on": None,
-    "settlement_floor_pct": 70,
-    "max_plan_months": 12,
-    "min_instalment_cents": 2500,
+    "policy_id": "pol_test",
     "status": "active",
 }
 #: TAS-420101's money, in the ledger: what ``seed_world``'s ``account`` overrides of these keys change.
@@ -137,6 +141,25 @@ MONEY = {
     "fees_since_charge_off_cents": 0,
     "paid_since_charge_off_cents": 0,
     "last_payment_on": None,
+}
+#: The creditor policy seeded accounts get: plans of 3 to 6 months with no down payment, then settlement
+#: tiers of 10 and 20% off, and 30% off with a supervisor's approval, each only after a recorded hardship.
+TEST_POLICY: dict[str, Any] = {
+    "policy_id": "pol_test",
+    "name": "Remi test ladder",
+    "plan_min_months": 3,
+    "plan_max_months": [{"balance_up_to_cents": None, "months": 6}],
+    "plan_down_pct": 0,
+    "plan_min_monthly_cents": 2500,
+    "settlement_allowed": True,
+    "settlement_requires_hardship": True,
+    "settlement_tiers": [
+        {"discount_pct": 10, "requires_approval": False},
+        {"discount_pct": 20, "requires_approval": False},
+        {"discount_pct": 30, "requires_approval": True},
+    ],
+    "settlement_due_within_days": 7,
+    "unable_to_pay": "transfer",
 }
 #: The ledger every call in a test reaches; rebuilt by each seed.
 LEDGER = FakeLedger()
@@ -183,6 +206,10 @@ LETTER_HISTORY = [
 ]
 
 
+def _jsonb(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: Jsonb(v) if isinstance(v, list) else v for k, v in row.items()}
+
+
 def _insert(conn: psycopg.Connection, table: str, row: dict[str, Any]) -> None:
     cols = ", ".join(row)
     marks = ", ".join(["%s"] * len(row))
@@ -198,10 +225,13 @@ def seed_world(
     history: list[dict[str, Any]] | None = None,
     creditor_address: str | None = "PO Box 4410, Wilmington, DE 19850",
     creditor_kind: str = "bank_card",
+    policy: dict[str, Any] | None = None,
 ) -> None:
     """Reset the database (schema and gateway) and seed one agency, one creditor and one account
     (TAS-420101 by default, as the World has it), with the given overrides; the overrides of ``MONEY``'s
-    keys (and a ``current_balance_cents``, as a charge-off balance with nothing else) seed the ledger."""
+    keys (and a ``current_balance_cents``, as a charge-off balance with nothing else) seed the ledger. The
+    account's creditor policy is ``TEST_POLICY`` with ``policy``'s fields, and its ``placed_balance_cents``
+    (what the menu is priced from) the ledger's balance unless overridden."""
     overrides = dict(account or {})
     money = {**MONEY, **{k: overrides.pop(k) for k in list(overrides) if k in MONEY}}
     if "current_balance_cents" in overrides:
@@ -232,7 +262,11 @@ def seed_world(
         )
         _insert(conn, "consumers", {**CONSUMER, **(consumer or {})})
         _insert(conn, "phones", {**PHONE, **(phone or {})})
-        _insert(conn, "accounts", {**ACCOUNT, **overrides})
+        _insert(conn, "creditor_policies", _jsonb({**TEST_POLICY, **(policy or {})}))
+        account_id = (ACCOUNT | overrides)["account_id"]
+        _insert(
+            conn, "accounts", {**ACCOUNT, "placed_balance_cents": LEDGER.balance(account_id), **overrides}
+        )
         for row in LETTER_HISTORY if history is None else history:
             _insert(conn, "contact_attempts", row)
         _grant_app(conn)

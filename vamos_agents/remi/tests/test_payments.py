@@ -15,6 +15,7 @@ import psycopg
 import pytest
 
 from vamos_agents.remi.db import Database
+from vamos_agents.remi.menu import PolicyRefused
 from vamos_agents.remi.payments import BankDetails, CardDetails, PaymentError, PaymentGateway, SavedMethod
 
 from .support import (
@@ -60,7 +61,7 @@ async def tokenize_ach(db: Database, bank: tuple[str, str]) -> SavedMethod:
         )
 
 
-async def charge(db: Database, method_id: str, amount_cents: int = 5000):
+async def charge(db: Database, method_id: str, amount_cents: int = 18500):  # the full balance: on the menu
     async with db.transaction() as tx:
         return await PaymentGateway(tx).charge(method_id=method_id, amount_cents=amount_cents, at=AT)
 
@@ -71,7 +72,7 @@ async def test_approved_card_is_saved_and_charged_and_the_account_is_left_to_the
     assert saved.method_id.startswith("pm_")
     assert (await tokenize_card(db, GOOD_CARD)).method_id == saved.method_id  # same card, same method
 
-    result = await charge(db, saved.method_id, 5000)
+    result = await charge(db, saved.method_id, 18500)
     assert (result.status, result.decline_code, result.approved) == ("approved", None, True)
     assert result.payment_id.startswith("pay_") and result.processor_ref.startswith("rp_")
 
@@ -82,11 +83,19 @@ async def test_approved_card_is_saved_and_charged_and_the_account_is_left_to_the
     assert (payment["payment_id"], payment["method_id"], payment["amount_cents"], payment["at"]) == (
         result.payment_id,
         saved.method_id,
-        5000,
+        18500,
         AT,
     )
     # A processor does not know the agency's balance: posting the charge is the ledger's (ledger.py).
     assert rows(pg_dsn, "accounts")[0]["status"] == "active"
+
+
+async def test_an_amount_off_the_creditors_menu_is_refused_before_any_payment(db, pg_dsn) -> None:
+    """gateway_charge checks the creditor's menu first (SQLSTATE 23514, "policy: ..."): nothing is written."""
+    saved = await tokenize_card(db, GOOD_CARD)
+    with pytest.raises(PolicyRefused, match="not an amount on the menu"):
+        await charge(db, saved.method_id, 5000)
+    assert rows(pg_dsn, "payments") == []
 
 
 @pytest.mark.parametrize(
@@ -111,8 +120,8 @@ async def test_ach_approves_and_declines(db, pg_dsn) -> None:
     bad = await tokenize_ach(db, DECLINING_BANK)
     assert (good.kind, good.last4, good.brand) == ("ach", "6789", None)
     assert bad.last4 == "2227"
-    assert (await charge(db, bad.method_id, 1000)).decline_code == "insufficient_funds"
-    assert (await charge(db, good.method_id, 1000)).approved
+    assert (await charge(db, bad.method_id, 18500)).decline_code == "insufficient_funds"
+    assert (await charge(db, good.method_id, 18500)).approved
     assert [
         (p["status"], p["decline_code"]) for p in rows(pg_dsn, "payments", "true order by at, status")
     ] == [
