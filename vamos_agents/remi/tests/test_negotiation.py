@@ -46,4 +46,16 @@ def test_state_is_returned_not_mutated() -> None:
     assert start == NegotiationState(BALANCE, 0)
     assert decision.state == NegotiationState(175_000, 1)
     after_two = NegotiationState(167_500, 2)
-    assert decide(after_two, 139_999, BALANCE, FLOOR).state is after_two
+    assert decide(after_two, 139_999, BALANCE, FLOOR).state == NegotiationState(167_500, 2, transferred=True)
+    assert after_two == NegotiationState(167_500, 2)
+
+
+def test_a_transfer_is_terminal() -> None:
+    # After the transfer, an offer at the floor or at the balance is a transfer too, never an accept.
+    assert _run(1000, 1100, 1200, 1400, 2000) == [
+        ("counter", 150_000),
+        ("counter", 140_000),
+        ("transfer", None),
+        ("transfer", None),
+        ("transfer", None),
+    ]

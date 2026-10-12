@@ -5,7 +5,11 @@ refused once collection has stopped on the call. The house rules in
 ``policy`` decide every amount, term and date; a request outside them comes
 back as an error telling the model what to do instead (a person, for terms
 outside the rules). A one-time settlement is only an amount the settlement
-engine accepted on this call (``tools.settlement``, ``negotiation``).
+engine accepted on this call (``tools.settlement``, ``negotiation``), and that
+acceptance authorizes one charge: ``take_payment`` claims it before anything is
+awaited and gives it back only after a decline or a charge that never happened.
+A call takes at most one charge, so an approved charge the ledger could not post
+is never taken twice.
 
 Cards and bank accounts are saved and charged only through the collections
 system's payment gateway (``payments.PaymentGateway``). Card and bank numbers
@@ -72,6 +76,10 @@ DOLLARS = "In dollars, e.g. 250.00."
 NOT_POSTED = (
     "The charge went through, but posting it to the account's ledger failed: the payment is safe and a person "
     "will post it. Do not charge again."
+)
+ALREADY_CHARGED = (
+    "A payment already went through on this call; no second charge is taken. If its posting failed, a person "
+    "posts it."
 )
 
 
@@ -161,23 +169,29 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     session.require_consumer()
     account = session.account
     assert account is not None
-    debt = await _open_debt(session)
-    balance = debt.balance_cents
     amount = _cents(args.amount)
-    if args.purpose == "pay_in_full" and amount != balance:
-        raise ToolError(f"Paying in full means exactly the balance, {policy.dollars(balance)}.")
-    if args.purpose == "settlement":
-        if amount != session.settlement_agreed_cents:
-            raise ToolError(NOT_AGREED)
-        if refusal := policy.settlement_refusal(account, balance, amount, 1):
+    authorization = _claim_charge(session, args.purpose, amount)  # before the first await
+    charged = False
+    try:
+        debt = await _open_debt(session)
+        balance = debt.balance_cents
+        if args.purpose == "pay_in_full" and amount != balance:
+            raise ToolError(f"Paying in full means exactly the balance, {policy.dollars(balance)}.")
+        if args.purpose == "settlement" and (
+            refusal := policy.settlement_refusal(account, balance, amount, 1)
+        ):
             raise _refused(refusal)
-    saved = _method(session, args.method_id)
-    if saved.method_id in session.declined_methods:
-        raise ToolError(f"The {_described(saved)} was already declined on this call. {DECLINE_NEXT}")
-    async with session.db.transaction() as tx:
-        charge = await PaymentGateway(tx).charge(
-            method_id=saved.method_id, amount_cents=amount, at=session.clock.now()
-        )
+        saved = _method(session, args.method_id)
+        if saved.method_id in session.declined_methods:
+            raise ToolError(f"The {_described(saved)} was already declined on this call. {DECLINE_NEXT}")
+        charge = await _charge(session, saved, amount)
+        if charge.approved:
+            charged = True
+            session.charged_payment_id = charge.payment_id
+    finally:
+        session.charge_in_flight = False
+        if not charged and authorization is not None:
+            session.settlement_agreed_cents = authorization
     if not charge.approved:
         session.declined_methods.add(saved.method_id)
         return _declined(saved, charge)
@@ -209,6 +223,49 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     if not posted:
         result["ledger"] = NOT_POSTED
     return result
+
+
+def _refuse_after_charge(session: RemiCall) -> None:
+    """A call takes at most one charge: refused while one is in flight or once one went through."""
+    if session.charged_payment_id is not None:
+        raise ToolError(ALREADY_CHARGED)
+    if session.charge_in_flight:
+        raise ToolError("A payment is already being processed on this call: wait for its result.")
+
+
+def _claim_charge(session: RemiCall, purpose: str, amount: int) -> int | None:
+    """Reserve the call's one charge, and for a settlement claim the engine's one-shot authorization, without
+    awaiting, so a concurrent take_payment sees it taken. Returns the claimed authorization (None for a payment
+    in full); the caller gives it back unless the gateway charged."""
+    _refuse_after_charge(session)
+    authorization = None
+    if purpose == "settlement":
+        if amount != session.settlement_agreed_cents:
+            raise ToolError(NOT_AGREED)
+        authorization, session.settlement_agreed_cents = session.settlement_agreed_cents, None
+    session.charge_in_flight = True
+    return authorization
+
+
+async def _charge(session: RemiCall, saved: SavedMethod, amount: int) -> Charge:
+    """Charge through the gateway. An error before the gateway answered leaves its transaction rolled back
+    (nothing charged); one after it answered (the commit) leaves the outcome unknown, so the call is marked
+    charged, never charged again, and the failure is logged and raised."""
+    charge: Charge | None = None
+    try:
+        async with session.db.transaction() as tx:
+            charge = await PaymentGateway(tx).charge(
+                method_id=saved.method_id, amount_cents=amount, at=session.clock.now()
+            )
+    except BaseException:
+        if charge is not None:
+            session.charged_payment_id = charge.payment_id
+            logger.error(
+                "charge %s may or may not have committed: no further charge on this call", charge.payment_id
+            )
+        raise
+    assert charge is not None
+    return charge
 
 
 async def _post(

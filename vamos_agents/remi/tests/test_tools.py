@@ -642,14 +642,102 @@ async def test_settlement_below_the_floor_is_countered_twice_then_transferred(pg
     assert (second["decision"], second["amount"]) == ("counter", "$1,400.00")  # mid $1,100 -> the floor
     third = await s.dispatch("evaluate_settlement_offer", {"offer": 800.00})
     assert third["decision"] == "transfer" and "amount" not in third
-    refused = await s.dispatch("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"})
-    assert "evaluate_settlement_offer" in refused["error"]
+    # The transfer is terminal: a later offer at the floor, or at the balance, is not negotiated, and
+    # nothing is charged, whether as a settlement or a payment in full.
+    for later in (
+        ("evaluate_settlement_offer", {"offer": 1400.00}),
+        ("evaluate_settlement_offer", {"offer": 2000.00}),
+        ("take_payment", {"method_id": pm, "amount": 800.00, "purpose": "settlement"}),
+        ("take_payment", {"method_id": pm, "amount": 1400.00, "purpose": "settlement"}),
+        ("take_payment", {"method_id": pm, "amount": 2000.00, "purpose": "pay_in_full"}),
+    ):
+        refused = await s.dispatch(*later)
+        assert "transferred to a person" in refused["error"], (later, refused)
+    assert s.state.settlement_agreed_cents is None
     assert (
         await s.dispatch(
             "log_contact_attempt", {"answered_by": "consumer", "summary": "Wanted 40 percent; transferred."}
         )
     )["disposition"] == "transferred"
     assert rows(pg_dsn, "payments") == [] and rows(pg_dsn, "arrangements") == []
+
+
+async def _accepted_settlement(pg_dsn, make_session) -> CallSession:
+    """A call where the engine accepted a $750.00 one-time settlement on a $1,000.00 balance."""
+    seed_world(
+        pg_dsn,
+        account={
+            "current_balance_cents": 100000,
+            "charge_off_balance_cents": 100000,
+            "settlement_floor_pct": 70,
+        },
+    )
+    s = await make_session()
+    await unlocked(s)
+    for _ in range(2):
+        assert (await s.dispatch("evaluate_settlement_offer", {"offer": 750.00}))["decision"] == "counter"
+    assert (await s.dispatch("evaluate_settlement_offer", {"offer": 750.00}))["decision"] == "accept"
+    return s
+
+
+SETTLE_750 = {"amount": 750.00, "purpose": "settlement"}
+
+
+async def test_an_approved_settlement_the_ledger_cannot_post_is_never_charged_again(
+    pg_dsn, make_session, monkeypatch
+) -> None:
+    s = await _accepted_settlement(pg_dsn, make_session)
+    pm = await card(s)
+
+    async def unreachable(*_a: Any, **_k: Any) -> Any:
+        raise LedgerUnavailable("the ledger could not be reached: connection refused")
+
+    monkeypatch.setattr(support.LEDGER, "post_payment", unreachable)
+    paid = await s.dispatch("take_payment", {"method_id": pm, **SETTLE_750})
+    assert paid["status"] == "approved" and "posting it to the account's ledger failed" in paid["ledger"]
+    assert support.LEDGER.balance("TAS-420101") == 100000  # unposted: the ledger still says it is owed
+    again = await s.dispatch("take_payment", {"method_id": pm, **SETTLE_750})
+    assert "already went through" in again["error"]
+    in_full = await s.dispatch("take_payment", {"method_id": pm, "amount": 1000.00, "purpose": "pay_in_full"})
+    assert "already went through" in in_full["error"]
+    offer = await s.dispatch("evaluate_settlement_offer", {"offer": 750.00})
+    assert "already went through" in offer["error"]
+    assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
+
+
+async def test_concurrent_duplicate_settlement_charges_charge_once(pg_dsn, make_session) -> None:
+    s = await _accepted_settlement(pg_dsn, make_session)
+    pm = await card(s)
+    results = await asyncio.gather(
+        s.dispatch("take_payment", {"method_id": pm, **SETTLE_750}),
+        s.dispatch("take_payment", {"method_id": pm, **SETTLE_750}),
+    )
+    assert sorted("error" in r for r in results) == [False, True], results
+    assert [r["status"] for r in results if "error" not in r] == ["approved"]
+    assert [p["amount_cents"] for p in rows(pg_dsn, "payments")] == [75000]
+    assert [op for op, _ in support.LEDGER.writes] == ["repayment", "writeoff"]
+
+
+async def test_concurrent_duplicate_payments_in_full_charge_once(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session()
+    await unlocked(s)
+    pm = await card(s)
+    full = {"method_id": pm, "amount": 185.00, "purpose": "pay_in_full"}
+    results = await asyncio.gather(s.dispatch("take_payment", full), s.dispatch("take_payment", full))
+    assert sorted("error" in r for r in results) == [False, True], results
+    assert [p["amount_cents"] for p in rows(pg_dsn, "payments")] == [18500]
+
+
+async def test_a_declined_settlement_charge_gives_the_authorization_back(pg_dsn, make_session) -> None:
+    s = await _accepted_settlement(pg_dsn, make_session)
+    declined = await s.dispatch("take_payment", {"method_id": await card(s, DECLINED_CARD), **SETTLE_750})
+    assert declined["status"] == "declined"
+    assert s.state.settlement_agreed_cents == 75000 and s.state.charged_payment_id is None
+    retried = await s.dispatch("take_payment", {"method_id": await card(s), **SETTLE_750})
+    assert retried["status"] == "approved"
+    assert s.state.settlement_agreed_cents is None
+    assert [p["status"] for p in rows(pg_dsn, "payments")] == ["declined", "approved"]
 
 
 async def test_settlement_offer_at_the_balance_is_a_payment_in_full(pg_dsn, make_session) -> None:
@@ -728,6 +816,11 @@ async def test_an_approved_charge_the_ledger_cannot_take_is_reported_not_hidden(
     assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
     assert support.LEDGER.balance("TAS-420101") == 18500
     assert "posting pay_" in caplog.text
+    again = await s.dispatch(
+        "take_payment", {"method_id": method_id, "amount": 185.00, "purpose": "pay_in_full"}
+    )
+    assert "already went through" in again["error"]
+    assert [p["status"] for p in rows(pg_dsn, "payments")] == ["approved"]
 
 
 async def test_nothing_is_taken_from_an_account_the_ledger_has_closed(pg_dsn, make_session) -> None:
@@ -738,7 +831,7 @@ async def test_nothing_is_taken_from_an_account_the_ledger_has_closed(pg_dsn, ma
     again = await s.dispatch(
         "take_payment", {"method_id": await card(s), "amount": 185.00, "purpose": "pay_in_full"}
     )
-    assert "Nothing is owed" in again["error"]
+    assert "already went through" in again["error"]
     promise = await s.dispatch("record_promise", {"amount": 10.00, "due_on": "2027-02-19", "method": "check"})
     assert "Nothing is owed" in promise["error"]
 

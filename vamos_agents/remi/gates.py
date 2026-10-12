@@ -4,7 +4,7 @@
 whose level the call has not reached (``RemiCall.refusal_for`` says what must
 happen first), and refuses every tool tagged ``COLLECTION`` once something on
 the call (a dispute, cease, attorney, bankruptcy, death, SCRA) stopped
-collection. Once SCRA is recorded the transfer is mandatory (RULES.md, "Active
+collection, or once the call was transferred to a person. Once SCRA is recorded the transfer is mandatory (RULES.md, "Active
 military duty"), so the tools tagged ``CLOSING`` wait for ``transfer_to_human``.
 """
 
@@ -51,6 +51,11 @@ class RemiGates:
             return (
                 f"Collection stopped on this call ({call.collection_stopped_by.replace('_', ' ')}). "
                 "No amount, offer or payment request is allowed for the rest of the call."
+            )
+        if COLLECTION in tool.tags and call.transferred:
+            return (
+                "The call was transferred to a person, who takes it from here: no amount, offer or payment is "
+                "allowed on this call any more. Next: log_contact_attempt and end_call."
             )
         if CLOSING in tool.tags and call.scra_recorded and not call.transferred:
             return (
