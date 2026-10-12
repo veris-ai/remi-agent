@@ -24,11 +24,12 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 | context view | `VERIS_AGENT_CONTEXT` → `CallContext(account_id TAS-NNNNNN, phone_id, call_time in Eastern)`; missing or malformed stops the pod | `context.py` |
 | `call_time()` | the context's `call_time` (World frozen at 2027-02-10) | `agent.py` |
 | `instructions(clock)` | RULES.md distilled into `prompt/instructions.md`, rendered with the call's date and the agency row | `prompt/` |
-| `tools` | 18 tools (below) | `tools/` |
+| `tools` | 19 tools (below) | `tools/` |
 | `gates` | `Gate` ladder NONE → ASSESSED → PROCEEDING → VERIFIED → DEBT_UNLOCKED, plus a collection stop on tools tagged `collection` | `gates.py`, `call.py` |
 | per-call state | `RemiCall`: connect reads, assessment, verification, outcomes; the call's one `contact_attempts` row, written once when the call ends (`end_call`, or `finalize()` the moment the caller hangs up) | `call.py` |
 | world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; `PaymentGateway`, the client for the World's gateway functions, on that same database; `FineractLedger` (async httpx, timeouts) from `FINERACT_API_BASE` and its credentials, for the money | `db.py`, `payments.py`, `ledger.py` |
 | rules | RULES.md's numbers and calendar as pure functions | `policy.py` |
+| settlement engine | the answer to a one-time settlement offer (accept, counter, transfer), decided in code | `negotiation.py`, `tools/settlement.py` |
 
 ## The opening, enforced
 
@@ -107,9 +108,10 @@ cease on file) and still says nothing it may not.
 | `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
 | `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance, itemization and offer limits, every amount in dollars (`"$1,430.00"`). The balance and itemization are the ledger's, read now (the account's Fineract loan and its `tas_itemization` row). |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
-| `take_payment` | debt unlocked, `collection` | Checked against the ledger's balance, then `gateway_charge` on a method saved this call: pay in full or a one-payment settlement at/above the floor. Approved: the charge is posted to the account's loan (a repayment carrying the gateway's `payment_id`, so a retry posts once) and a settlement's rest is written off; no `accounts` row changes. The result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`), and, if the ledger could not be reached after two tries, that the payment was taken but not posted (logged). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
+| `take_payment` | debt unlocked, `collection` | Checked against the ledger's balance, then `gateway_charge` on a method saved this call: pay in full or a one-payment settlement, only the amount `evaluate_settlement_offer` accepted on this call. Approved: the charge is posted to the account's loan (a repayment carrying the gateway's `payment_id`, so a retry posts once) and a settlement's rest is written off; no `accounts` row changes. The result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`), and, if the ledger could not be reached after two tries, that the payment was taken but not posted (logged). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
 | `create_arrangement` | debt unlocked, `collection` | plan / hardship_plan: the loan is re-aged to the plan (`reAge`) and the agreement is recorded with the ledger's own schedule (equal to the cent, the last instalment absorbing the difference); if the agreement cannot be recorded the re-age is undone. settlement_instalments: the agreement only (the ledger writes the rest off when the last instalment is paid). Charged to a `method_id` saved this call. |
 | `record_promise` | debt unlocked, `collection` | Exact amount and date ≤14 days out, at most the ledger's balance. |
+| `evaluate_settlement_offer` | debt unlocked, `collection` | The settlement engine (`negotiation.decide`) on the consumer's one-time offer: accept at or above the current ask; otherwise counter at most twice, halfway between the ask and the offer rounded up to $5 and never below the one-payment floor; after two counters accept at or above the floor, else transfer (through `transfer_to_human`, disposition `transferred`). The state lives on the call; the model gets only `decision`, `amount` and what to `say`, never the floor. |
 | `schedule_callback` | verified | 8 a.m.–<9 p.m. ET. |
 | `queue_letter` | verified | Idempotent per call. |
 | `transfer_to_human` | proceeding | Disposition `transferred` (by WORLD.md's precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
@@ -265,6 +267,7 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   imports utility-bench. The tests seed as the owner and connect Remi as a login
   that owns nothing, so the gateway's write guards bind.
 - `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
+- `tests/test_negotiation.py`: the settlement engine's decisions, pure (no database).
 - `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, no account change, no direct writes.
 - `tests/fixtures/collections_ledger.json`: every account's money from the same utility-bench commit, loaded into the in-memory ledger by `seed_full_world` (`resync_world.sh` writes both fixtures).
 - `tests/test_ledger.py`: `FineractLedger` on the wire (`httpx.MockTransport`): the requests it sends, the debt it reads, idempotent posting, refusals vs an unreachable ledger.

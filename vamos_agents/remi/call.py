@@ -33,6 +33,7 @@ from .context import CallContext
 from .db import Database, Transaction
 from .gates import Gate
 from .ledger import Debt, Ledger, LedgerUnavailable
+from .negotiation import NegotiationState
 from .payments import SavedMethod
 from .world import Account, Agency, Consumer, ContactAttempt, Creditor, Phone
 
@@ -126,6 +127,8 @@ class RemiCall:
     letters_queued: set[str] = field(default_factory=set)
     payment_methods: dict[str, SavedMethod] = field(default_factory=dict)  # tokenized on this call
     declined_methods: set[str] = field(default_factory=set)
+    negotiation: NegotiationState | None = None  # the settlement engine's state, from the first offer on
+    settlement_agreed_cents: int | None = None  # the one-time settlement the engine last accepted
     #: log_contact_attempt's note; the row itself is written once, when the call ends.
     contact_note: ContactNote | None = None
     #: The written row's disposition, once it is written (end_call, or finalize).
