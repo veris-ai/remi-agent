@@ -145,8 +145,8 @@ async def test_the_creditors_rules_are_passed_through_verbatim(pg_dsn, make_sess
     assert "rules" in ladder["allowed_now"]
 
 
-async def test_the_worlds_hospital_and_municipal_rules_reach_the_model_verbatim(pg_dsn) -> None:
-    """The vendored World: each creditor policy's rules come back from payment_options as stored."""
+async def test_the_worlds_policy_rules_reach_the_model_verbatim(pg_dsn) -> None:
+    """The vendored World: the creditor policy's rules come back from payment_options as stored."""
     support.seed_full_world(pg_dsn)
     with psycopg.connect(pg_dsn) as conn:
         stored = dict(conn.execute("select policy_id, rules from creditor_policies").fetchall())
@@ -157,8 +157,8 @@ async def test_the_worlds_hospital_and_municipal_rules_reach_the_model_verbatim(
             assert account, policy_id
             raw = conn.execute("select public.payment_options(%s)", account).fetchone()[0]
             assert engine.parse_menu(raw).rules == tuple(rules)
-    assert any("hardship" in r for r in stored["pol_hospital_ladder"])
-    assert any("no discount or settlement" in r for r in stored["pol_municipal_no_discount"])
+    assert list(stored) == ["pol_standard_ladder"]
+    assert any("hardship" in r for r in stored["pol_standard_ladder"])
 
 
 @pytest.mark.parametrize("rules", [None, [], ["ok", 3], ["ok", "  "], "one rule"])
