@@ -111,7 +111,7 @@ cease on file) and still says nothing it may not.
 | `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone and records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`); after `report_wrong_number` it only revokes the consent (no flag). Never touches the account's status; verification is refused afterwards. |
 | `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
 | `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance and itemization (no offer limits: what may be offered is `get_payment_options`), every amount in dollars (`"$1,430.00"`). The balance and itemization are the ledger's, read now (the account's Fineract loan and its `tas_itemization` row). |
-| `get_payment_options` | debt unlocked, `collection` | The creditor's menu (below), as the World's decision engine answers it now: the ordered ladder in dollars with each `option_id`, plan terms, a settlement's `pay_by`, and a `status` on any option the rules still lock (no settlement allowed, hardship not recorded on this call, approval needed or denied). Never a percentage or a limit. Refused (and logged) if the menu's balance is not the ledger's. |
+| `get_payment_options` | debt unlocked, `collection` | The creditor's menu (below), as the World's decision engine answers it now: the ordered ladder in dollars with each `option_id`, plan terms, a settlement's `pay_by`, and a `status` on any option the rules still lock (no settlement allowed, hardship not recorded on this call, approval needed or denied); and `rules`, the creditor policy's own plain-English rules (what to offer first, what to ask, what unlocks each option), passed through verbatim from the World, never reworded, filtered or added to. Never a percentage or a limit. A menu without a non-empty list of rules is malformed and refused. Refused (and logged) if the menu's balance is not the ledger's. |
 | `request_approval` | debt unlocked, `collection` | `option_id` of an approval tier: asks the World (`request_approval`, which logs the answer); only after the hardship is recorded when the creditor requires one; a decision is kept for the call (a denied tier is never chargeable). |
 | `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
 | `take_payment` | debt unlocked, `collection` | `method_id` + `option_id`, no amount: `pif` (the ledger's balance, no menu read), a settlement option, or a plan option's down payment; anything the menu does not list, or locks, is refused before the gateway. Then `gateway_charge` on a method saved this call. One charge per call: reserved before the first await (a concurrent duplicate is refused), kept once the gateway approves (posted or not), released only on a decline or a charge that never happened. Approved: the charge is posted to the account's loan (a repayment carrying the gateway's `payment_id`, so a retry posts once) and a settlement's rest is written off and its `settlement_lump` agreement recorded (a World refusal of that record is logged and returned as `settlement_record`, the charge itself being done); no `accounts` row changes. The result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`), and, if the ledger could not be reached after two tries, that the payment was taken but not posted (logged). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
@@ -175,12 +175,13 @@ Remi works like a real AI collector: the LLM talks; code and the creditor's
 rules decide money and compliance. The World's decision engine (two SQL
 functions in the collections database, `menu.py` the client) answers
 `payment_options(account_id)`: the creditor's ordered ladder for the account
-(pay in full, plans, then settlement tiers lowest discount first, some needing
-a supervisor's approval, and whether settlement is allowed at all or only after
-a hardship), and `request_approval(account_id, option_id)` (approved only with a
-hardship on the account; logged). The prompt runs that ladder in order, offers
-only its amounts, never reveals percentages or limits, asks approval before an
-approval tier, and hands anything outside it to a person. Code enforces the
+(pay in full, plans, then any settlement tiers, some needing a supervisor's
+approval, and whether settlement is allowed at all or only after a hardship)
+plus the policy's `rules` in plain English, and
+`request_approval(account_id, option_id)` (approved only with a hardship on the
+account; logged). The prompt holds no creditor's rules: it tells the model to
+follow the rules `get_payment_options` returns (the World's text, verbatim),
+offer only the menu's amounts, and hand anything outside it to a person. Code enforces the
 same: the money tools take an `option_id`, never an amount
 (`menu.checked_option`), and the World refuses off-menu money itself: inside
 `gateway_charge` before any payment row, and in a trigger on `arrangements`

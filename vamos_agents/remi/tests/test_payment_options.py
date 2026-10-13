@@ -14,8 +14,10 @@ from datetime import date
 from importlib.resources import files
 from typing import Any
 
+import psycopg
 import pytest
 
+from vamos_agents.remi import menu as engine
 from vamos_agents.remi.ledger import LedgerUnavailable
 from vamos_agents.remi.tools import REGISTRY
 from vamos_voice.session import CallSession
@@ -42,7 +44,11 @@ async def _call(
 
 
 async def _hardship(s: CallSession) -> None:
-    assert (await s.dispatch("record_flag", HARDSHIP))["recorded"] == "hardship"
+    recorded = await s.dispatch("record_flag", HARDSHIP)
+    assert recorded["recorded"] == "hardship"
+    # what a hardship changes is the creditor's rules' to say, never the tool's
+    assert "creditor's rules (get_payment_options)" in recorded["allowed_now"]
+    assert "settle" not in recorded["allowed_now"] and "plan" not in recorded["allowed_now"]
 
 
 # --- the opening: nothing before verification, then the disclosures ----------------------------
@@ -117,6 +123,7 @@ async def test_the_ladder_is_in_order_in_dollars_without_percentages(pg_dsn, mak
     assert "hardship recorded first" in by_id["settle_10"]["status"]
     assert "%" not in str(ladder) and "discount_pct" not in str(ladder) and "pct" not in str(ladder)
     assert "transfer_to_human" in ladder["allowed_now"] and "settlement" not in ladder
+    assert ladder["rules"] == support.TEST_POLICY["rules"]
     await _hardship(s)
     after = {o["option_id"]: o for o in (await s.dispatch("get_payment_options", {}))["options"]}
     assert "status" not in after["settle_10"] and "approval" in after["settle_30"]["status"]
@@ -127,6 +134,48 @@ async def test_a_creditor_without_settlements_says_so(pg_dsn, make_session) -> N
     ladder = await s.dispatch("get_payment_options", {})
     assert [o["kind"] for o in ladder["options"]] == ["pay_in_full"] + ["plan"] * 4
     assert "allows no settlement" in ladder["settlement"] and "transfer_to_human" in ladder["settlement"]
+
+
+async def test_the_creditors_rules_are_passed_through_verbatim(pg_dsn, make_session) -> None:
+    """Remi adds, drops and rewords none of the policy's rules: the World's text, in its order."""
+    rules = ["Rule two comes first here; keep it as written.", "  Spacing and 'quotes' stay too.  "]
+    s = await _call(pg_dsn, make_session, policy={"rules": rules})
+    ladder = await s.dispatch("get_payment_options", {})
+    assert ladder["rules"] == rules
+    assert "rules" in ladder["allowed_now"]
+
+
+async def test_the_worlds_hospital_and_municipal_rules_reach_the_model_verbatim(pg_dsn) -> None:
+    """The vendored World: each creditor policy's rules come back from payment_options as stored."""
+    support.seed_full_world(pg_dsn)
+    with psycopg.connect(pg_dsn) as conn:
+        stored = dict(conn.execute("select policy_id, rules from creditor_policies").fetchall())
+        for policy_id, rules in stored.items():
+            account = conn.execute(
+                "select account_id from accounts where policy_id = %s limit 1", (policy_id,)
+            ).fetchone()
+            assert account, policy_id
+            raw = conn.execute("select public.payment_options(%s)", account).fetchone()[0]
+            assert engine.parse_menu(raw).rules == tuple(rules)
+    assert any("hardship" in r for r in stored["pol_hospital_ladder"])
+    assert any("no discount or settlement" in r for r in stored["pol_municipal_no_discount"])
+
+
+@pytest.mark.parametrize("rules", [None, [], ["ok", 3], ["ok", "  "], "one rule"])
+def test_a_menu_without_a_list_of_rules_is_malformed(rules: Any) -> None:
+    raw = {
+        "creditor": "Ashcombe Bank, N.A.",
+        "balance_cents": 1000,
+        "settlement_allowed": False,
+        "settlement_requires_hardship": False,
+        "options": [{"id": "pif", "kind": "pay_in_full", "amount_cents": 1000}],
+        "rules": rules,
+    }
+    with pytest.raises(ValueError):
+        engine.parse_menu(raw)
+    del raw["rules"]
+    with pytest.raises(ValueError):
+        engine.parse_menu(raw)
 
 
 async def test_a_menu_out_of_step_with_the_ledger_is_refused_and_logged(pg_dsn, make_session, caplog) -> None:
@@ -493,17 +542,28 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
     text = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
     names = {t.name for t in REGISTRY.specs()}
     assert "negotiate" not in text and "judge best" not in text and "counter-offer" not in text
-    payments = text.split("# Payments and arrangements")[1].split("# Never")[0]
+    payments = " ".join(text.split("# Payments and arrangements")[1].split("# Never")[0].split())
     for line in (
-        "get_payment_options",
-        "offer nothing else",
-        "the full balance, then the plans, then a settlement",
-        "lowest discount first",
-        "request_approval before you mention it; if denied, never",
-        "Never mention a percentage, a minimum, a limit",
-        "Nothing fits (or they can't pay and the creditor allows no settlement): transfer_to_human",
+        "The creditor's policy decides the money.",
+        "get_payment_options returns the creditor's options in order and the creditor's rules",
+        "follow those rules exactly",
+        "Offer nothing that is not on the list.",
+        "Never offer an option whose conditions the consumer has not met in their own words.",
+        'Record a hardship (record_flag "hardship") only when the consumer has stated one.',
+        "Nothing on the list fits: transfer_to_human",
     ):
         assert line in payments, line
+    # one creditor's ladder is the World's rules now, never the prompt's
+    flat = " ".join(text.split())
+    for hospital in (
+        "lowest discount",
+        "smallest discount",
+        "then the plans, then a settlement",
+        "A settlement only if",
+        "creditor allows no settlement",
+        "next rung",
+    ):
+        assert hospital not in flat, hospital
     during = text.split("# During the conversation")[1].split("# Payments")[0]
     for intent, tool in (
         ("Dispute", "log_dispute"),
@@ -517,14 +577,10 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
         entry = during.split(f"- {intent}")[1].split("\n- ")[0]
         assert tool in entry, (intent, tool)
         assert tool.split()[0] in names
-    for tool in (
-        "get_payment_options",
-        "request_approval",
-        "take_payment",
-        "create_arrangement",
-        "record_promise",
-    ):
+    for tool in ("get_payment_options", "take_payment", "create_arrangement", "record_promise"):
         assert tool in names and tool in text
+    # when to ask for approval is the creditor's rule (and the option's status), not the prompt's
+    assert "request_approval" in names
 
 
 def test_the_money_tools_take_an_option_id_never_an_amount() -> None:

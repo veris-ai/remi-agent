@@ -35,7 +35,8 @@ create table creditor_policies (
   settlement_requires_hardship boolean not null,
   settlement_tiers jsonb not null,           -- [{"discount_pct":5,"requires_approval":false}, ...], smallest discount first
   settlement_due_within_days integer,        -- a settlement is one payment, due within this many days
-  unable_to_pay   text not null check (unable_to_pay in ('transfer','return_to_creditor'))
+  unable_to_pay   text not null check (unable_to_pay in ('transfer','return_to_creditor')),
+  rules           jsonb not null             -- ["<plain-English rule>", ...], in order; payment_options returns them verbatim
 );
 
 create table consumers (
@@ -575,7 +576,7 @@ begin
   return jsonb_build_object(
     'creditor', acct.creditor, 'balance_cents', balance,
     'settlement_allowed', pol.settlement_allowed, 'settlement_requires_hardship', pol.settlement_requires_hardship,
-    'options', options);
+    'options', options, 'rules', pol.rules);
 end
 $$;
 
@@ -846,9 +847,9 @@ insert into creditors (creditor_id, name, kind, mailing_address, financial_assis
   ('cr_kingsbridge', 'City of Kingsbridge, Department of Finance', 'government', 'PO Box 2210, Kingsbridge, NY 12401', false),
   ('cr_marlow', 'Marlow Wireless, Inc.', 'telecom', '1200 Commerce Plaza, Newark, NJ 07102', false);
 
-insert into creditor_policies (policy_id, name, plan_min_months, plan_max_months, plan_down_pct, plan_min_monthly_cents, settlement_allowed, settlement_requires_hardship, settlement_tiers, settlement_due_within_days, unable_to_pay) values
-  ('pol_hospital_ladder', 'Hospital collections ladder (Northbridge Health-style financial-assistance and collections policy)', 2, '[{"balance_up_to_cents":50000,"months":4},{"balance_up_to_cents":100000,"months":8},{"balance_up_to_cents":200000,"months":12},{"balance_up_to_cents":null,"months":24}]'::jsonb, 10, 2500, true, true, '[{"discount_pct":5,"requires_approval":false},{"discount_pct":10,"requires_approval":false},{"discount_pct":15,"requires_approval":false},{"discount_pct":20,"requires_approval":false},{"discount_pct":30,"requires_approval":true},{"discount_pct":40,"requires_approval":true}]'::jsonb, 7, 'transfer'),
-  ('pol_municipal_no_discount', 'Municipal receivable, no discount (City of Kingsbridge-style)', 2, '[{"balance_up_to_cents":null,"months":12}]'::jsonb, 0, 5000, false, false, '[]'::jsonb, null, 'return_to_creditor');
+insert into creditor_policies (policy_id, name, plan_min_months, plan_max_months, plan_down_pct, plan_min_monthly_cents, settlement_allowed, settlement_requires_hardship, settlement_tiers, settlement_due_within_days, unable_to_pay, rules) values
+  ('pol_hospital_ladder', 'Hospital collections ladder (Northbridge Health-style financial-assistance and collections policy)', 2, '[{"balance_up_to_cents":50000,"months":4},{"balance_up_to_cents":100000,"months":8},{"balance_up_to_cents":200000,"months":12},{"balance_up_to_cents":null,"months":24}]'::jsonb, 10, 2500, true, true, '[{"discount_pct":5,"requires_approval":false},{"discount_pct":10,"requires_approval":false},{"discount_pct":15,"requires_approval":false},{"discount_pct":20,"requires_approval":false},{"discount_pct":30,"requires_approval":true},{"discount_pct":40,"requires_approval":true}]'::jsonb, 7, 'transfer', '["Offer the options in the order listed: pay in full first, then the plans, then a settlement. Move to the next only if the consumer turns down the one before.", "Before offering any settlement, ask what is making it hard to pay.", "A settlement only if no plan fits and the consumer has told you, in their own words, about a hardship: job loss, a medical problem, low income, a bereavement or a disability. Record that hardship (record_flag) before offering a settlement; never record one they did not state.", "Settlements go smallest discount first; offer the next only if the consumer turns down the one before. An option that needs approval: request_approval before you mention it.", "Never mention a percentage, a minimum, a limit, or an option you have not reached, and never tell the consumer what would unlock a better offer.", "If nothing fits, transfer to a person."]'::jsonb),
+  ('pol_municipal_no_discount', 'Municipal receivable, no discount (City of Kingsbridge-style)', 2, '[{"balance_up_to_cents":null,"months":12}]'::jsonb, 0, 5000, false, false, '[]'::jsonb, null, 'return_to_creditor', '["Offer the options in the order listed: pay in full first, then the plans. Move to the next only if the consumer turns down the one before.", "This creditor allows no discount or settlement of any kind, whatever the consumer''s situation; never suggest one could be possible.", "Never mention a minimum, a limit, or an option you have not reached.", "If the consumer cannot pay in full or take a plan, transfer to a person; the account goes back to the creditor."]'::jsonb);
 
 insert into consumers (consumer_id, first_name, last_name, date_of_birth, ssn_last4, street, city, zip, language_preference, deceased_on, estate_rep_name, estate_rep_phone) values
   ('con_420101', 'Aaliyah', 'Alvarez', '1958-01-01', '2234', '100 7th Ave', 'Brooklyn', '11215', null, null, null, null),

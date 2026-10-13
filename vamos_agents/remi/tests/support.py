@@ -160,6 +160,11 @@ TEST_POLICY: dict[str, Any] = {
     ],
     "settlement_due_within_days": 7,
     "unable_to_pay": "transfer",
+    "rules": [
+        "Offer the options in the order listed. Move to the next only if the consumer turns down the one before.",
+        "A settlement only after the consumer has told you, in their own words, about a hardship.",
+        "If nothing fits, transfer to a person.",
+    ],
 }
 #: The ledger every call in a test reaches; rebuilt by each seed.
 LEDGER = FakeLedger()
