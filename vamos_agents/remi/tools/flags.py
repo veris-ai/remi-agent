@@ -155,8 +155,8 @@ async def record_flag(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     channel_optout (stop one channel, e.g. 'don't call my cell', 'only email me'; one call per channel),
     attorney (name and phone), bankruptcy (chapter, case number, court, filing date), deceased (who reported
     it, relationship, date of death; may be recorded before verification), scra (active military duty),
-    hardship (job loss, medical, bereavement, disability, income; only a hardship the consumer stated in their
-    own words, never one you inferred or suggested), original_creditor_request (they ask for the original
+    hardship (what the consumer said makes paying hard, in their own words; never one you inferred or
+    suggested), original_creditor_request (they ask for the original
     creditor's name or address; returns it). Only for the verified consumer, except deceased; a stop request
     from anyone else goes to stop_calling_this_number. Recording deceased again with details you learned later
     (a name, the date of death) completes the record."""
