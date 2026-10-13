@@ -1247,7 +1247,39 @@
    "interest_since_charge_off_cents": 0,
    "last_payment_on": null,
    "paid_since_charge_off_cents": 0
+  },
+  "TAS-420257": {
+   "charge_off_balance_cents": 48000,
+   "charge_off_on": "2025-06-15",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420258": {
+   "charge_off_balance_cents": 240000,
+   "charge_off_on": "2025-06-22",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420259": {
+   "charge_off_balance_cents": 200000,
+   "charge_off_on": "2025-06-29",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
+  },
+  "TAS-420260": {
+   "charge_off_balance_cents": 90000,
+   "charge_off_on": "2025-07-06",
+   "fees_since_charge_off_cents": 0,
+   "interest_since_charge_off_cents": 0,
+   "last_payment_on": null,
+   "paid_since_charge_off_cents": 0
   }
  },
- "source": "veris-ai/utility-bench @ 80d3f25b1119a57bc85e3330e91838fff626b2c8: collections_bench/generated/manifest.json"
+ "source": "veris-ai/utility-bench @ 1a95b9f9af9d2275c65002442047227cd5293065: collections_bench/generated/manifest.json"
 }

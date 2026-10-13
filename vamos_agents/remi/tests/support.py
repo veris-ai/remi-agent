@@ -159,7 +159,6 @@ TEST_POLICY: dict[str, Any] = {
         {"discount_pct": 30, "requires_approval": True},
     ],
     "settlement_due_within_days": 7,
-    "unable_to_pay": "transfer",
     "rules": [
         "Offer the options in the order listed. Move to the next only if the consumer turns down the one before.",
         "A settlement only after the consumer has told you, in their own words, about a hardship.",
