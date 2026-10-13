@@ -6,9 +6,11 @@ approved menu, and the collector picks from it and frames it. The World has
 that engine as two SQL functions in the collections database, and this module
 is Remi's one client for them:
 
-- ``payment_options(account_id)`` answers the ordered ladder: pay in full, the
-  plans, then (if the creditor allows them) the settlement tiers, lowest
-  discount first, some needing a supervisor's approval;
+- ``payment_options(account_id)`` answers the ordered ladder (pay in full, the
+  plans, then any settlement tiers, some needing a supervisor's approval) and
+  the creditor policy's own rules, in plain English: what to offer first, what
+  to ask, what unlocks each option. Remi hands those rules to the model
+  verbatim; the creditor's rules live in the World, never in Remi;
 - ``request_approval(account_id, option_id)`` asks for that approval and logs
   the answer (approved only when a hardship is recorded on the account).
 
@@ -85,6 +87,8 @@ class Menu:
     settlement_allowed: bool
     settlement_requires_hardship: bool
     options: tuple[Option, ...]
+    #: The creditor policy's own rules, in order, in plain English: handed to the model verbatim.
+    rules: tuple[str, ...]
 
     def option(self, option_id: str) -> Option | None:
         return next((o for o in self.options if o.id == option_id), None)
@@ -115,6 +119,13 @@ def _option(raw: dict[str, Any], balance_cents: int) -> Option:
     raise ValueError(f"unknown option kind {kind!r}")
 
 
+def _rules(raw: Any) -> tuple[str, ...]:
+    """The policy's rules exactly as the World wrote them; ValueError unless a non-empty list of strings."""
+    if not isinstance(raw, list) or not raw or not all(isinstance(r, str) and r.strip() for r in raw):
+        raise ValueError(f"the creditor's rules are not a list of rules: {raw!r}")
+    return tuple(raw)
+
+
 def parse_menu(raw: Any) -> Menu:
     """``payment_options``' jsonb as a ``Menu``; ValueError when it does not follow the contract."""
     try:
@@ -125,6 +136,7 @@ def parse_menu(raw: Any) -> Menu:
             settlement_allowed=bool(raw["settlement_allowed"]),
             settlement_requires_hardship=bool(raw["settlement_requires_hardship"]),
             options=tuple(_option(o, balance) for o in raw["options"]),
+            rules=_rules(raw["rules"]),
         )
     except (KeyError, TypeError) as err:
         raise ValueError(f"malformed payment options: {err!r}") from err

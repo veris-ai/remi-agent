@@ -3,7 +3,9 @@
 ``get_payment_options`` answers the World's decision engine (``menu``): the
 ordered ladder the creditor approved for this account, shown in dollars, with
 each option's id (what the money tools take) and, where the rules still need
-something first (a recorded hardship, a supervisor's approval), its status.
+something first (a recorded hardship, a supervisor's approval), its status; and
+the creditor policy's rules, passed through verbatim (Remi adds, drops and
+rewords none: the creditor's policy, not Remi, decides the money).
 Percentages and the engine's limits are never shown: the model can only say
 amounts an option carries. ``request_approval`` asks for an approval tier.
 
@@ -30,10 +32,9 @@ from .catalog import REGISTRY
 logger = logging.getLogger(__name__)
 
 LADDER = (
-    "The creditor's options, in the order they are offered: the full balance, then each plan, then a settlement "
-    "only when no plan fits and the consumer has explained a hardship (recorded), lowest discount first. Only "
-    "these amounts and terms exist: never a percentage, a minimum, or an option before it is reached. An option "
-    "with a status is not offered until it is available. Anything else goes to a person (transfer_to_human)."
+    "The creditor's options, in the order its rules give them. Follow the creditor's rules (rules) exactly. Only "
+    "these amounts and terms exist. An option with a status is not offered until it is available. Anything else "
+    "goes to a person (transfer_to_human)."
 )
 NO_SETTLEMENT = (
     "This creditor allows no settlement: a consumer who can pay none of these options goes to a person "
@@ -88,15 +89,17 @@ class NoArgs(BaseModel):
 
 @REGISTRY.tool(NoArgs, requires=Gate.DEBT_UNLOCKED, tags=(COLLECTION,))
 async def get_payment_options(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """The creditor's approved payment options for this account, in the order to offer them: pay in full, plans,
-    then any settlement tiers. Offer only these, by their amounts and terms; pass an option's option_id to
-    take_payment, create_arrangement or record_promise. Anything not listed goes to a person."""
+    """The creditor's approved payment options for this account, in order, and the creditor's rules for them
+    (what to offer first, what to ask, what unlocks each option): follow those rules exactly. Offer only these
+    options, by their amounts and terms; pass an option's option_id to take_payment, create_arrangement or
+    record_promise. Anything not listed goes to a person."""
     session.require_consumer()
     debt = await session.read_debt()
     menu = await current_menu(session, debt)
     result: dict[str, Any] = {
         "balance": policy.dollars(menu.balance_cents),
         "options": [shown(session, menu, o) for o in menu.options],
+        "rules": list(menu.rules),
         "allowed_now": LADDER,
     }
     if not menu.settlement_allowed:

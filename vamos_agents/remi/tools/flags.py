@@ -111,7 +111,8 @@ class FlagArgs(BaseModel):
     )
     branch: str | None = Field(None, description="scra: the military branch they serve in (ask if not said).")
     hardship_reason: Literal["job_loss", "medical", "bereavement", "disability", "income"] | None = Field(
-        None, description="hardship: the reason."
+        None,
+        description="hardship: the reason, as the consumer stated it in their own words; never inferred.",
     )
 
 
@@ -154,10 +155,11 @@ async def record_flag(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     channel_optout (stop one channel, e.g. 'don't call my cell', 'only email me'; one call per channel),
     attorney (name and phone), bankruptcy (chapter, case number, court, filing date), deceased (who reported
     it, relationship, date of death; may be recorded before verification), scra (active military duty),
-    hardship (job loss, medical, bereavement, disability, income), original_creditor_request (they ask for
-    the original creditor's name or address; returns it). Only for the verified consumer, except deceased; a
-    stop request from anyone else goes to stop_calling_this_number. Recording deceased again with details you
-    learned later (a name, the date of death) completes the record."""
+    hardship (job loss, medical, bereavement, disability, income; only a hardship the consumer stated in their
+    own words, never one you inferred or suggested), original_creditor_request (they ask for the original
+    creditor's name or address; returns it). Only for the verified consumer, except deceased; a stop request
+    from anyone else goes to stop_calling_this_number. Recording deceased again with details you learned later
+    (a name, the date of death) completes the record."""
     if args.kind in ("cease", "channel_optout") and session.verified_as is None:
         raise ToolError(
             "This person is not verified, so their request cannot close the account; an unverified request to "
@@ -394,8 +396,7 @@ async def _hardship(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
     session.outcomes.add("hardship")
     return {
         "recorded": "hardship",
-        "allowed_now": "If no plan fits, the creditor's settlement options may now be considered "
-        "(get_payment_options); if the creditor allows none, a person can handle it (transfer_to_human). Never "
+        "allowed_now": "Recorded. Check the creditor's rules (get_payment_options) for what this changes. Never "
         "borrowing, a credit card or selling property, and no pressing for the full balance.",
     }
 
