@@ -15,7 +15,10 @@ veris-ai/rory-agent ``grok-voice/README.md``):
   the session's top level, not under ``audio``.
 - **Caller transcription** is emitted only when
   ``audio.input.transcription.model`` is ``grok-transcribe``; without it the
-  caller's words never reach the judge's trace. Always sent.
+  caller's words never reach the judge's trace. Always sent, with
+  ``language_hint: "en"`` (xAI's code for English; an unrecognized code is
+  silently ignored): every VAmoS call is in English. The session documents no
+  setting for the language the model speaks; the prompt holds it.
 - **Turn detection** is ``server_vad`` on xAI's own defaults: nothing else
   is sent.
 - **No forced tool choice.** ``response.create`` documents only
@@ -45,6 +48,8 @@ DEFAULT_MODEL = "grok-voice-think-fast-2.0"
 DEFAULT_VOICE = "eve"
 #: The only model xAI documents for input transcription; without it no caller transcript is emitted.
 TRANSCRIBE_MODEL = "grok-transcribe"
+#: Every VAmoS call is in English: xAI's code in its supported-languages table.
+LANGUAGE_HINT = "en"
 #: The standard xAI name, as on the other VAmoS benches; Veris Bench allows this exact
 #: candidate-env key (other XAI_* / GROK_* names stay reserved for its harnesses).
 API_KEY_ENV = "XAI_API_KEY"
@@ -81,7 +86,10 @@ class GrokVoiceProvider(RealtimeProtocolProvider):
             "instructions": setup.instructions,
             "turn_detection": {"type": "server_vad"},
             "audio": {
-                "input": {"format": pcm, "transcription": {"model": TRANSCRIBE_MODEL}},
+                "input": {
+                    "format": pcm,
+                    "transcription": {"model": TRANSCRIBE_MODEL, "language_hint": LANGUAGE_HINT},
+                },
                 "output": {"format": pcm},
             },
             "tools": self.tool_format.convert(setup.tools),

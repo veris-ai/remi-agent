@@ -36,7 +36,7 @@ def test_session_keeps_voice_instructions_and_vad_at_the_top_level() -> None:
     assert session["turn_detection"] == {"type": "server_vad"}, "xAI's own VAD defaults"
     pcm = {"type": "audio/pcm", "rate": 24_000}
     assert session["audio"] == {
-        "input": {"format": pcm, "transcription": {"model": "grok-transcribe"}},
+        "input": {"format": pcm, "transcription": {"model": "grok-transcribe", "language_hint": "en"}},
         "output": {"format": pcm},
     }
     assert "tool_choice" not in session  # not part of Grok's documented session

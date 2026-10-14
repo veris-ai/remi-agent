@@ -387,7 +387,7 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 | `TurnTaking` mapping | **none**: `server_vad` on OpenAI's defaults | **none**: `server_vad` on xAI's defaults | **none**: automatic activity detection on Gemini's defaults | **none**: no VAD settings exist | **none**: Silero `VADParams()`, Pipecat's default start strategies and Smart Turn v3 stop |
 | Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat |
 | Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
-| Language (every VAmoS call is English) | transcription `language: "en"` | **none** documented (the prompt holds it) | **none**: native-audio models choose the language themselves and take no `languageCode` (the prompt holds it) | **none** documented (the prompt holds it) | `Language.EN` on Deepgram STT, OpenAI STT and Cartesia TTS (OpenAI's speech endpoint takes none) |
+| Language (every VAmoS call is English) | transcription `language: "en"` | transcription `language_hint: "en"`; no setting for the spoken language (the prompt holds it) | transcription `languageCodes: ["en"]`; native-audio models choose the spoken language themselves and take no `languageCode` (the prompt holds it) | **none** documented (the prompt holds it) | `Language.EN` on Deepgram STT, OpenAI STT and Cartesia TTS (OpenAI's speech endpoint takes none) |
 
 Managed voice agents (the vendor runs STT, the LLM and TTS; tools are
 client-side over the same socket):
