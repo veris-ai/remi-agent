@@ -440,10 +440,16 @@ vendors are compared under the same plumbing on both benches.
   agent, and a cascade we assemble has no vendor default to fall back on, so
   Silero (`silero.py`, the model Pipecat ships, vendored with its MIT licence)
   runs on the caller's audio. `BargeInRule` is LiveKit Agents' default
-  interruption rule taken as is (`min_duration` 0.5 s, `min_words` 0),
-  identical for every cascade: the caller interrupts a turn being answered
-  after **0.5 s of Silero speech** in one utterance (pauses under 300 ms don't
-  end it; counted from when the reply began). No word count or other noise
+  interruption handling taken as is, all of it (livekit-agents 1.8,
+  `AgentSession` in VAD mode, its self-hosted default), identical for every
+  cascade. Utterances are segmented as LiveKit's Silero stream does (50 ms of
+  speech starts one, 550 ms of non-speech ends it). An utterance that has
+  lasted **0.5 s** (`min_duration`; `min_words` 0) while a turn is being
+  answered **pauses** the reply (so does any utterance while the reply is not
+  yet audible); when it ends with no caller turn, the reply **resumes** after
+  2 s (`false_interruption_timeout`, `resume_false_interruption`; 0 s for a
+  pause that never reached 0.5 s). A finished caller turn (the STT's final
+  transcript) during a turn being answered **interrupts** it. No other noise
   filter: noise is a benchmark condition. The interruption
   stops the audio (`OutboundAudio.interrupted`), clears the vendor's
   TTS utterance (xAI `text.clear`), and silences the rest of the turn. The LLM
@@ -470,7 +476,7 @@ on Energy.
 | Capability | mistral | huggingface | grok_cascade | gradium |
 |---|---|---|---|---|
 | End of turn | local: Silero + `silence_ms`, then `input_audio.flush` | local: Silero + `silence_ms`, utterance to Whisper | xAI's default endpointing (400 ms, no Smart Turn) | gradbot |
-| Barge-in | local Silero, `BargeInRule` (0.5 s) | local Silero, `BargeInRule` (0.5 s) | local Silero, `BargeInRule` (0.5 s) + `text.clear` | gradbot (`interrupted` event) |
+| Barge-in | local Silero, `BargeInRule` (LiveKit's: pause at 0.5 s, resume after 2 s, a turn interrupts) | same | same + `text.clear` | gradbot (`interrupted` event) |
 | History after barge-in | trimmed to what played | trimmed | trimmed | gradbot keeps only transmitted words |
 | Forced tool choice | never (`tool_choice="auto"`) | same | same | not exposed |
 | Callee-spoke signal | first finished turn | same | same | first `stt_text` |
@@ -786,7 +792,7 @@ uv run ruff check . && uv run ruff format --check .
   cap, full voice id, 16 kHz uplink and playback buffer), each with its hang-up timing.
 - `tests/test_cascade.py`: the shared in-pod cascade with scripted legs (`tests/cascade_fakes.py`):
   callee first / agent first, rounds and tools, hang-up, barge-in (tools still run, history trimmed;
-  `BargeInRule`: a blip does not interrupt, 0.5 s of speech does),
+  `BargeInRule`: a blip does not pause, 0.5 s of speech pauses, a false interruption resumes, a turn interrupts),
   playout pacing; `SilenceEndpoint`; Silero on recorded speech (`tests/fixtures/caller_speech_24k.pcm`).
 - `tests/test_mistral.py`, `tests/test_huggingface.py`, `tests/test_grok_cascade.py`, `tests/test_gradium.py`:
   each cascade's own legs (Voxtral frames and flush, Whisper/fal requests on `httpx.MockTransport`,

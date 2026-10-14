@@ -328,9 +328,9 @@ the same gates; only the voice stack differs.
 
 | Vendor | Stack | Turn taking |
 |---|---|---|
-| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; barge-in after 0.5 s of Silero speech |
-| `huggingface` | Whisper large-v3 → `openai/gpt-oss-120b:groq` → Kokoro (fal-ai), all on HF inference | Silero + 0.8 s of silence; barge-in after 0.5 s of Silero speech |
-| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI's default endpointing (400 ms); barge-in after 0.5 s of Silero speech |
+| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; barge-in as LiveKit Agents' default (0.5 s of Silero speech pauses, a false interruption resumes after 2 s, a caller turn interrupts) |
+| `huggingface` | Whisper large-v3 → `openai/gpt-oss-120b:groq` → Kokoro (fal-ai), all on HF inference | Silero + 0.8 s of silence; barge-in as LiveKit Agents' default (0.5 s of Silero speech pauses, a false interruption resumes after 2 s, a caller turn interrupts) |
+| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI's default endpointing (400 ms); barge-in as LiveKit Agents' default (0.5 s of Silero speech pauses, a false interruption resumes after 2 s, a caller turn interrupts) |
 | `gradium` | gradbot: Gradium STT → `gpt-4.1-mini` → Gradium TTS | gradbot's own |
 
 On the cascades Remi's first words wait for the callee's first finished turn
@@ -366,9 +366,9 @@ one, and then it is the same for every vendor that needs it:
 | `deepgram` | `gpt-4.1-mini` (Deepgram-managed) | vendor | vendor | vendor | vendor | `language: "en"` |
 | `elevenlabs` | `gpt-4.1-mini` (ElevenLabs-managed) | vendor (learned turn model) | vendor | vendor | vendor | `language: "en"` |
 | `fluxions` | the host's model | vendor (adaptive end-of-utterance) | vendor | vendor | vendor | none documented: the prompt |
-| `mistral` | `mistral-medium-2604` (Mistral's own) | ours, none at the vendor: Silero + 800 ms silence; barge-in after 0.5 s of speech (LiveKit Agents' default) | 10 | none | ours: Mistral SDK backoff, 25 s | none documented (Voxtral): the prompt |
-| `huggingface` | `openai/gpt-oss-120b:groq` (HF router) | ours, none at the vendor: Silero + 800 ms silence; barge-in after 0.5 s of speech | 10 | none | ours: 6 SDK retries (~25 s) | Whisper `language: "en"` |
-| `grok_cascade` | `gpt-4.1-mini` (default) or `grok-4.3` | vendor: xAI STT default endpointing (400 ms); barge-in ours (0.5 s, as above) | 10 | none | ours: 6 SDK retries (~25 s) | xAI STT/TTS `language=en` |
+| `mistral` | `mistral-medium-2604` (Mistral's own) | ours, none at the vendor: Silero + 800 ms silence; barge-in as LiveKit Agents' default (pause at 0.5 s of speech, resume after 2 s, a turn interrupts) | 10 | none | ours: Mistral SDK backoff, 25 s | none documented (Voxtral): the prompt |
+| `huggingface` | `openai/gpt-oss-120b:groq` (HF router) | ours, none at the vendor: Silero + 800 ms silence; barge-in as LiveKit Agents' default | 10 | none | ours: 6 SDK retries (~25 s) | Whisper `language: "en"` |
+| `grok_cascade` | `gpt-4.1-mini` (default) or `grok-4.3` | vendor: xAI STT default endpointing (400 ms); barge-in ours (LiveKit's default, as above) | 10 | none | ours: 6 SDK retries (~25 s) | xAI STT/TTS `language=en` |
 | `gradium` | `gpt-4.1-mini` | vendor (gradbot) | vendor (gradbot) | vendor (gradbot) | vendor (gradbot) | `Lang.En` |
 | `vapi` | `gpt-4.1-mini` (Vapi-managed) | vendor (no `startSpeakingPlan`) | vendor | 10,000 (Vapi's maximum; it requires one) | vendor | transcriber `language: "en"` |
 | `cartesia` | `gpt-4.1-mini` (Cartesia-managed) | vendor | vendor | vendor | vendor | `language.primary: "en"` |

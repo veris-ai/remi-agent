@@ -192,8 +192,9 @@ class InboundAudio:
 
 @dataclass
 class _Item:
-    first_at: float
     n_bytes: int = 0
+    #: When the far end, playing at 1x, reaches the end of this item's audio sent so far.
+    playout_until: float = 0.0
 
 
 class OutboundAudio:
@@ -221,9 +222,10 @@ class OutboundAudio:
             self.dropped_bytes += len(pcm)
             return False
         now = self._monotonic()
-        item = self._items.setdefault(item_id, _Item(first_at=now))
+        item = self._items.setdefault(item_id, _Item())
         item.n_bytes += len(pcm)
         self._playout_until = max(now, self._playout_until) + pcm_ms(len(pcm)) / 1000
+        item.playout_until = self._playout_until
         self.sent_bytes += len(pcm)
         if pcm.strip(b"\x00"):  # a vendor that streams digital silence (Vapi) is still quiet
             self._last_sent_at = now
@@ -231,13 +233,13 @@ class OutboundAudio:
         return True
 
     def played_ms(self, item_id: str) -> int:
-        """How much of an item the caller can have heard: no more than was sent, and no
-        more than real time since its first byte (the far end plays at 1x)."""
+        """How much of an item the caller can have heard: what was sent, less what the far end
+        (playing at 1x, and silent while nothing is sent) has not reached yet."""
         item = self._items.get(item_id)
         if item is None:
             return 0
-        elapsed_ms = (self._monotonic() - item.first_at) * 1000
-        return int(min(pcm_ms(item.n_bytes), elapsed_ms))
+        unplayed_ms = max(0.0, item.playout_until - self._monotonic()) * 1000
+        return int(max(0.0, pcm_ms(item.n_bytes) - unplayed_ms))
 
     def sent_ms(self, item_id: str) -> int:
         item = self._items.get(item_id)
