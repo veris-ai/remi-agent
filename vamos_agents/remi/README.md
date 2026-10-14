@@ -349,7 +349,8 @@ one, and then it is the same for every vendor that needs it:
   that loops).
 - **Retries**: `RETRY_BUDGET_S` = ~25 s of backoff on a transient error (429,
   5xx, a dropped connection) for every vendor request this pod makes itself
-  (`openai` SDK: 6 retries; Mistral SDK: 25 s; LiveKit: 12 x 2 s; Hugging Face
+  (`openai` SDK: 6 retries, or for Pipecat's OpenAI TTS 3 s per attempt and 4
+  retries, since that endpoint can hold a request 25 s before its first byte; Mistral SDK: 25 s; LiveKit: 12 x 2 s; Hugging Face
   STT/TTS: 25 s). Where the vendor makes the request (speech-to-speech
   sessions, managed agents, hosted orchestrators), the vendor's own policy
   applies; a speech-to-speech socket that fails ends the call (no reconnect).
@@ -362,7 +363,7 @@ one, and then it is the same for every vendor that needs it:
 | `grok_voice` | `grok-voice-think-fast-2.0` (speech-to-speech) | vendor: `server_vad`, no numbers sent | vendor | vendor (none) | none: one socket | transcription `language_hint: "en"` (no spoken-language setting) |
 | `gemini_live` | `gemini-2.5-flash-native-audio-preview-12-2025` (default) or a Gemini 3 Live model (`VAMOS_GEMINI_MODEL`), speech-to-speech | vendor: automatic activity detection on its defaults | vendor | vendor (none) | none: one socket | transcription `languageCodes: ["en"]` (native audio takes no spoken-language code) |
 | `gpt_live` | `gpt-live-1`, delegating to `gpt-5.6-terra` | vendor (no VAD settings exist) | vendor | vendor (none) | none: one socket | none documented: the prompt |
-| `pipecat` | `gpt-4.1-mini` | vendor (Pipecat): Silero `VADParams()`, default start strategies, Smart Turn v3 | none (Pipecat's loop) | none | ours: 6 SDK retries (~25 s) | Deepgram/OpenAI STT and Cartesia TTS `Language.EN` |
+| `pipecat` | `gpt-4.1-mini` | vendor (Pipecat): Silero `VADParams()`, default start strategies, Smart Turn v3 | none (Pipecat's loop) | none | ours: LLM 6 SDK retries (~25 s); OpenAI TTS 3 s per attempt, 4 retries (~22 s), Pipecat waits 28 s for the audio (reliability) | Deepgram/OpenAI STT and Cartesia TTS `Language.EN` |
 | `deepgram` | `gpt-4.1-mini` (Deepgram-managed) | vendor | vendor | vendor | vendor | `language: "en"` |
 | `elevenlabs` | `gpt-4.1-mini` (ElevenLabs-managed) | vendor (learned turn model) | vendor | vendor | vendor | `language: "en"` |
 | `fluxions` | the host's model | vendor (adaptive end-of-utterance) | vendor | vendor | vendor | none documented: the prompt |
