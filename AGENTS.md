@@ -378,6 +378,7 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 
 | Capability | openai_realtime | grok_voice | gemini_live | gpt_live | pipecat |
 |---|---|---|---|---|---|
+| Where the tools go | `session.update` `tools` | same | `setup.tools` | the backend's `delegation.responses.tools`; the live model runs none and is told their names in its instructions (`live_instructions`, one line each), which OpenAI's live-prompting guide says it uses to decide what to hand off | the LLM service's tools |
 | Forced tool choice (never used: the screen pop needs none) | `response.create` `tool_choice` | **no** (undocumented) | **no** | on the backend only (left `"auto"`) | `tool_choice` on the SDK call |
 | Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`) | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
 | Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |

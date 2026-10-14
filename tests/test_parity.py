@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from vamos_voice.providers import load_provider, vendor_names
+from vamos_voice.providers.gpt_live import BACKEND_PREAMBLE, LIVE_PREAMBLE
 
 from .fakes import (
     AGENT_CASES,
@@ -278,9 +279,13 @@ class GptLiveScript:
     def setup(frame: dict[str, Any]) -> dict[str, Any]:
         session = frame["session"]
         backend = session["delegation"]["responses"]
-        assert backend["instructions"].endswith(session["instructions"])
+        assert backend["instructions"].startswith(BACKEND_PREAMBLE)
+        instructions = backend["instructions"][len(BACKEND_PREAMBLE) :]
+        # the live model gets the same instructions after the list of the backend's actions
+        assert session["instructions"].startswith(LIVE_PREAMBLE)
+        assert session["instructions"].endswith(instructions)
         return {
-            "instructions": session["instructions"],
+            "instructions": instructions,
             "tools": {
                 t["name"]: (set(t["parameters"]["properties"]), set(t["parameters"]["required"]))
                 for t in backend["tools"]

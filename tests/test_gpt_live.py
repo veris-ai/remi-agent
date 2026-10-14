@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from vamos_voice.providers.gpt_live import BACKEND_PREAMBLE, GptLiveProvider
+from vamos_voice.providers.gpt_live import BACKEND_PREAMBLE, LIVE_PREAMBLE, GptLiveProvider, live_instructions
 from vamos_voice.providers.wire import dispatch_json_call
 
 from .fakes import (
@@ -58,7 +58,7 @@ def test_session_start_puts_tools_on_the_backend() -> None:
     session = start["session"]
     assert start["type"] == "session.start"
     assert session["model"] == "gpt-live-1"
-    assert session["instructions"] == setup.instructions
+    assert session["instructions"] == live_instructions(setup)
     assert session["audio"] == {"format": {"type": "audio/pcm", "rate": 24_000}, "output": {"voice": "marin"}}
     assert "tools" not in session, "the live model runs no tools; they belong to the backend"
     backend = session["delegation"]["responses"]
@@ -68,6 +68,18 @@ def test_session_start_puts_tools_on_the_backend() -> None:
     assert [t["name"] for t in backend["tools"]] == [t.name for t in setup.tools]
     assert backend["tool_choice"] == "auto"
     assert backend["parallel_tool_calls"] is False
+
+
+def test_the_live_model_is_told_which_actions_the_backend_carries_out() -> None:
+    """smoke trial_5jpr50dil1axg9b1unegn: given no list of the backend's tools, GPT-Live never delegated
+    end_call (0 of 117 calls) and made no tool call at all in 16. Its guide: list them in the live prompt."""
+    setup = REMI.setup()
+    live = live_instructions(setup)
+    assert live.startswith(LIVE_PREAMBLE) and live.endswith(setup.instructions)
+    actions = live[len(LIVE_PREAMBLE) : live.index(setup.instructions)].strip().splitlines()
+    assert [line.split(":")[0] for line in actions] == [f"- {t.name}" for t in setup.tools]
+    assert all(line.count(". ") == 0 for line in actions), "one sentence per action, not its whole contract"
+    assert "end_call" in live[: live.index(setup.instructions)]
 
 
 async def test_nothing_but_session_start_goes_out_before_session_started() -> None:
@@ -100,7 +112,11 @@ async def test_the_screen_pop_reaches_the_live_model_and_the_backend_and_nothing
     session = start["session"]
     assert "# Account on screen" in session["instructions"]
     assert "You are calling Marcus Sokolov" in session["instructions"]
-    assert session["delegation"]["responses"]["instructions"] == BACKEND_PREAMBLE + session["instructions"]
+    assert session["instructions"].startswith(LIVE_PREAMBLE)
+    backend = session["delegation"]["responses"]["instructions"]
+    assert backend.startswith(BACKEND_PREAMBLE) and session["instructions"].endswith(
+        backend[len(BACKEND_PREAMBLE) :]
+    )
     assert session["delegation"]["responses"]["tool_choice"] == "auto"
 
     script.ready()

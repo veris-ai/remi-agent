@@ -81,6 +81,10 @@ NOT_POSTED = (
     "The charge went through, but posting it to the account's ledger failed: the payment is safe and a person "
     "will post it. Do not charge again."
 )
+SETTLED = (
+    "Settled: the settlement covers the account, the rest is written off and nothing more is owed. There is no "
+    "remaining balance to tell the consumer."
+)
 ALREADY_CHARGED = (
     "A payment already went through on this call; no second charge is taken. If its posting failed, a person "
     "posts it."
@@ -207,12 +211,15 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     result: dict[str, Any] = {
         "status": "approved",
         "amount": policy.dollars(amount),
-        "remaining_balance": policy.dollars(balance - amount),
         "paid_with": _described(saved),
         "consumer_has_heard": False,
         "allowed_now": "The charge went through, and the consumer does not know that yet: the outcome reaches "
         "them before anything else, including logging or ending the call.",
     }
+    if settled:
+        result["account"] = SETTLED  # the write-off leaves nothing owed: no remaining balance to say
+    else:
+        result["remaining_balance"] = policy.dollars(balance - amount)
     if option.kind == "plan":
         session.down_payment_for = option
         result["next"] = f"The plan itself: create_arrangement with option_id {option.id}."

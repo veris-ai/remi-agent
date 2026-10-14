@@ -303,7 +303,8 @@ async def test_lump_settlement_writes_payment_arrangement_and_letter(pg_dsn, mak
     s = await _settling(pg_dsn, make_session)
     method_id = await card(s)
     ok = await s.dispatch("take_payment", {"method_id": method_id, **SETTLE_20})
-    assert ok["status"] == "approved" and ok["remaining_balance"] == "$200.00"
+    assert ok["status"] == "approved" and ok["account"].startswith("Settled")
+    assert "remaining_balance" not in ok  # the $200.00 rest is written off, never told as still owed
     (arr,) = rows(pg_dsn, "arrangements")
     assert (arr["kind"], arr["total_cents"], arr["instalments"], arr["method_id"]) == (
         "settlement_lump",
@@ -551,6 +552,12 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
         "Never offer an option whose conditions the consumer has not met in their own words.",
         'Record a hardship (record_flag "hardship") only when the consumer has stated one.',
         "Nothing on the list fits: transfer_to_human",
+        # smoke v8, the owner's rulings: pay in full first whatever they ask for first; a smaller amount
+        # named turns an option down; a plan's first date is agreed before it is created
+        "Pay in full is always the first offer, even when they ask first for a plan",
+        "When they turn an option down, with a no or by naming a smaller amount, offer the next one",
+        "request_approval before you mention one that needs approval",
+        "get their agreement to that date before you create it",
     ):
         assert line in payments, line
     # one creditor's ladder is the World's rules now, never the prompt's
@@ -577,6 +584,10 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
         entry = during.split(f"- {intent}")[1].split("\n- ")[0]
         assert tool in entry, (intent, tool)
         assert tool.split()[0] in names
+    cease = " ".join(during.split("- Stop contacting me")[1].split("\n- ")[0].split())
+    assert "a written confirmation will follow" in cease  # the RULES require saying it (smoke v8, REMI-066)
+    # smoke v8: a creditor and balance invented before get_debt_details was called
+    assert "never say a creditor, account number or amount before it, and say only what it returns" in flat
     for tool in ("get_payment_options", "take_payment", "create_arrangement", "record_promise"):
         assert tool in names and tool in text
     # when to ask for approval is the creditor's rule (and the option's status), not the prompt's

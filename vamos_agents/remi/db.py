@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import psycopg
@@ -165,35 +165,80 @@ class Transaction:
         return row["answer"]
 
 
-class Database:
-    """The collections database for this call. Construct with ``connect``."""
+async def _open(dsn: str) -> psycopg.AsyncConnection:
+    return await psycopg.AsyncConnection.connect(
+        dsn,
+        autocommit=True,
+        connect_timeout=CONNECT_TIMEOUT_S,
+        options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}",
+        row_factory=dict_row,
+    )
 
-    def __init__(self, conn: psycopg.AsyncConnection) -> None:
+
+def _lost(conn: psycopg.AsyncConnection) -> bool:
+    """The connection is gone (the server or the network closed it), not merely an SQL error."""
+    return conn.closed or conn.broken
+
+
+class Database:
+    """The collections database for this call. Construct with ``connect``.
+
+    A connection the server or the network drops is opened again: before the next statement when the
+    drop is already known, or once more when a read or a transaction's ``BEGIN`` finds it gone (nothing
+    ran, so nothing runs twice). A drop in the middle of a transaction is never retried: what committed is
+    unknown, so the error reaches the tool and the next statement runs on a fresh connection."""
+
+    def __init__(
+        self,
+        conn: psycopg.AsyncConnection,
+        reopen: Callable[[], Awaitable[psycopg.AsyncConnection]] | None = None,
+    ) -> None:
         self._conn = conn
+        self._reopen = reopen
         self._lock = asyncio.Lock()
+        self._closing = False
 
     @classmethod
     async def connect(cls, dsn: str) -> Database:
-        conn = await psycopg.AsyncConnection.connect(
-            dsn,
-            autocommit=True,
-            connect_timeout=CONNECT_TIMEOUT_S,
-            options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}",
-            row_factory=dict_row,
-        )
-        return cls(conn)
+        return cls(await _open(dsn), reopen=lambda: _open(dsn))
 
     async def close(self) -> None:
+        self._closing = True
         await self._conn.close()
+
+    async def _live(self) -> psycopg.AsyncConnection:
+        """The connection, opened again first if it was lost (callers hold the lock)."""
+        if _lost(self._conn) and self._reopen is not None and not self._closing:
+            logger.warning("collections database connection lost; reconnecting")
+            await self._conn.close()
+            self._conn = await self._reopen()
+        return self._conn
+
+    async def _once_more_if_lost[T](self, attempt: Callable[[psycopg.AsyncConnection], Awaitable[T]]) -> T:
+        """Run ``attempt`` on the live connection; if the connection turns out to be gone, run it once more
+        on a new one. Only for work that leaves nothing behind when the connection fails under it."""
+        conn = await self._live()
+        try:
+            return await attempt(conn)
+        except psycopg.OperationalError:
+            if not _lost(conn) or self._reopen is None:
+                raise
+        return await attempt(await self._live())
 
     async def ping(self) -> None:
         async with self._lock:
-            await self._conn.execute("select 1")
+            await self._once_more_if_lost(lambda conn: conn.execute("select 1"))
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Transaction]:
-        async with self._lock, self._conn.transaction():
-            yield Transaction(self._conn)
+        async with self._lock, AsyncExitStack() as stack:
+
+            async def begin(conn: psycopg.AsyncConnection) -> psycopg.AsyncConnection:
+                await stack.enter_async_context(conn.transaction())
+                return conn
+
+            conn = await self._once_more_if_lost(begin)
+            yield Transaction(conn)
 
     async def policy_function(self, function: str, args: dict[str, Any]) -> Any:
         """One decision-engine call in its own transaction (``request_approval`` logs the answer)."""
@@ -201,17 +246,23 @@ class Database:
             return await tx.policy_function(function, args)
 
     async def _one(self, query: str, params: tuple[Any, ...], what: str) -> dict[str, Any]:
+        async def read(conn: psycopg.AsyncConnection) -> dict[str, Any] | None:
+            cursor = await conn.execute(query, params)
+            return await cursor.fetchone()
+
         async with self._lock:
-            cursor = await self._conn.execute(query, params)
-            row = await cursor.fetchone()
+            row = await self._once_more_if_lost(read)
         if row is None:
             raise NotFound(what)
         return row
 
     async def _all(self, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
-        async with self._lock:
-            cursor = await self._conn.execute(query, params)
+        async def read(conn: psycopg.AsyncConnection) -> list[dict[str, Any]]:
+            cursor = await conn.execute(query, params)
             return await cursor.fetchall()
+
+        async with self._lock:
+            return await self._once_more_if_lost(read)
 
     # --- reads ---------------------------------------------------------------------------
 
