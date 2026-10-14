@@ -1183,3 +1183,28 @@ def test_hosted_and_livekit_vendors_get_the_same_instructions_and_tools(name: st
     handed = HANDED[name](case)
     assert handed["instructions"] == case.setup().instructions
     assert handed["tools"] == case.expected_tools()
+
+
+def test_the_limits_this_pod_sets_are_the_same_for_every_vendor() -> None:
+    """Tool rounds and retries are ours to set: one value each (AGENTS.md, Remi's setup disclosure)."""
+    from vamos_voice.providers import cascade, openai_chat
+    from vamos_voice.providers.base import MAX_TOOL_ROUNDS, OPENAI_SDK_MAX_RETRIES, RETRY_BUDGET_S
+
+    assert cascade.MAX_TOOL_ROUNDS == MAX_TOOL_ROUNDS == 10
+    assert openai_chat.openai_client("https://x", "k").max_retries == OPENAI_SDK_MAX_RETRIES
+    # the openai SDK's backoff (0.5 s doubling, 8 s cap) over OPENAI_SDK_MAX_RETRIES ~ the shared budget
+    waits = [min(0.5 * 2**i, 8.0) for i in range(OPENAI_SDK_MAX_RETRIES)]
+    assert abs(sum(waits) - RETRY_BUDGET_S) < 2.0
+    if importlib.util.find_spec("mistralai") is not None:
+        from vamos_voice.providers import mistral
+
+        assert mistral.RETRIES.backoff.max_elapsed_time == RETRY_BUDGET_S * 1000
+    if importlib.util.find_spec("pipecat") is not None:
+        from vamos_voice.providers.pipecat import PipecatProvider
+        from vamos_voice.providers.pipecat.services import ServiceConfig
+
+        provider = PipecatProvider(ServiceConfig(openai_api_key="sk", stt="deepgram", tts="openai"), "m")
+        assert provider.build_llm(CASES["remi"].setup())._client.max_retries == OPENAI_SDK_MAX_RETRIES
+    from vamos_voice.providers.vapi import VapiConfig
+
+    assert VapiConfig().max_tokens == 10_000, "Vapi's maximum: the others set no token cap"

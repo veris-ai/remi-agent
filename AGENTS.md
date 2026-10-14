@@ -451,7 +451,7 @@ vendors are compared under the same plumbing on both benches.
 - **Playout.** TTS audio leaves in 0.5 s slices, at most 1 s ahead of real
   time (vendors synthesize faster than speech plays; audio already at the
   caller cannot be cut).
-- **Rounds.** Up to 5 per turn: a round's text is spoken as it streams, then
+- **Rounds.** Up to `MAX_TOOL_ROUNDS` (10, shared with LiveKit) per turn: a round's text is spoken as it streams, then
   its tool calls run in order through `CallSession.dispatch`; a call whose
   arguments are not JSON is answered with an error, not run. When a tool ends
   the call, no round follows: the last words play and the line closes.

@@ -43,7 +43,7 @@ from mistralai.client import Mistral
 from mistralai.client.utils import BackoffStrategy, RetryConfig
 
 from vamos_voice.audio import CHANNEL_RATE_HZ, Resampler
-from vamos_voice.providers.base import CallRuntime
+from vamos_voice.providers.base import RETRY_BUDGET_S, CallRuntime
 from vamos_voice.providers.cascade import (
     CascadeProvider,
     ChatModel,
@@ -63,7 +63,12 @@ STT_RATE_HZ = 16_000
 REQUEST_TIMEOUT_MS = 30_000
 RETRIES = RetryConfig(
     "backoff",
-    BackoffStrategy(initial_interval=200, max_interval=4_000, exponent=1.5, max_elapsed_time=25_000),
+    BackoffStrategy(
+        initial_interval=200,
+        max_interval=4_000,
+        exponent=1.5,
+        max_elapsed_time=int(RETRY_BUDGET_S * 1000),
+    ),
     retry_connection_errors=True,
 )
 

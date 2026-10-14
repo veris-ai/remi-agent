@@ -25,8 +25,9 @@ The callee-spoke signal is the first non-empty user transcript.
 Turn taking is LiveKit's own: Silero VAD and ``AgentSession``'s endpointing
 and interruption handling, all on LiveKit's defaults (nothing is passed). Tool calls run one per step
 (``parallel_tool_calls=False``: the tools share verification and payment
-state) and a turn may chain up to 10 tool steps (LiveKit's default of 3 forces
-a spoken reply mid-lookup).
+state) and a turn may chain up to ``MAX_TOOL_ROUNDS`` (10) tool steps, as in
+the cascades (LiveKit's default of 3 forces a spoken reply mid-lookup). A
+failed STT, LLM or TTS request is retried for the shared ``RETRY_BUDGET_S``.
 
 Trace: no ``trace_adapter``. The LLM runs in this process through the
 ``openai`` SDK (the LiveKit OpenAI plugin), which the bench's OTel bundle
@@ -46,13 +47,20 @@ from urllib.parse import urlparse
 
 import aiohttp
 from livekit import api, rtc
-from livekit.agents import Agent, AgentSession, RunContext
+from livekit.agents import Agent, AgentSession, APIConnectOptions, RunContext
 from livekit.agents.llm import StopResponse, function_tool
 from livekit.agents.voice import room_io
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.plugins import deepgram, elevenlabs, openai, silero
 
 from vamos_voice.audio import CHANNEL_RATE_HZ
-from vamos_voice.providers.base import CallRuntime, SessionSetup, VoiceProvider
+from vamos_voice.providers.base import (
+    MAX_TOOL_ROUNDS,
+    RETRY_BUDGET_S,
+    CallRuntime,
+    SessionSetup,
+    VoiceProvider,
+)
 from vamos_voice.providers.wire import run_until_first_done
 from vamos_voice.tools import ToolSpec
 
@@ -64,8 +72,17 @@ AGENT_IDENTITY = "agent"
 SERVER_START_TIMEOUT_S = 30.0
 #: How long the bridge waits for the agent's audio track to appear in the room.
 AGENT_TRACK_TIMEOUT_S = 30.0
-#: Tool steps one agent turn may chain (LiveKit's default is 3).
-MAX_TOOL_STEPS = 10
+#: LiveKit retries a failed STT, LLM or TTS request after 0.1 s, then every ``retry_interval``.
+RETRY_INTERVAL_S = 2.0
+#: The shared retry budget in LiveKit's terms (its default is 3 retries).
+CONNECT_OPTIONS = SessionConnectOptions(
+    **{
+        leg: APIConnectOptions(
+            max_retry=int(RETRY_BUDGET_S // RETRY_INTERVAL_S), retry_interval=RETRY_INTERVAL_S
+        )
+        for leg in ("stt_conn_options", "llm_conn_options", "tts_conn_options")
+    }
+)
 _LOCAL_HOSTS = {"localhost", "127.0.0.1"}
 #: The agent session's state stream (``livekit.agents.voice.remote_session``).
 SESSION_TOPIC = "lk.agent.session"
@@ -209,7 +226,8 @@ class LiveKitProvider(VoiceProvider):
             ),
             # LiveKit's own turn taking: Silero and endpointing on their defaults.
             vad=self._vad or silero.VAD.load(),
-            max_tool_steps=MAX_TOOL_STEPS,
+            max_tool_steps=MAX_TOOL_ROUNDS,  # LiveKit's default of 3 forces a spoken reply mid-lookup
+            conn_options=CONNECT_OPTIONS,
         )
 
     def build_agent(self, call: CallRuntime, ended: asyncio.Event) -> Agent:
