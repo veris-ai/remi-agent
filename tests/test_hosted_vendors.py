@@ -556,7 +556,8 @@ def test_livekit_runs_its_server_on_loopback_only() -> None:
 
 @needs_livekit
 def test_livekit_session_assembles_against_the_pinned_livekit_agents() -> None:
-    from vamos_voice.providers.livekit import MAX_TOOL_STEPS, LiveKitConfig, LiveKitProvider
+    from vamos_voice.providers.base import MAX_TOOL_ROUNDS
+    from vamos_voice.providers.livekit import LiveKitConfig, LiveKitProvider
 
     provider = LiveKitProvider(LiveKitConfig("sk-test", "dg-test", "el-test"))
 
@@ -568,7 +569,8 @@ def test_livekit_session_assembles_against_the_pinned_livekit_agents() -> None:
 
     session = asyncio.run(build())
     assert type(session).__name__ == "AgentSession"
-    assert session.options.max_tool_steps == MAX_TOOL_STEPS
+    assert session.options.max_tool_steps == MAX_TOOL_ROUNDS == 10
+    assert session.conn_options.llm_conn_options.max_retry == 12, "0.1 s + 11 x 2 s: the shared ~25 s"
 
 
 class _RunContext:

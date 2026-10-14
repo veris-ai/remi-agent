@@ -14,16 +14,18 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from .base import OPENAI_SDK_MAX_RETRIES
 from .cascade import ChatModel, Message, ToolCall
 
 #: Every LLM request's ceiling: a hung provider must not hold the call forever.
 TIMEOUT_S = 60.0
-MAX_RETRIES = 4
 
 
 def openai_client(base_url: str, api_key: str) -> AsyncOpenAI:
-    """An SDK client with the cascade's timeout and retries (429 and 5xx are retried with backoff)."""
-    return AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=TIMEOUT_S, max_retries=MAX_RETRIES)
+    """An SDK client with the cascade's timeout and the shared retry budget (429, 5xx, connection errors)."""
+    return AsyncOpenAI(
+        base_url=base_url, api_key=api_key, timeout=TIMEOUT_S, max_retries=OPENAI_SDK_MAX_RETRIES
+    )
 
 
 class OpenAIChat(ChatModel):

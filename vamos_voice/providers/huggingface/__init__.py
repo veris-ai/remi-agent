@@ -45,7 +45,7 @@ import httpx
 import numpy as np
 
 from vamos_voice.audio import CHANNEL_RATE_HZ, Resampler, pcm_ms
-from vamos_voice.providers.base import CallRuntime
+from vamos_voice.providers.base import RETRY_BUDGET_S, CallRuntime
 from vamos_voice.providers.cascade import (
     CascadeProvider,
     SilenceEndpoint,
@@ -67,7 +67,7 @@ TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 #: Whisper requests are a caller's turn: past this the turn is dropped rather than the call held.
 STT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 RETRY_STATUSES = {429, 503}
-RETRY_MAX_S = 25.0
+RETRY_MAX_S = RETRY_BUDGET_S
 RETRY_FIRST_S = 0.5
 
 

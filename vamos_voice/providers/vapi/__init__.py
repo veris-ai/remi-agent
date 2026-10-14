@@ -82,8 +82,9 @@ class VapiConfig:
 
     model_provider: str = "openai"
     model: str = "gpt-4.1-mini"
-    #: Vapi's default of 250 cuts longer turns and tool results short.
-    max_tokens: int = 500
+    #: Vapi requires a per-turn cap (default 250, which cuts longer turns and tool arguments short); this is
+    #: its maximum, the nearest to the other vendors, which set none.
+    max_tokens: int = 10_000
     transcriber_provider: str = "deepgram"
     transcriber_model: str = "nova-3"
     voice_provider: str = "11labs"

@@ -45,6 +45,15 @@ logger = logging.getLogger(__name__)
 MAX_DRAIN_S = 15.0
 #: Where a provider's own HTTP routes are mounted: ``/vendor/<provider name>/...``.
 VENDOR_ROUTE_PREFIX = "/vendor"
+#: Where this pod runs the tool loop (the cascades, LiveKit), the most LLM rounds one caller turn may take,
+#: each with its tool calls: far above a normal turn, it only stops a model that loops.
+MAX_TOOL_ROUNDS = 10
+#: Where this pod makes the vendor requests itself (the cascades' LLM, STT and TTS requests, Pipecat's and
+#: LiveKit's LLM), how long a transient error (429, 5xx, a dropped connection) is retried with backoff
+#: before the request fails: one budget for every vendor.
+RETRY_BUDGET_S = 25.0
+#: The ``openai`` SDK's backoff (0.5 s, doubling, capped at 8 s) spends ~23.5 s over this many retries.
+OPENAI_SDK_MAX_RETRIES = 6
 
 
 @dataclass(frozen=True)

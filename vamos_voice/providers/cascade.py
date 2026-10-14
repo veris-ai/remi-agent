@@ -65,14 +65,12 @@ from typing import Any, ClassVar, Protocol
 
 from ..audio import pcm_ms
 from ..tools import ToolSpec
-from .base import CallRuntime, SessionSetup, VoiceProvider
+from .base import MAX_TOOL_ROUNDS, CallRuntime, SessionSetup, VoiceProvider
 from .silero import SileroVad, inference_session
 from .wire import Connect, connect_websocket, dispatch_json_call, run_until_first_done
 
 logger = logging.getLogger(__name__)
 
-#: A turn whose model still wants tools after this many rounds is looping; it ends without more.
-MAX_TOOL_ROUNDS = 5
 PLAYBACK_SLICE_MS = 500
 PLAYBACK_LEAD_MS = 1000
 #: 24 kHz PCM16: 48 bytes per ms.

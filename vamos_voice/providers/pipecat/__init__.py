@@ -45,7 +45,7 @@ from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPI
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from vamos_voice.audio import CHANNEL_RATE_HZ
-from vamos_voice.providers.base import CallRuntime, SessionSetup, VoiceProvider
+from vamos_voice.providers.base import OPENAI_SDK_MAX_RETRIES, CallRuntime, SessionSetup, VoiceProvider
 from vamos_voice.session import CallSession
 from vamos_voice.tools import ToolSpec
 
@@ -55,6 +55,13 @@ from .services import STT_FACTORIES, TTS_FACTORIES, ServiceConfig
 logger = logging.getLogger(__name__)
 
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
+
+
+class RetryingOpenAILLM(OpenAILLMService):
+    """Pipecat's OpenAI LLM with the shared retry budget (``RETRY_BUDGET_S``); Pipecat leaves the SDK's 2."""
+
+    def create_client(self, *args: Any, **kwargs: Any) -> Any:
+        return super().create_client(*args, **kwargs).with_options(max_retries=OPENAI_SDK_MAX_RETRIES)
 
 
 class PipecatToolFormat:
@@ -95,7 +102,7 @@ class PipecatProvider(VoiceProvider):
         return LLMContext([], self.tool_format.convert(setup.tools))
 
     def build_llm(self, setup: SessionSetup) -> OpenAILLMService:
-        return OpenAILLMService(
+        return RetryingOpenAILLM(
             api_key=self.config.openai_api_key,
             settings=OpenAILLMService.Settings(model=self.llm_model, system_instruction=setup.instructions),
         )

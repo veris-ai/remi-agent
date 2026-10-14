@@ -333,3 +333,45 @@ the same gates; only the voice stack differs.
 
 On the cascades Remi's first words wait for the callee's first finished turn
 (callee first), and on gradbot for its first transcribed words.
+
+### Full setup disclosure
+
+What differs between the vendors, and who set it. Everything not listed is
+identical: the instructions (with the screen pop), the tools, their gates and
+the call-start rule. "Vendor" means the vendor's (or its framework's) own
+default, untouched; a value is ours only where the vendor has none or demands
+one, and then it is the same for every vendor that needs it:
+
+- **Tool rounds**: `MAX_TOOL_ROUNDS` = 10 LLM rounds per caller turn, wherever
+  this pod runs the tool loop (far above a normal turn; it only stops a model
+  that loops).
+- **Retries**: `RETRY_BUDGET_S` = ~25 s of backoff on a transient error (429,
+  5xx, a dropped connection) for every vendor request this pod makes itself
+  (`openai` SDK: 6 retries; Mistral SDK: 25 s; LiveKit: 12 x 2 s; Hugging Face
+  STT/TTS: 25 s). Where the vendor makes the request (speech-to-speech
+  sessions, managed agents, hosted orchestrators), the vendor's own policy
+  applies; a speech-to-speech socket that fails ends the call (no reconnect).
+- **Tokens**: no cap anywhere but Vapi, which requires one (default 250, which
+  cuts turns short): its maximum, 10,000.
+
+| Vendor | Text model | Turn taking, VAD, endpointing | Tool-round cap | Token cap | Retries (LLM) | English pinned by |
+|---|---|---|---|---|---|---|
+| `openai_realtime` | `gpt-realtime` (speech-to-speech) | vendor: `server_vad`, no numbers sent | vendor | vendor (none) | none: one socket | transcription `language: "en"` |
+| `grok_voice` | `grok-voice-think-fast-2.0` (speech-to-speech) | vendor: `server_vad`, no numbers sent | vendor | vendor (none) | none: one socket | transcription `language_hint: "en"` (no spoken-language setting) |
+| `gemini_live` | `gemini-2.5-flash-native-audio-preview-12-2025` (default) or a Gemini 3 Live model (`VAMOS_GEMINI_MODEL`), speech-to-speech | vendor: automatic activity detection on its defaults | vendor | vendor (none) | none: one socket | transcription `languageCodes: ["en"]` (native audio takes no spoken-language code) |
+| `gpt_live` | `gpt-live-1`, delegating to `gpt-5.6-terra` | vendor (no VAD settings exist) | vendor | vendor (none) | none: one socket | none documented: the prompt |
+| `pipecat` | `gpt-4.1-mini` | vendor (Pipecat): Silero `VADParams()`, default start strategies, Smart Turn v3 | none (Pipecat's loop) | none | ours: 6 SDK retries (~25 s) | Deepgram/OpenAI STT and Cartesia TTS `Language.EN` |
+| `deepgram` | `gpt-4.1-mini` (Deepgram-managed) | vendor | vendor | vendor | vendor | `language: "en"` |
+| `elevenlabs` | `gpt-4.1-mini` (ElevenLabs-managed) | vendor (learned turn model) | vendor | vendor | vendor | `language: "en"` |
+| `fluxions` | the host's model | vendor (adaptive end-of-utterance) | vendor | vendor | vendor | none documented: the prompt |
+| `mistral` | `mistral-medium-2604` (Mistral's own) | ours, none at the vendor: Silero + 800 ms silence; barge-in after 0.5 s of speech (LiveKit Agents' default) | 10 | none | ours: Mistral SDK backoff, 25 s | none documented (Voxtral): the prompt |
+| `huggingface` | `openai/gpt-oss-120b:groq` (HF router) | ours, none at the vendor: Silero + 800 ms silence; barge-in after 0.5 s of speech | 10 | none | ours: 6 SDK retries (~25 s) | Whisper `language: "en"` |
+| `grok_cascade` | `gpt-4.1-mini` (default) or `grok-4.3` | vendor: xAI STT default endpointing (400 ms); barge-in ours (0.5 s, as above) | 10 | none | ours: 6 SDK retries (~25 s) | xAI STT/TTS `language=en` |
+| `gradium` | `gpt-4.1-mini` | vendor (gradbot) | vendor (gradbot) | vendor (gradbot) | vendor (gradbot) | `Lang.En` |
+| `vapi` | `gpt-4.1-mini` (Vapi-managed) | vendor (no `startSpeakingPlan`) | vendor | 10,000 (Vapi's maximum; it requires one) | vendor | transcriber `language: "en"` |
+| `cartesia` | `gpt-4.1-mini` (Cartesia-managed) | vendor | vendor | vendor | vendor | `language.primary: "en"` |
+| `livekit` | `gpt-4.1-mini` | vendor (LiveKit Agents): Silero and endpointing defaults | 10 | none | ours: 12 x 2 s (~22 s), STT/LLM/TTS | Deepgram STT `en-US` (the TTS model is English-only) |
+
+The text model is the vendor's own where the vendor sells one (Mistral, the
+Hugging Face open model, the speech-to-speech models); every pipeline that
+takes a bring-your-own model runs `gpt-4.1-mini`.
