@@ -1,0 +1,223 @@
+{
+ "balance": "$4,000.00",
+ "options": [
+  {
+   "option_id": "pif",
+   "kind": "pay_in_full",
+   "amount": "$4,000.00"
+  },
+  {
+   "option_id": "plan_2",
+   "kind": "plan",
+   "months": 2,
+   "down_payment_today": "$400.00",
+   "monthly": "$1,800.00"
+  },
+  {
+   "option_id": "plan_3",
+   "kind": "plan",
+   "months": 3,
+   "down_payment_today": "$400.00",
+   "monthly": "$1,200.00"
+  },
+  {
+   "option_id": "plan_4",
+   "kind": "plan",
+   "months": 4,
+   "down_payment_today": "$400.00",
+   "monthly": "$900.00"
+  },
+  {
+   "option_id": "plan_5",
+   "kind": "plan",
+   "months": 5,
+   "down_payment_today": "$400.00",
+   "monthly": "$720.00"
+  },
+  {
+   "option_id": "plan_6",
+   "kind": "plan",
+   "months": 6,
+   "down_payment_today": "$400.00",
+   "monthly": "$600.00"
+  },
+  {
+   "option_id": "plan_7",
+   "kind": "plan",
+   "months": 7,
+   "down_payment_today": "$400.00",
+   "monthly": "$514.29"
+  },
+  {
+   "option_id": "plan_8",
+   "kind": "plan",
+   "months": 8,
+   "down_payment_today": "$400.00",
+   "monthly": "$450.00"
+  },
+  {
+   "option_id": "plan_9",
+   "kind": "plan",
+   "months": 9,
+   "down_payment_today": "$400.00",
+   "monthly": "$400.00"
+  },
+  {
+   "option_id": "plan_10",
+   "kind": "plan",
+   "months": 10,
+   "down_payment_today": "$400.00",
+   "monthly": "$360.00"
+  },
+  {
+   "option_id": "plan_11",
+   "kind": "plan",
+   "months": 11,
+   "down_payment_today": "$400.00",
+   "monthly": "$327.27"
+  },
+  {
+   "option_id": "plan_12",
+   "kind": "plan",
+   "months": 12,
+   "down_payment_today": "$400.00",
+   "monthly": "$300.00"
+  },
+  {
+   "option_id": "plan_13",
+   "kind": "plan",
+   "months": 13,
+   "down_payment_today": "$400.00",
+   "monthly": "$276.92"
+  },
+  {
+   "option_id": "plan_14",
+   "kind": "plan",
+   "months": 14,
+   "down_payment_today": "$400.00",
+   "monthly": "$257.14"
+  },
+  {
+   "option_id": "plan_15",
+   "kind": "plan",
+   "months": 15,
+   "down_payment_today": "$400.00",
+   "monthly": "$240.00"
+  },
+  {
+   "option_id": "plan_16",
+   "kind": "plan",
+   "months": 16,
+   "down_payment_today": "$400.00",
+   "monthly": "$225.00"
+  },
+  {
+   "option_id": "plan_17",
+   "kind": "plan",
+   "months": 17,
+   "down_payment_today": "$400.00",
+   "monthly": "$211.76"
+  },
+  {
+   "option_id": "plan_18",
+   "kind": "plan",
+   "months": 18,
+   "down_payment_today": "$400.00",
+   "monthly": "$200.00"
+  },
+  {
+   "option_id": "plan_19",
+   "kind": "plan",
+   "months": 19,
+   "down_payment_today": "$400.00",
+   "monthly": "$189.47"
+  },
+  {
+   "option_id": "plan_20",
+   "kind": "plan",
+   "months": 20,
+   "down_payment_today": "$400.00",
+   "monthly": "$180.00"
+  },
+  {
+   "option_id": "plan_21",
+   "kind": "plan",
+   "months": 21,
+   "down_payment_today": "$400.00",
+   "monthly": "$171.43"
+  },
+  {
+   "option_id": "plan_22",
+   "kind": "plan",
+   "months": 22,
+   "down_payment_today": "$400.00",
+   "monthly": "$163.64"
+  },
+  {
+   "option_id": "plan_23",
+   "kind": "plan",
+   "months": 23,
+   "down_payment_today": "$400.00",
+   "monthly": "$156.52"
+  },
+  {
+   "option_id": "plan_24",
+   "kind": "plan",
+   "months": 24,
+   "down_payment_today": "$400.00",
+   "monthly": "$150.00"
+  },
+  {
+   "option_id": "settle_5",
+   "kind": "settlement",
+   "amount": "$3,800.00",
+   "pay_by": "2027-02-17",
+   "status": "locked: a settlement needs the consumer's hardship recorded first (record_flag hardship)"
+  },
+  {
+   "option_id": "settle_10",
+   "kind": "settlement",
+   "amount": "$3,600.00",
+   "pay_by": "2027-02-17",
+   "status": "locked: a settlement needs the consumer's hardship recorded first (record_flag hardship)"
+  },
+  {
+   "option_id": "settle_15",
+   "kind": "settlement",
+   "amount": "$3,400.00",
+   "pay_by": "2027-02-17",
+   "status": "locked: a settlement needs the consumer's hardship recorded first (record_flag hardship)"
+  },
+  {
+   "option_id": "settle_20",
+   "kind": "settlement",
+   "amount": "$3,200.00",
+   "pay_by": "2027-02-17",
+   "status": "locked: a settlement needs the consumer's hardship recorded first (record_flag hardship)"
+  },
+  {
+   "option_id": "settle_30",
+   "kind": "settlement",
+   "amount": "$2,800.00",
+   "pay_by": "2027-02-17",
+   "status": "locked: a settlement needs the consumer's hardship recorded first (record_flag hardship)"
+  },
+  {
+   "option_id": "settle_40",
+   "kind": "settlement",
+   "amount": "$2,400.00",
+   "pay_by": "2027-02-17",
+   "status": "locked: a settlement needs the consumer's hardship recorded first (record_flag hardship)"
+  }
+ ],
+ "rules": [
+  "Offer the options in the order listed: pay in full first, then the plans, then a settlement. Move to the next only if the consumer turns down the one before.",
+  "If the consumer tells you a monthly amount they can pay, offer the shortest plan whose monthly payment is at or under that amount; passing over the plans that cost more a month is not skipping the order. Go past the plans only if none fits.",
+  "Before offering any settlement, unless the consumer has already told you, ask an open question about what is making it hard to pay. Never suggest reasons, never name kinds of hardship, and never say that a hardship could change what you can offer.",
+  "A settlement only if no plan fits and the consumer has described, in their own words, a hardship that makes paying hard. Record that hardship on the account before offering a settlement; never record one they did not state.",
+  "Settlements go smallest discount first; offer the next only if the consumer turns down the one before. An option that needs approval: request_approval before you mention it.",
+  "Never mention a percentage, a minimum, a limit, or an option you have not reached, and never tell the consumer what would unlock a better offer.",
+  "If nothing fits, transfer to a person."
+ ],
+ "allowed_now": "The creditor's options, in the order its rules give them. Follow the creditor's rules (rules) exactly. Only these amounts and terms exist. An option with a status is not offered until it is available. Anything else goes to a person (transfer_to_human)."
+}

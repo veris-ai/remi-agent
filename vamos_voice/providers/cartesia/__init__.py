@@ -15,22 +15,41 @@ shared, not made per call: the pod reuses a tool whose stored definition is
 identical to the one it needs and creates only what is missing. Two pods never
 fight over a definition, and parallel calls never exhaust the account.
 Cartesia's parameter schema accepts only ``type``, ``description``, ``enum``,
-``items``, ``properties`` and ``required`` (anything else is "Unrecognized
-key"), so bounds and formats are cut; ``CallSession.dispatch`` still
-validates every argument and returns any violation to the model.
+``items``, ``properties`` and ``required`` (``POST /v1/agents/tools`` refuses
+any other key), so ``minimum``/``maximum``/``minLength``/``format`` are cut. Remi's
+descriptions already state each of them in words ("YYYY-MM-DD", "1-12",
+"ISO-8601"), so its model sees the same constraints as every other vendor's,
+and ``CallSession.dispatch`` still validates every argument and returns any
+violation to the model.
 
 Call start: ``initial_message`` is null, Cartesia's native "wait for the
 caller to speak first". Cartesia has no way to ask the model for an opening
 turn, so an agent that speaks first cannot run here (``opens_calls = False``;
 startup fails with a message). Turn taking, interruptions (``audio_output_clear``)
-and noise suppression are Cartesia's own defaults. The LLM catalog has no
-``gpt-4.1-mini``; ``gpt-4.1`` is the default, as on the VAmoS Energy candidate.
-Tool results over 4096 bytes are replaced by Cartesia with an error. Cartesia
-reserves the names of its system tools (``end_call``, ``send_dtmf``,
-``voicemail_detection``, ``transfer_to_number``), so a tool with one of those
-names is declared with a trailing underscore (Remi's ``end_call`` is
-``end_call_`` at Cartesia) and mapped back before dispatch; the system tools
-stay off, so the agent's own hang-up tool, with its gates, is the only one.
+and noise suppression are Cartesia's own defaults. The LLM is ``gpt-4.1-mini``,
+the text model of every pipeline vendor. ``pre_tool_speech`` is required and
+has no default; it is ``off`` (Cartesia does not ask the model to speak before a
+tool call), so whether Remi speaks before a tool is the model's own choice, as
+on every other vendor.
+
+**Results** go as the same JSON every vendor gets. Cartesia's docs cap a
+client-tool result at 4096 bytes (``result_too_large``), but a live check on
+2026-10-14 (API ``2026-08-14``, ``gpt-4.1-mini``) found no such limit enforced:
+results of ~3.8, 4.5 and 9 KB, each with a fact only at the very end, reached the
+model whole, with no error. Remi's largest result (``get_payment_options`` on a
+long plan ladder) is ~5.4 KB, so results are sent unchanged.
+
+**The hang-up tool.** Cartesia reserves the names of its system tools
+(``end_call``, ``send_dtmf``, ``voicemail_detection``, ``skip_turn``,
+``transfer_to_number``: creating a client tool with one fails with HTTP 400,
+checked live on 2026-10-14), so a tool
+with one of those names is declared with a trailing underscore (Remi's
+``end_call`` is ``end_call_`` at Cartesia, same description) and mapped back
+before dispatch. The vendor-native alternative, Cartesia's system ``end_call``,
+ends the call inside Cartesia without reaching ``CallSession.dispatch``: it
+would skip Remi's gate (the call must be logged first) and its record, which
+every other vendor applies. The system tools stay off, so the agent's own
+hang-up tool, with its gates, is the only one.
 
 Trace: ``trace_adapter = "cartesia"`` reads this socket (``client_tool_call``,
 ``turn_output_text_delta`` and ``turn_ended`` received; ``client_tool_result``
@@ -64,17 +83,16 @@ API_TIMEOUT_S = 30.0
 AUDIO_FORMAT = "pcm_24000"
 #: How long Cartesia waits for a client tool's result.
 TOOL_TIMEOUT_S = 60
-#: Cartesia replaces a longer result with an error.
-MAX_RESULT_BYTES = 4096
 #: The parameter-schema keywords Cartesia accepts.
 _SCHEMA_KEYS = {"type", "description", "enum", "items", "properties", "required"}
 
 
 @dataclass(frozen=True)
 class CartesiaConfig:
-    """Model and voice (defaults: the VAmoS Energy Cartesia candidate)."""
+    """Model and voice (the model: every pipeline vendor's ``gpt-4.1-mini``; the voice: the VAmoS Energy
+    Cartesia candidate's)."""
 
-    model: str = "gpt-4.1"
+    model: str = "gpt-4.1-mini"
     #: "Skylar - Friendly Guide".
     voice_id: str = "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"
 
@@ -101,7 +119,9 @@ def _schema(node: Any) -> Any:
 
 
 #: Names Cartesia keeps for its own system tools ("tool_name_reserved").
-RESERVED_TOOL_NAMES = frozenset({"end_call", "send_dtmf", "voicemail_detection", "transfer_to_number"})
+RESERVED_TOOL_NAMES = frozenset(
+    {"end_call", "send_dtmf", "voicemail_detection", "skip_turn", "transfer_to_number"}
+)
 
 
 def wire_name(name: str) -> str:
@@ -124,7 +144,7 @@ class CartesiaToolFormat:
                 "type": "client",
                 "name": wire_name(t.name),
                 "description": t.description,
-                "pre_tool_speech": "auto",
+                "pre_tool_speech": "off",
                 "execution_mode": "immediate",
                 "expects_response": True,
                 "response_timeout_secs": TOOL_TIMEOUT_S,
@@ -310,19 +330,11 @@ class _CartesiaCall:
             self.ended.set()
         if not event.get("expects_response", True):
             return
-        text = json.dumps(result, default=str)
-        if len(text.encode()) > MAX_RESULT_BYTES:
-            logger.warning(
-                "cartesia: %s result is %d bytes (limit %d)",
-                event.get("tool_name"),
-                len(text),
-                MAX_RESULT_BYTES,
-            )
         await self.send(
             {
                 "type": "client_tool_result",
                 "tool_call_id": event.get("tool_call_id"),
-                "result": text,
+                "result": json.dumps(result, default=str),
                 "is_error": "error" in result,
             }
         )
