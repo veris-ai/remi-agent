@@ -1,12 +1,22 @@
 """Pipecat's speech services, chosen by env: one small factory per option, no branching elsewhere.
 
 Every VAmoS call is in English, so each service that takes a language has it pinned to English
-(configuration, as the other providers do; OpenAI's speech endpoint takes none)."""
+(configuration, as the other providers do; OpenAI's speech endpoint takes none).
+
+Reliability (not behaviour): OpenAI's speech endpoint sometimes holds a request for 25 s or more
+before its first byte, while the same request retried answers in about half a second. Pipecat
+builds its OpenAI client with the SDK's defaults (a 600 s timeout, 2 retries) and abandons a
+reply after 3 s without audio, so one stalled request made the agent mute for the whole turn.
+``RetryingOpenAITTS`` gives each attempt ``TTS_ATTEMPT_TIMEOUT_S`` and retries a stall, a 5xx,
+a 429 or a dropped connection ``TTS_MAX_RETRIES`` times (the SDK's backoff), all within the
+shared ``RETRY_BUDGET_S``; Pipecat waits that long for the audio before giving up on a reply.
+Voice, model and text are unchanged."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.services.cartesia.tts import CartesiaTTSService
@@ -16,6 +26,25 @@ from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transcriptions.language import Language
 
 from vamos_voice.audio import CHANNEL_RATE_HZ
+from vamos_voice.providers.base import RETRY_BUDGET_S
+
+#: One speech request's time to answer (and between audio chunks); a healthy one starts in ~0.5 s.
+TTS_ATTEMPT_TIMEOUT_S = 3.0
+#: 5 attempts of 3 s plus the SDK's backoff (0.5 s doubling: 7.5 s at most) fit ``RETRY_BUDGET_S``.
+TTS_MAX_RETRIES = 4
+#: How long Pipecat waits for a reply's audio before giving up on it (its default is 3 s).
+TTS_IDLE_TIMEOUT_S = RETRY_BUDGET_S + TTS_ATTEMPT_TIMEOUT_S
+
+
+class RetryingOpenAITTS(OpenAITTSService):
+    """Pipecat's OpenAI TTS with a per-attempt timeout and retries within ``RETRY_BUDGET_S``.
+
+    Pipecat's constructor offers no ``max_retries``, so its client is re-optioned once here.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(stop_frame_timeout_s=TTS_IDLE_TIMEOUT_S, **kwargs)
+        self._client = self._client.with_options(timeout=TTS_ATTEMPT_TIMEOUT_S, max_retries=TTS_MAX_RETRIES)
 
 
 @dataclass(frozen=True)
@@ -79,7 +108,7 @@ def _openai_stt(c: ServiceConfig) -> FrameProcessor:
 
 
 def _openai_tts(c: ServiceConfig) -> FrameProcessor:
-    return OpenAITTSService(
+    return RetryingOpenAITTS(
         api_key=c.openai_api_key,
         sample_rate=CHANNEL_RATE_HZ,
         settings=OpenAITTSService.Settings(model=c.openai_tts_model, voice=c.openai_tts_voice),
