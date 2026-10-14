@@ -548,9 +548,6 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
         "The creditor's policy decides the money.",
         "get_payment_options returns the creditor's options and the creditor's rules: follow those rules exactly.",
         "Offer nothing that is not on the list.",
-        "Never offer an option whose conditions the consumer has not met in their own words.",
-        'Record a hardship (record_flag "hardship") only when the consumer has stated one.',
-        "Nothing on the list fits: transfer_to_human",
         # smoke v8: a plan's first date is agreed before it is created (how the tools are used, not policy)
         "get their agreement to that date before you create it",
     ):
@@ -572,6 +569,16 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
         "before you mention one that needs approval",
         "what to offer first",
         "what unlocks each option",
+        # the tool's rules, option statuses and allowed_now already carry these: the prompt does not repeat them
+        "whose conditions the consumer has not met",
+        "only when the consumer has stated one",
+        "An option with a status",
+        "If an approval is denied",
+        "amounts and terms an option carries",
+        "Nothing on the list fits",
+        "when nothing on the creditor's options fits",
+        "name kinds of hardship",
+        "pay-by date",
     ):
         assert policy not in flat, policy
     during = text.split("# During the conversation")[1].split("# Payments")[0]
