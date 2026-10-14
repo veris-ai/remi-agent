@@ -41,7 +41,7 @@ vamos_voice/                      # the framework: never imports an agent
   context.py                      # AgentContext (VERIS_AGENT_CONTEXT as a str map) + CallClock
   call_start.py                   # CallStartPolicy: callee_first (outbound) / agent_first (inbound)
   screen_pop.py                   # ScreenPop: the agent's connect-time reads, appended to the instructions
-  audio.py                        # PCM16 helpers, streaming resampler
+  audio.py                        # PCM16 helpers, streaming band-limited resampler
   tools/registry.py               # ToolRegistry: pydantic args -> one JSON schema, requires/redact/tags
   session/engine.py               # CallSession: the one dispatch path (gates, redaction, never raises)
   session/gates.py                # Gates protocol + GateLadder (ordered state machine)
