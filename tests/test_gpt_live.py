@@ -82,6 +82,15 @@ def test_the_live_model_is_told_which_actions_the_backend_carries_out() -> None:
     assert "end_call" in live[: live.index(setup.instructions)]
 
 
+def test_the_preambles_carry_no_behaviour_rule_the_other_vendors_do_not_get() -> None:
+    """No tuning: every vendor gets Remi's instructions and nothing else about how to behave. GPT-Live's
+    preambles say only what each model is and how it reaches the tools (the delegation contract)."""
+    for preamble in (LIVE_PREAMBLE, BACKEND_PREAMBLE):
+        flat = f" {' '.join(preamble.lower().replace('.', ' ').split())} "
+        for rule in (" never ", " only after ", " before you say ", " recognition ", " confirm", " mistake"):
+            assert rule not in flat, (rule, preamble)
+
+
 async def test_nothing_but_session_start_goes_out_before_session_started() -> None:
     sock = FakeVendorSocket()
     line = FakeLine()

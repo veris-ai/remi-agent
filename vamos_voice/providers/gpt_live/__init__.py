@@ -64,25 +64,23 @@ DEFAULT_VOICE = "marin"
 #: Live audio has no per-turn item; playout is tracked under one id.
 AUDIO_ITEM = "live"
 
-#: The backend never hears the call: it reads the transcript the live model hands it.
-#: Protocol mechanics only; the agent's own instructions follow verbatim.
+#: The backend never hears the call: it reads the transcript the live model hands it. What it is and what
+#: it reads, nothing about how to behave (every vendor gets the same agent instructions, which follow
+#: verbatim).
 BACKEND_PREAMBLE = (
     "You are the reasoning and tool-use backend of a live voice agent. You read a transcript of the "
-    "call, which can contain recognition mistakes, unfinished phrases and later corrections; use the "
-    "latest context and the tool results you receive. Report an action as complete only after its "
-    "tool confirms it. The agent's instructions follow.\n\n"
+    "call. The agent's instructions follow.\n\n"
 )
 
 
 #: The live model runs no tools and is not given the backend's: OpenAI's live-prompting guide says to list
 #: the backend's capabilities in the live prompt ("GPT-Live uses this list to decide which requests to hand
-#: off") and to delegate before an answer that depends on backend work. Protocol mechanics only, the same
-#: for every agent; the list itself is generated from the call's tools.
+#: off"). The tool-calling contract only (what the backend can do and that the live model reaches it by
+#: delegating), the same for every agent and no behaviour rule; the list is generated from the call's tools.
 LIVE_PREAMBLE = (
     "You speak with the caller; a backend carries out every action. Each action your instructions below "
     "name is one of the backend's, listed here. Delegate to the backend whenever your instructions call for "
-    "one of them, and before you say anything that depends on its result; never say an action's result, or "
-    "a fact only an action returns, before the backend reports it.\n\nBackend actions:\n"
+    "one of them.\n\nBackend actions:\n"
 )
 
 
