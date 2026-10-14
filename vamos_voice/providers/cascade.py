@@ -31,12 +31,20 @@ What the cascade itself owns, the same for every vendor:
 - **Barge-in.** None of these vendors detects the caller talking over the
   agent, so the cascade must: Silero VAD on the caller's audio (``silero.py``,
   the detector the VAmoS Energy candidates of these vendors use), under
-  ``BargeInRule``, LiveKit Agents' default interruption rule
-  (``min_duration`` 0.5 s, ``min_words`` 0) taken as is, the same for every
-  cascade: ``min_speech_ms`` (0.5 s) of Silero speech while a turn is being
-  answered stops the audio, clears the vendor's TTS utterance, and silences
-  the rest of that turn. No word count or other noise filter: noise is a
-  benchmark condition. The LLM round it lands in
+  ``BargeInRule``: LiveKit Agents' default interruption handling (livekit-agents
+  1.8, ``AgentSession`` in VAD mode, its self-hosted default), all of it, the
+  same for every cascade. Caller utterances are segmented as LiveKit's Silero
+  stream does (``CallerUtterances``). An utterance that has lasted
+  ``min_speech_ms`` (0.5 s; ``min_words`` 0) while a turn is being answered
+  *pauses* the reply's audio; so does any utterance that starts, or is under
+  way, before the reply is audible. When the utterance ends, the pause becomes
+  a false interruption after ``false_interruption_timeout_s`` (2 s; 0 s for a
+  pause that never reached 0.5 s) and the reply resumes where it stopped
+  (``resume_false_interruption``). A finished caller turn (the STT's final
+  transcript, never empty) arriving while a turn is being answered interrupts
+  it: the audio stops, the vendor's TTS utterance is cleared, and the rest of
+  that turn is silenced. No other noise filter: noise is a benchmark
+  condition. The LLM round it lands in
   still completes and its tool calls still run (a payment that was decided is
   made and recorded); then the turn ends and the caller's words are the next
   turn. The interrupted reply is kept in the history as the words the caller
@@ -56,6 +64,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import enum
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -82,8 +91,10 @@ BAD_ARGUMENTS = json.dumps({"error": "The arguments were not valid JSON. Call th
 
 Message = dict[str, Any]
 TurnSink = Callable[[str], Awaitable[None]]
-#: Non-speech that ends a caller utterance for the barge-in count (short pauses between words do not).
-UTTERANCE_GAP_MS = 300
+#: LiveKit's Silero stream defaults (livekit-plugins-silero 1.8): this much speech starts a caller
+#: utterance, and this much non-speech ends it (shorter pauses between words do not).
+MIN_SPEECH_MS = 50
+MIN_SILENCE_MS = 550
 
 
 @dataclass(frozen=True)
@@ -186,38 +197,53 @@ class SilenceEndpoint:
 
 @dataclass(frozen=True)
 class BargeInRule:
-    """When the caller talking over the agent interrupts it (every cascade, the same).
+    """When the caller talking over the agent pauses it, and when a pause was a false interruption
+    (every cascade, the same): LiveKit Agents' ``InterruptionOptions`` defaults (livekit-agents 1.8).
 
-    ``min_speech_ms`` of Silero speech in one utterance (pauses under
-    ``UTTERANCE_GAP_MS`` do not end it), counted from when the reply began:
-    LiveKit Agents' default ``min_duration`` (its ``min_words`` default is 0).
+    ``min_speech_ms`` is ``min_duration`` (``min_words`` is 0: no word count);
+    ``false_interruption_timeout_s`` is ``false_interruption_timeout``, with
+    ``resume_false_interruption`` on.
     """
 
     min_speech_ms: int = 500
+    false_interruption_timeout_s: float = 2.0
 
 
-class BargeInDetector:
-    """One call's barge-in state under a ``BargeInRule``; fed caller audio."""
+class Utterance(enum.Enum):
+    STARTED = "started"
+    ENDED = "ended"
 
-    def __init__(self, rule: BargeInRule) -> None:
-        self.rule = rule
-        self.reset()
 
-    def reset(self) -> None:
-        """A reply begins: only speech from now on counts."""
-        self.speech_ms = 0.0
-        self.gap_ms = 0.0
+class CallerUtterances:
+    """The caller's utterances as LiveKit's Silero stream segments them, over Silero's verdicts:
+    one starts after ``MIN_SPEECH_MS`` of speech and ends after ``MIN_SILENCE_MS`` of non-speech;
+    its ``duration_ms`` runs from its start, pauses included."""
 
-    def audio(self, ms: float, speaking: bool) -> bool:
-        """Account for ``ms`` of caller audio; True when the rule is met."""
-        if not speaking:
-            self.gap_ms += ms
-            return False
-        if self.gap_ms >= UTTERANCE_GAP_MS:  # a new utterance: the last one never qualified
-            self.speech_ms = 0.0
-        self.gap_ms = 0.0
-        self.speech_ms += ms
-        return self.speech_ms >= self.rule.min_speech_ms
+    def __init__(self) -> None:
+        self.speaking = False
+        self.duration_ms = 0.0
+        self._speech_ms = 0.0
+        self._silence_ms = 0.0
+
+    def audio(self, ms: float, speech: bool) -> Utterance | None:
+        """Account for ``ms`` of caller audio; the utterance boundary it crosses, if any."""
+        if self.speaking:
+            self.duration_ms += ms
+        if speech:
+            self._silence_ms = 0.0
+            self._speech_ms += ms
+            if not self.speaking and self._speech_ms >= MIN_SPEECH_MS:
+                self.speaking, self.duration_ms = True, self._speech_ms
+                return Utterance.STARTED
+            return None
+        self._speech_ms = 0.0
+        if not self.speaking:
+            return None
+        self._silence_ms += ms
+        if self._silence_ms < MIN_SILENCE_MS:
+            return None
+        self.speaking, self.duration_ms, self._silence_ms = False, 0.0, 0.0
+        return Utterance.ENDED
 
 
 class CascadeProvider(VoiceProvider, abc.ABC):
@@ -259,10 +285,18 @@ class _CascadeCall:
         self.messages = provider.system_messages(call.setup)
         self.tools = provider.tool_format.convert(call.setup.tools)
         self.vad = provider.voice_activity(call.setup)
-        self.barge = BargeInDetector(provider.barge_in_rule)
+        self.rule = provider.barge_in_rule
+        self.utterances = CallerUtterances()
         self.turns: asyncio.Queue[str] = asyncio.Queue()
         self.replying = False  # a turn is being answered
-        self.cut = False  # ...and the caller talked over it
+        self.cut = False  # ...and the caller interrupted it
+        #: Set while the reply's audio may play; cleared while caller speech pauses it.
+        self.playing = asyncio.Event()
+        self.playing.set()
+        #: While paused: how long after the caller's utterance ends the pause is a false interruption.
+        self.resume_after_s: float | None = None
+        self.resume_timer: asyncio.TimerHandle | None = None
+        self.item: str | None = None  # the round being spoken
         self.player: asyncio.Task[None] | None = None
         self.n_items = 0
         self.received_ms: dict[str, float] = {}  # TTS audio received per item
@@ -280,15 +314,63 @@ class _CascadeCall:
 
     async def hear(self, pcm: bytes) -> None:
         speaking = self.vad.push(pcm)
-        if self.barge.audio(pcm_ms(len(pcm)), speaking):
-            self.barge_in()
+        boundary = self.utterances.audio(pcm_ms(len(pcm)), speaking)
+        if boundary is Utterance.STARTED:
+            self.cancel_resume()
+            if not self.audible():
+                self.hold()
+        if self.utterances.speaking and self.utterances.duration_ms >= self.rule.min_speech_ms:
+            self.cancel_resume()
+            self.pause(self.rule.false_interruption_timeout_s)
+        if boundary is Utterance.ENDED and self.resume_after_s is not None:
+            self.resume_timer = asyncio.get_running_loop().call_later(self.resume_after_s, self.resume)
         await self.stt.feed(pcm, speaking)
+
+    def audible(self) -> bool:
+        """The reply's audio is playing at the caller (LiveKit's agent state "speaking")."""
+        outbound = self.call.outbound
+        return self.item is not None and outbound.played_ms(self.item) < outbound.sent_ms(self.item)
+
+    def hold(self) -> None:
+        """Caller speech while the reply is not audible (yet): LiveKit pauses it, to resume as soon
+        as that utterance ends unless it becomes an interruption or a turn."""
+        if self.resume_after_s is None:
+            self.pause(0.0)
+
+    def pause(self, resume_after_s: float) -> None:
+        """Hold the reply's audio (what already went out still plays) until a false interruption
+        resumes it ``resume_after_s`` after the caller's utterance ends, or a turn interrupts it."""
+        if not self.replying or self.cut:
+            return
+        if self.resume_after_s is None:
+            logger.info("caller speech over the agent: its reply is paused")
+            self.playing.clear()
+        self.resume_after_s = resume_after_s
+
+    def resume(self) -> None:
+        """The caller's utterance ended with no turn: a false interruption, the reply goes on."""
+        self.resume_timer = None
+        if self.resume_after_s is None or not self.replying or self.cut:
+            return
+        logger.info("false interruption: the reply resumes")
+        self.unpause()
+
+    def unpause(self) -> None:
+        self.cancel_resume()
+        self.resume_after_s = None
+        self.playing.set()
+
+    def cancel_resume(self) -> None:
+        if self.resume_timer is not None:
+            self.resume_timer.cancel()
+            self.resume_timer = None
 
     def barge_in(self) -> None:
         if not self.replying or self.cut:
             return
-        logger.info("barge-in: the caller talks over the agent; the rest of this turn is silenced")
+        logger.info("barge-in: the caller spoke a turn over the agent; the rest of this turn is silenced")
         self.cut = True
+        self.unpause()
         if self.player is not None:
             self.player.cancel()
         self.call.outbound.interrupted()
@@ -299,6 +381,7 @@ class _CascadeCall:
             return
         logger.info("caller turn (%d chars)", len(text))  # never the words: a caller may read out a card
         self.call.start.mark_callee_spoke()
+        self.barge_in()  # LiveKit: a final transcript interrupts the reply under way
         self.turns.put_nowait(text)
 
     # --- the conversation ---------------------------------------------------------------------
@@ -320,11 +403,13 @@ class _CascadeCall:
     async def respond(self) -> bool:
         """Answer the conversation so far; True when the agent has hung up."""
         self.replying, self.cut = True, False
-        self.barge.reset()
+        if self.utterances.speaking:  # the caller is mid-utterance: the reply starts paused
+            self.hold()
         try:
             await self.rounds()
         finally:
-            self.replying = False
+            self.replying, self.item = False, None
+            self.unpause()
         if self.call.session.ended:
             await self.call.hang_up()
             return True
@@ -333,7 +418,7 @@ class _CascadeCall:
     async def rounds(self) -> None:
         for _ in range(MAX_TOOL_ROUNDS):
             self.n_items += 1
-            item = f"reply-{self.n_items}"
+            item = self.item = f"reply-{self.n_items}"
             calls: list[ToolCall] = []
             said = await self.say(self.round_text(calls), item)
             message: Message = {"role": "assistant"}
@@ -417,6 +502,7 @@ class _CascadeCall:
                     ahead = outbound.sent_ms(item) - outbound.played_ms(item)
                     if ahead > PLAYBACK_LEAD_MS:
                         await asyncio.sleep((ahead - PLAYBACK_LEAD_MS) / 1000)
+                    await self.playing.wait()  # held while caller speech pauses the reply
                     await outbound.send(pcm[i : i + slice_bytes], item)
         self.complete.add(item)
 

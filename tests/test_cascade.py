@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -20,12 +21,14 @@ import pytest
 from vamos_voice.providers.cascade import (
     BAD_ARGUMENTS,
     INTERRUPTED_MARKER,
+    MIN_SILENCE_MS,
+    MIN_SPEECH_MS,
     PLAYBACK_LEAD_MS,
     PLAYBACK_SLICE_MS,
-    UTTERANCE_GAP_MS,
-    BargeInDetector,
     BargeInRule,
+    CallerUtterances,
     SilenceEndpoint,
+    Utterance,
 )
 
 from .cascade_fakes import SILENCE, FakeLLM, FakeTTS, ScriptedCascade, tool, wait_until
@@ -46,13 +49,19 @@ async def stop(task: asyncio.Task) -> None:
     await asyncio.gather(task, return_exceptions=True)
 
 
+def paused(caplog: pytest.LogCaptureFixture) -> bool:
+    """Caller speech has paused the reply (the cascade holds its audio)."""
+    return "its reply is paused" in caplog.text
+
+
 async def test_callee_first_the_model_waits_for_the_callees_first_turn() -> None:
     llm = FakeLLM(["Hi, this is Remi. May I speak with Marcus?"])
     provider = ScriptedCascade(llm)
     call, line, _, task = await start(provider)
 
-    await line.incoming.put(HELLO)  # the callee's "Hello?" goes to STT at once
-    await wait_until(lambda: provider.stt.fed)
+    await line.incoming.put(HELLO)  # the callee's "Hello?" goes to STT at once...
+    await line.incoming.put(SILENCE * 30)  # ...and ends
+    await wait_until(lambda: len(provider.stt.fed) == 2)
     await asyncio.sleep(0.05)
     assert llm.requests == [] and not call.start.callee_spoke
 
@@ -157,24 +166,32 @@ async def test_turns_that_finish_while_the_agent_answers_are_answered_together()
     await stop(task)
 
 
-async def test_barge_in_silences_the_turn_runs_its_tools_and_keeps_only_what_was_heard() -> None:
+async def test_caller_speech_pauses_the_reply_and_a_caller_turn_interrupts_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="vamos_voice.providers.cascade")
     reply = " ".join(f"word{i}" for i in range(40))  # 4 s of audio at the fake's 100 ms a word
     llm = FakeLLM([reply, tool("get_account")], ["Never asked for."])
     provider = ScriptedCascade(llm, tts=FakeTTS(chunk_delay_s=0.01))
     call, line, session, task = await start(provider, FAKE_INBOUND)
     await wait_until(lambda: line.sent)
     await asyncio.sleep(0.3)  # the caller hears ~0.3 s of the reply...
-    for _ in range(3):  # ...and talks over it for 0.6 s
+    for _ in range(3):  # ...and talks over it for 0.6 s: the reply pauses
         await line.incoming.put(HELLO)
+    await wait_until(lambda: paused(caplog))
+    held = call.outbound.sent_ms("reply-1")
+    await asyncio.sleep(0.2)
+    assert call.outbound.sent_ms("reply-1") == held, "nothing more goes out while paused"
+    assert not session.calls and provider.tts.clears == 0, "a pause is not an interruption"
+
+    await provider.stt.turns.put("Wait, what?")  # the STT's final transcript: the interruption
     await wait_until(lambda: session.calls)
     await asyncio.sleep(0.1)
-
     assert session.calls == [("get_account", {})], "the round's tool call still runs"
-    assert len(llm.requests) == 1, "the turn ends: no round after the barge-in"
     assert provider.tts.clears == 1
     assert call.outbound.sent_ms("reply-1") < 4000, "the rest of the reply never went out"
-    await provider.stt.turns.put("Wait, what?")
     await wait_until(lambda: len(llm.requests) == 2)
+    assert llm.requests[1][0][-1] == {"role": "user", "content": "Wait, what?"}
     assistant = llm.requests[1][0][-3]
     assert (
         assistant["role"] == "assistant" and assistant["tool_calls"][0]["function"]["name"] == "get_account"
@@ -185,38 +202,86 @@ async def test_barge_in_silences_the_turn_runs_its_tools_and_keeps_only_what_was
     await stop(task)
 
 
-async def test_a_blip_of_caller_speech_does_not_interrupt_the_reply() -> None:
+async def test_a_false_interruption_resumes_the_reply_where_it_paused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="vamos_voice.providers.cascade")
+    reply = " ".join(f"word{i}" for i in range(20))  # 2 s of audio
+    llm = FakeLLM([reply])
+    provider = ScriptedCascade(llm, tts=FakeTTS(chunk_delay_s=0.01))
+    provider.barge_in_rule = BargeInRule(false_interruption_timeout_s=0.2)
+    call, line, _, task = await start(provider, FAKE_INBOUND)
+    await wait_until(lambda: line.sent)
+    for _ in range(3):  # 0.6 s of caller speech (a cough, the television): the reply pauses...
+        await line.incoming.put(HELLO)
+    await wait_until(lambda: paused(caplog))
+    await line.incoming.put(SILENCE * 30)  # ...the utterance ends, and no turn follows
+    await wait_until(lambda: call.outbound.sent_ms("reply-1") == 2000, within=6)
+    assert provider.tts.clears == 0 and "false interruption: the reply resumes" in caplog.text
+    await stop(task)
+
+
+async def test_speech_before_the_reply_is_heard_holds_it_and_does_not_silence_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The regression: caller audio in the second after a turn (the bench's background noise)
+    silenced the reply before a word of it played; LiveKit holds the reply, then resumes it."""
+    caplog.set_level(logging.INFO, logger="vamos_voice.providers.cascade")
+    gate = asyncio.Event()
+
+    class SlowLLM(FakeLLM):
+        async def reply(self, messages, tools):
+            self.requests.append(([dict(m) for m in messages], tools))
+            await gate.wait()
+            yield "Hi, this is Remi."
+
+    llm = SlowLLM()
+    provider = ScriptedCascade(llm)
+    provider.barge_in_rule = BargeInRule(false_interruption_timeout_s=0.2)
+    call, line, _, task = await start(provider)
+    await provider.stt.turns.put("Hello?")
+    await wait_until(lambda: llm.requests)
+    for _ in range(4):  # 0.8 s of noise while the model is thinking
+        await line.incoming.put(HELLO)
+    await wait_until(lambda: paused(caplog))
+    gate.set()
+    await asyncio.sleep(0.1)
+    assert not line.sent, "held while the caller's utterance lasts"
+    await line.incoming.put(SILENCE * 30)
+    await wait_until(lambda: call.outbound.sent_ms("reply-1") == 400)
+    assert provider.tts.spoken == ["Hi, this is Remi."] and provider.tts.clears == 0
+    await stop(task)
+
+
+async def test_a_blip_of_caller_speech_does_not_pause_the_reply() -> None:
     reply = " ".join(f"word{i}" for i in range(10))
     llm = FakeLLM([reply])
     provider = ScriptedCascade(llm, tts=FakeTTS(chunk_delay_s=0.01))
     call, line, _, task = await start(provider, FAKE_INBOUND)
     await wait_until(lambda: line.sent)
     await line.incoming.put(HELLO)  # 0.2 s: a cough, a noise burst
-    await line.incoming.put(SILENCE * 20)  # 0.4 s gap: a new utterance next
+    await line.incoming.put(SILENCE * 30)  # 0.6 s: that utterance ends
     await line.incoming.put(HELLO)
     await wait_until(lambda: call.outbound.sent_ms("reply-1") >= 1000)
     assert provider.tts.clears == 0
     await stop(task)
 
 
-def test_barge_in_rule_is_livekit_agents_default_half_a_second() -> None:
-    assert BargeInRule() == BargeInRule(min_speech_ms=500)
+def test_barge_in_rule_is_livekit_agents_default_interruption_handling() -> None:
+    assert BargeInRule() == BargeInRule(min_speech_ms=500, false_interruption_timeout_s=2.0)
     assert ScriptedCascade.barge_in_rule == BargeInRule()
+    assert (MIN_SPEECH_MS, MIN_SILENCE_MS) == (50, 550)  # LiveKit's Silero stream defaults
 
 
-def test_barge_in_detector_counts_one_utterance_from_the_reply_start() -> None:
-    gaps = BargeInDetector(BargeInRule())
-    assert not gaps.audio(480, speaking=True)
-    assert gaps.audio(UTTERANCE_GAP_MS - 20, speaking=False) is False  # a pause between words
-    assert gaps.audio(20, speaking=True), "500 ms of speech in one utterance"
-    gaps.reset()  # the next reply
-    assert gaps.speech_ms == 0
-
-    duration = BargeInDetector(BargeInRule())
-    assert not duration.audio(400, speaking=True)
-    assert not duration.audio(UTTERANCE_GAP_MS, speaking=False)  # the utterance ended
-    assert not duration.audio(400, speaking=True), "two short blips are not 0.5 s of speech"
-    assert duration.audio(100, speaking=True)
+def test_caller_utterances_are_segmented_as_livekits_silero_stream() -> None:
+    u = CallerUtterances()
+    assert u.audio(40, speech=True) is None, "under 50 ms of speech starts nothing"
+    assert u.audio(20, speech=True) is Utterance.STARTED
+    assert u.audio(MIN_SILENCE_MS - 20, speech=False) is None  # a pause between words...
+    assert u.speaking and u.duration_ms == 60 + MIN_SILENCE_MS - 20, "...counts toward the duration"
+    assert u.audio(20, speech=True) is None
+    assert u.audio(MIN_SILENCE_MS, speech=False) is Utterance.ENDED
+    assert not u.speaking and u.duration_ms == 0
 
 
 async def test_playout_runs_at_most_a_second_ahead_of_real_time() -> None:

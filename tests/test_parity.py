@@ -924,7 +924,7 @@ def _tools_of(request_tools: list[dict[str, Any]]) -> dict[str, tuple[set[str], 
 async def test_cascade_vendor_waits_for_the_callee(name: str, agent: str) -> None:
     if not installed(name):
         pytest.skip(f"{name} extra not installed")
-    from .cascade_fakes import FakeLLM, tool, wait_until, with_fake_legs
+    from .cascade_fakes import SILENCE, FakeLLM, tool, wait_until, with_fake_legs
 
     case = CASES[agent]
     llm = FakeLLM(["Hi, this is the agent.", tool("end_call")])
@@ -935,7 +935,8 @@ async def test_cascade_vendor_waits_for_the_callee(name: str, agent: str) -> Non
     task = asyncio.create_task(provider.run_call(call))
 
     await line.incoming.put(HELLO)  # the callee answers: straight to STT, nothing asks the model
-    await wait_until(lambda: stt.fed)
+    await line.incoming.put(SILENCE * 30)  # ...and stops talking (a reply would wait for that)
+    await wait_until(lambda: len(stt.fed) == 2)
     await asyncio.sleep(0.05)
     assert llm.requests == [] and line.sent == []
 
