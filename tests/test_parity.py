@@ -803,6 +803,20 @@ def test_pipecat_sends_the_same_instructions_and_tools(agent: str) -> None:
     )
 
 
+@pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
+def test_pipecat_runs_its_own_model_default_and_turn_start() -> None:
+    from pipecat.turns.user_turn_strategies import default_user_turn_start_strategies
+
+    from vamos_voice.providers.base import TurnTaking
+    from vamos_voice.providers.pipecat import PipecatProvider, turn_strategies
+
+    assert (
+        PipecatProvider.from_env({"OPENAI_API_KEY": "k", "DEEPGRAM_API_KEY": "d"}).llm_model == "gpt-4.1-mini"
+    )
+    start = turn_strategies(TurnTaking()).start or []
+    assert [type(s) for s in start] == [type(s) for s in default_user_turn_start_strategies()]
+
+
 def _pipecat_request(provider: Any, call: Any) -> dict[str, Any]:
     """What the pipeline's first completion sends: the system instruction plus the context."""
     llm = provider.build_llm(call.setup)

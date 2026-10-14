@@ -3,7 +3,8 @@
 Defaults (each overridable by env, see AGENTS.md "Config contract"):
 
 - STT: Deepgram ``nova-3`` streaming (``VAMOS_PIPECAT_STT=deepgram``), or OpenAI (``openai``).
-- LLM: OpenAI chat completions, ``gpt-4.1`` (``VAMOS_PIPECAT_LLM_MODEL``).
+- LLM: OpenAI chat completions, ``gpt-4.1-mini`` (``VAMOS_PIPECAT_LLM_MODEL``), the text model of
+  every pipeline vendor.
 - TTS: OpenAI ``gpt-4o-mini-tts`` voice ``marin`` (``VAMOS_PIPECAT_TTS=openai``), or
   Cartesia (``cartesia``, needs ``CARTESIA_API_KEY`` and ``VAMOS_CARTESIA_VOICE_ID``).
 
@@ -42,7 +43,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
-from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy
 from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
@@ -56,7 +56,7 @@ from .services import STT_FACTORIES, TTS_FACTORIES, ServiceConfig
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LLM_MODEL = "gpt-4.1"
+DEFAULT_LLM_MODEL = "gpt-4.1-mini"
 VAD_EDGE_S = 0.2
 
 
@@ -68,6 +68,13 @@ def vad_params(turns: TurnTaking) -> VADParams:
 def user_speech_timeout_s(turns: TurnTaking) -> float:
     """Silero's stop edge plus this timeout is the shared ``silence_ms``."""
     return max(0.0, turns.silence_ms / 1000 - VAD_EDGE_S)
+
+
+def turn_strategies(turns: TurnTaking) -> UserTurnStrategies:
+    """Pipecat's own start strategies (VAD, then transcription); noise is a benchmark condition."""
+    return UserTurnStrategies(
+        stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=user_speech_timeout_s(turns))]
+    )
 
 
 class PipecatToolFormat:
@@ -144,14 +151,7 @@ class PipecatProvider(VoiceProvider):
             context,
             user_params=LLMUserAggregatorParams(
                 vad_analyzer=self._vad or SileroVADAnalyzer(params=vad_params(turns)),
-                user_turn_strategies=UserTurnStrategies(
-                    # A user turn starts on a final transcript, not on raw VAD: background noise must
-                    # not interrupt the agent or cancel a tool call.
-                    start=[TranscriptionUserTurnStartStrategy(use_interim=False)],
-                    stop=[
-                        SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=user_speech_timeout_s(turns))
-                    ],
-                ),
+                user_turn_strategies=turn_strategies(turns),
             ),
         )
         pipeline = Pipeline(
