@@ -28,7 +28,7 @@ from vamos_voice.providers.cascade import (
     SilenceEndpoint,
 )
 
-from .cascade_fakes import SILENCE, FakeLLM, FakeSTT, FakeTTS, ScriptedCascade, tool, wait_until
+from .cascade_fakes import SILENCE, FakeLLM, FakeTTS, ScriptedCascade, tool, wait_until
 from .fakes import FAKE_INBOUND, HELLO, REMI, FakeLine, ScriptedSession, runtime
 
 SPEECH = Path(__file__).parent / "fixtures" / "caller_speech_24k.pcm"
@@ -199,38 +199,20 @@ async def test_a_blip_of_caller_speech_does_not_interrupt_the_reply() -> None:
     await stop(task)
 
 
-async def test_with_interim_text_barge_in_also_needs_a_transcribed_word() -> None:
-    reply = " ".join(f"word{i}" for i in range(40))
-    llm = FakeLLM([reply])
-    provider = ScriptedCascade(llm, stt=FakeSTT(interim_text=True), tts=FakeTTS(chunk_delay_s=0.01))
-    call, line, _, task = await start(provider, FAKE_INBOUND)
-    await wait_until(lambda: line.sent)
-    for _ in range(4):  # 0.8 s of speech the STT hears no words in (background noise)
-        await line.incoming.put(HELLO)
-    await wait_until(lambda: len(provider.stt.fed) >= 4)
-    await asyncio.sleep(0.05)
-    assert provider.tts.clears == 0
-    provider.stt.on_interim("wait")
-    await wait_until(lambda: provider.tts.clears == 1)
-    assert call.outbound.sent_ms("reply-1") < 4000
-    await stop(task)
-
-
-def test_barge_in_rule_defaults_to_half_a_second_and_one_word() -> None:
-    assert BargeInRule() == BargeInRule(min_speech_ms=500, min_words=1)
+def test_barge_in_rule_is_livekit_agents_default_half_a_second() -> None:
+    assert BargeInRule() == BargeInRule(min_speech_ms=500)
     assert ScriptedCascade.barge_in_rule == BargeInRule()
 
 
 def test_barge_in_detector_counts_one_utterance_from_the_reply_start() -> None:
-    words = BargeInDetector(BargeInRule(), needs_words=True)
-    assert not words.audio(480, speaking=True)
-    assert not words.audio(UTTERANCE_GAP_MS - 20, speaking=False)  # a pause between words
-    assert not words.audio(20, speaking=True), "500 ms of speech, but no word yet"
-    assert words.interim("hold on")
-    words.reset()  # the next reply
-    assert not words.interim("hold") and words.speech_ms == 0
+    gaps = BargeInDetector(BargeInRule())
+    assert not gaps.audio(480, speaking=True)
+    assert gaps.audio(UTTERANCE_GAP_MS - 20, speaking=False) is False  # a pause between words
+    assert gaps.audio(20, speaking=True), "500 ms of speech in one utterance"
+    gaps.reset()  # the next reply
+    assert gaps.speech_ms == 0
 
-    duration = BargeInDetector(BargeInRule(), needs_words=False)
+    duration = BargeInDetector(BargeInRule())
     assert not duration.audio(400, speaking=True)
     assert not duration.audio(UTTERANCE_GAP_MS, speaking=False)  # the utterance ended
     assert not duration.audio(400, speaking=True), "two short blips are not 0.5 s of speech"

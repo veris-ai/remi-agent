@@ -112,7 +112,6 @@ class GeminiLiveProvider(VoiceProvider):
         )
 
     def setup_message(self, setup: SessionSetup) -> dict[str, Any]:
-        turns = setup.turn_taking
         return {
             "setup": {
                 "model": f"models/{self.model}",
@@ -122,12 +121,9 @@ class GeminiLiveProvider(VoiceProvider):
                 },
                 "systemInstruction": {"parts": [{"text": setup.instructions}]},
                 "tools": self.tool_format.convert(setup.tools),
+                # Gemini's own automatic activity detection, on its default sensitivities and timings.
                 "realtimeInputConfig": {
-                    "automaticActivityDetection": {
-                        "disabled": False,
-                        "prefixPaddingMs": turns.prefix_padding_ms,
-                        "silenceDurationMs": turns.silence_ms,
-                    },
+                    "automaticActivityDetection": {"disabled": False},
                     "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                 },
                 "inputAudioTranscription": {},

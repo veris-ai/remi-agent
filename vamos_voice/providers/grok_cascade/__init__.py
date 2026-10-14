@@ -9,10 +9,10 @@ other cascades, as on the VAmoS Energy "Grok STT + TTS cascade" candidates
 - **STT**: ``wss://api.x.ai/v1/stt`` (``wire.connect_websocket``), the
   caller's 24 kHz PCM16 sent unconverted as binary frames, ``language=en``,
   ``format=true`` (spoken numbers come back as digits). **End of turn is
-  xAI's**: Smart Turn (``smart_turn=0.7``, xAI's setting for callers reading
-  out numbers; ``smart_turn_timeout=3000`` ms closes a turn after that much
-  silence regardless). Only an utterance final (``speech_final``) is a turn;
-  it restates the whole utterance. Silero (local) drives barge-in only.
+  xAI's**, on its defaults: VAD endpointing (``endpointing``, 400 ms of
+  silence); Smart Turn has no default value and is off unless asked for, so it
+  is not sent. Only an utterance final (``speech_final``) is a turn; it
+  restates the whole utterance. Silero (local) drives barge-in only.
 - **LLM**: ``VAMOS_GROK_CASCADE_LLM``: ``gpt-4.1-mini`` (default, the other
   cascades' model, on OpenAI: needs ``OPENAI_API_KEY``) or ``grok-4.3`` (on
   xAI's OpenAI-compatible API, ``reasoning_effort: "none"``). Streamed through
@@ -46,7 +46,6 @@ from vamos_voice.audio import CHANNEL_RATE_HZ
 from vamos_voice.providers.base import CallRuntime
 from vamos_voice.providers.cascade import (
     CascadeProvider,
-    InterimSink,
     SpeechToText,
     TextToSpeech,
     TurnSink,
@@ -57,9 +56,6 @@ logger = logging.getLogger(__name__)
 
 STT_URL = "wss://api.x.ai/v1/stt"
 TTS_URL = "wss://api.x.ai/v1/tts"
-#: Smart Turn: only an end-of-turn score above this ends the caller's turn (xAI's value for number reading).
-SMART_TURN = 0.7
-SMART_TURN_TIMEOUT_MS = 3000
 
 
 @dataclass(frozen=True)
@@ -113,8 +109,6 @@ class GrokCascadeConfig:
             "sample_rate": CHANNEL_RATE_HZ,
             "language": "en",
             "format": "true",
-            "smart_turn": SMART_TURN,
-            "smart_turn_timeout": SMART_TURN_TIMEOUT_MS,
         }
         return f"{STT_URL}?{urlencode(query)}"
 
@@ -124,9 +118,7 @@ class GrokCascadeConfig:
 
 
 class GrokSTT(SpeechToText):
-    """xAI streaming STT; its Smart Turn decides where the caller's turn ends."""
-
-    interim_text = True  # transcript.partial before speech_final
+    """xAI streaming STT; its endpointing decides where the caller's turn ends."""
 
     def __init__(self, ws: Any) -> None:
         self.ws = ws
@@ -140,7 +132,7 @@ class GrokSTT(SpeechToText):
     async def feed(self, pcm: bytes, speaking: bool) -> None:
         await self.ws.send(pcm)
 
-    async def run(self, on_turn: TurnSink, on_interim: InterimSink) -> None:
+    async def run(self, on_turn: TurnSink) -> None:
         while True:
             try:
                 event = json.loads(await self.ws.recv())
@@ -150,8 +142,6 @@ class GrokSTT(SpeechToText):
             kind = event.get("type")
             if kind == "transcript.partial" and event.get("speech_final"):
                 await on_turn(event.get("text") or "")
-            elif kind == "transcript.partial":
-                on_interim(event.get("text") or "")
             elif kind == "error":
                 raise RuntimeError(f"xAI STT error: {event.get('message')}")
 

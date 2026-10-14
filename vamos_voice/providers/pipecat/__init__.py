@@ -30,7 +30,6 @@ from typing import Any, Self
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import EndFrame, Frame, FunctionCallResultProperties, LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -43,11 +42,10 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
-from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from vamos_voice.audio import CHANNEL_RATE_HZ
-from vamos_voice.providers.base import CallRuntime, SessionSetup, TurnTaking, VoiceProvider
+from vamos_voice.providers.base import CallRuntime, SessionSetup, VoiceProvider
 from vamos_voice.session import CallSession
 from vamos_voice.tools import ToolSpec
 
@@ -57,24 +55,6 @@ from .services import STT_FACTORIES, TTS_FACTORIES, ServiceConfig
 logger = logging.getLogger(__name__)
 
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
-VAD_EDGE_S = 0.2
-
-
-def vad_params(turns: TurnTaking) -> VADParams:
-    """Silero's edges are fixed short; the shared end-of-turn silence is made up by the stop strategy."""
-    return VADParams(confidence=turns.vad_threshold, start_secs=VAD_EDGE_S, stop_secs=VAD_EDGE_S)
-
-
-def user_speech_timeout_s(turns: TurnTaking) -> float:
-    """Silero's stop edge plus this timeout is the shared ``silence_ms``."""
-    return max(0.0, turns.silence_ms / 1000 - VAD_EDGE_S)
-
-
-def turn_strategies(turns: TurnTaking) -> UserTurnStrategies:
-    """Pipecat's own start strategies (VAD, then transcription); noise is a benchmark condition."""
-    return UserTurnStrategies(
-        stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=user_speech_timeout_s(turns))]
-    )
 
 
 class PipecatToolFormat:
@@ -106,7 +86,7 @@ class PipecatProvider(VoiceProvider):
 
     async def warm_up(self) -> None:
         # Silero's ONNX model takes seconds to load: do it before /health says ready, not on the call.
-        self._vad = await asyncio.to_thread(SileroVADAnalyzer, params=vad_params(TurnTaking()))
+        self._vad = await asyncio.to_thread(SileroVADAnalyzer)
 
     # --- what goes to the LLM ----------------------------------------------------------------
 
@@ -127,6 +107,13 @@ class PipecatProvider(VoiceProvider):
         message = {"role": "system", "content": setup.start_policy.opening_instruction}
         return [LLMMessagesAppendFrame([message], run_llm=True)]
 
+    def user_params(self) -> LLMUserAggregatorParams:
+        """Pipecat's own turn taking: Silero on its default parameters, the default start strategies
+        (VAD, then transcription) and stop strategy (Smart Turn v3)."""
+        return LLMUserAggregatorParams(
+            vad_analyzer=self._vad or SileroVADAnalyzer(), user_turn_strategies=UserTurnStrategies()
+        )
+
     # --- the call --------------------------------------------------------------------------
 
     async def run_call(self, call: CallRuntime) -> None:
@@ -134,7 +121,6 @@ class PipecatProvider(VoiceProvider):
         await PipelineRunner(handle_sigint=False).run(worker)
 
     def build_worker(self, call: CallRuntime, context: LLMContext) -> PipelineWorker:
-        turns = call.setup.turn_taking
         transport = FastAPIWebsocketTransport(
             websocket=call.line.websocket,
             params=FastAPIWebsocketParams(
@@ -149,10 +135,7 @@ class PipecatProvider(VoiceProvider):
         llm.register_function(None, _dispatcher(call.session))
         user, assistant = LLMContextAggregatorPair(
             context,
-            user_params=LLMUserAggregatorParams(
-                vad_analyzer=self._vad or SileroVADAnalyzer(params=vad_params(turns)),
-                user_turn_strategies=turn_strategies(turns),
-            ),
+            user_params=self.user_params(),
         )
         pipeline = Pipeline(
             [
