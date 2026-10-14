@@ -542,7 +542,7 @@ Vendors:
 | `GEMINI_API_KEY` | gemini_live | Gemini **Developer API** key. Required. |
 | `VAMOS_GEMINI_MODEL` / `VAMOS_GEMINI_VOICE` | gemini_live | Defaults `gemini-2.5-flash-native-audio-preview-12-2025` / `Puck`. |
 | `VAMOS_PIPECAT_STT` / `VAMOS_PIPECAT_TTS` | pipecat | `deepgram` (default) or `openai` / `openai` (default) or `cartesia`. |
-| `VAMOS_PIPECAT_LLM_MODEL` | pipecat | Default `gpt-4.1`. |
+| `VAMOS_PIPECAT_LLM_MODEL` | pipecat | Default `gpt-4.1-mini`. |
 | `DEEPGRAM_API_KEY` / `VAMOS_DEEPGRAM_MODEL` | pipecat + deepgram | Key required; model default `nova-3-general`. |
 | `VAMOS_OPENAI_STT_MODEL` / `VAMOS_OPENAI_TTS_MODEL` | pipecat | Defaults `gpt-4o-transcribe` / `gpt-4o-mini-tts` (voice `VAMOS_OPENAI_VOICE`). |
 | `CARTESIA_API_KEY` / `VAMOS_CARTESIA_VOICE_ID` | pipecat + cartesia | Both required with `VAMOS_PIPECAT_TTS=cartesia`. |
