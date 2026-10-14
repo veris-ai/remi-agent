@@ -180,8 +180,10 @@ approval, and whether settlement is allowed at all or only after a hardship)
 plus the policy's `rules` in plain English, and
 `request_approval(account_id, option_id)` (approved only with a hardship on the
 account; logged). The prompt holds no creditor's rules: it tells the model to
-follow the rules `get_payment_options` returns (the World's text, verbatim),
-offer only the menu's amounts, and hand anything outside it to a person. Code enforces the
+follow the rules `get_payment_options` returns (the World's text, verbatim)
+and offer nothing that is not on its list; what unlocks an option, what an
+option with a status means and when to hand the consumer to a person come from
+the tool's rules, statuses and `allowed_now`, not the prompt. Code enforces the
 same: the money tools take an `option_id`, never an amount
 (`menu.checked_option`), and the World refuses off-menu money itself: inside
 `gateway_charge` before any payment row, and in a trigger on `arrangements`
