@@ -26,9 +26,15 @@ The protocol (developers.openai.com "Live conversations", "Live delegation"):
   makes it act with ``session.instructions.append`` (a trusted instruction,
   not a user turn, so nothing has to be labelled).
 
+Delegation: the live model is never given the backend's tools, so its
+instructions open with the list of them (``live_instructions``), as OpenAI's
+live-prompting guide asks; without it GPT-Live handed off at its own
+discretion and often not at all (smoke trial_5jpr50dil1axg9b1unegn: 0 of 117
+calls reached end_call, 16 made no tool call at all).
+
 Call start: ``session.start`` carries the instructions with the agent's
-screen pop already in them, for the live model and, after the preamble, for
-the backend, whose ``tool_choice`` is ``"auto"``: no read is ever forced.
+screen pop already in them, for the live model (after the delegation
+preamble) and, after its own preamble, for the backend, whose ``tool_choice`` is ``"auto"``: no read is ever forced.
 Caller audio flows after ``session.started``. ``CALLEE_FIRST``: no agent
 audio leaves before the callee's first transcribed words. ``AGENT_FIRST``: an
 instruction append carrying the policy's ``opening_instruction``.
@@ -68,6 +74,29 @@ BACKEND_PREAMBLE = (
 )
 
 
+#: The live model runs no tools and is not given the backend's: OpenAI's live-prompting guide says to list
+#: the backend's capabilities in the live prompt ("GPT-Live uses this list to decide which requests to hand
+#: off") and to delegate before an answer that depends on backend work. Protocol mechanics only, the same
+#: for every agent; the list itself is generated from the call's tools.
+LIVE_PREAMBLE = (
+    "You speak with the caller; a backend carries out every action. Each action your instructions below "
+    "name is one of the backend's, listed here. Delegate to the backend whenever your instructions call for "
+    "one of them, and before you say anything that depends on its result; never say an action's result, or "
+    "a fact only an action returns, before the backend reports it.\n\nBackend actions:\n"
+)
+
+
+def _first_sentence(text: str) -> str:
+    head, dot, _ = text.strip().partition(". ")
+    return head + "." if dot else head
+
+
+def live_instructions(setup: SessionSetup) -> str:
+    """The live model's instructions: the delegation preamble, the backend's actions, then the agent's own."""
+    actions = "\n".join(f"- {t.name}: {_first_sentence(t.description)}" for t in setup.tools)
+    return f"{LIVE_PREAMBLE}{actions}\n\n{setup.instructions}"
+
+
 def instruction(content: str) -> dict[str, Any]:
     """``session.instructions.append`` for the whole session (not one delegation)."""
     return {"type": "session.instructions.append", "delegation_id": None, "content": content}
@@ -100,7 +129,7 @@ class GptLiveProvider(VoiceProvider):
             "type": "session.start",
             "session": {
                 "model": self.model,
-                "instructions": setup.instructions,
+                "instructions": live_instructions(setup),
                 "audio": {"format": {"type": "audio/pcm", "rate": RATE_HZ}, "output": {"voice": self.voice}},
                 "delegation": {
                     "type": "responses",
