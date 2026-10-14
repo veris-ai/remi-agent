@@ -223,7 +223,7 @@ class GrokScript(OpenAIScript):
             },
             "silence_ms": vad.get("silence_duration_ms"),
             "prefix_ms": vad.get("prefix_padding_ms"),
-            "transcribes_caller": session["audio"]["input"]["transcription"] == {"model": "grok-transcribe"},
+            "transcribes_caller": session["audio"]["input"]["transcription"]["model"] == "grok-transcribe",
         }
 
 

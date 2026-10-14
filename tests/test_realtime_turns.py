@@ -187,6 +187,18 @@ def test_openai_realtime_pins_the_callers_transcription_to_english() -> None:
     assert transcription["language"] == "en"
 
 
+def test_grok_voice_and_gemini_live_pin_the_callers_transcription_to_english() -> None:
+    from vamos_voice.providers.gemini_live import GeminiLiveProvider
+    from vamos_voice.providers.grok_voice import API_KEY_ENV, GrokVoiceProvider
+
+    grok = GrokVoiceProvider.from_env({API_KEY_ENV: "k"}).session_config(REMI.setup())
+    assert grok["audio"]["input"]["transcription"]["language_hint"] == "en"
+    for model in ("gemini-2.5-flash-native-audio-preview-12-2025", "gemini-3.8-live"):
+        gemini = GeminiLiveProvider("k", model, "Puck").setup_message(REMI.setup())["setup"]
+        assert gemini["inputAudioTranscription"] == {"languageCodes": ["en"]}, model
+        assert "languageCode" not in gemini["generationConfig"]["speechConfig"], "native audio takes none"
+
+
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
 def test_pipecat_speech_services_are_pinned_to_english() -> None:
     from pipecat.transcriptions.language import Language

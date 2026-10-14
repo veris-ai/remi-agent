@@ -5,6 +5,13 @@ exactly what the bench's ``gemini-live`` trace adapter reads off ``send`` and
 ``recv``. The Developer API (not Vertex AI) is required: only there do
 function calls carry an ``id`` the trace can match each tool result to.
 
+Language: every VAmoS call is in English. The caller's transcription is
+pinned with ``inputAudioTranscription.languageCodes: ["en"]`` (the Live API's
+code for English). The language the model speaks has no setting: native-audio
+models (every Live model this provider runs, Gemini 2.5 Flash native audio and
+the Gemini 3 Live models) "don't support explicitly setting the language code",
+so the prompt holds it.
+
 Audio: the channel's 24 kHz PCM16 is resampled to Gemini's native 16 kHz on
 the way in; Gemini's output is 24 kHz, forwarded as is.
 
@@ -40,6 +47,8 @@ ENDPOINT = (
 )
 DEFAULT_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 DEFAULT_VOICE = "Puck"
+#: The caller transcription's language (BCP-47, the Live API's code for English).
+LANGUAGE_CODES = ["en"]
 INPUT_RATE_HZ = 16_000
 
 #: The schema keywords Gemini's function-declaration Schema accepts.
@@ -126,7 +135,7 @@ class GeminiLiveProvider(VoiceProvider):
                     "automaticActivityDetection": {"disabled": False},
                     "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                 },
-                "inputAudioTranscription": {},
+                "inputAudioTranscription": {"languageCodes": LANGUAGE_CODES},
                 "outputAudioTranscription": {},
             }
         }
