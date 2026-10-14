@@ -44,7 +44,7 @@ from typing import Any, Self
 import httpx
 import numpy as np
 
-from vamos_voice.audio import CHANNEL_RATE_HZ, Resampler, pcm_ms
+from vamos_voice.audio import CHANNEL_RATE_HZ, pcm_ms, resample
 from vamos_voice.providers.base import RETRY_BUDGET_S, CallRuntime
 from vamos_voice.providers.cascade import (
     CascadeProvider,
@@ -126,7 +126,7 @@ def wav_to_pcm(data: bytes) -> bytes:
     samples = np.frombuffer(frames, dtype="<i2")
     if channels > 1:
         samples = samples.reshape(-1, channels).mean(axis=1).astype("<i2")
-    return Resampler(rate, CHANNEL_RATE_HZ).process(samples.tobytes())
+    return resample(samples.tobytes(), rate, CHANNEL_RATE_HZ)
 
 
 class WhisperSTT(SpeechToText):
@@ -161,7 +161,7 @@ class WhisperSTT(SpeechToText):
             await on_turn(await self.transcribe(await self.utterances.get()))
 
     async def transcribe(self, pcm: bytes) -> str:
-        wav = pcm_to_wav(Resampler(CHANNEL_RATE_HZ, STT_RATE_HZ).process(pcm), STT_RATE_HZ)
+        wav = pcm_to_wav(resample(pcm, CHANNEL_RATE_HZ, STT_RATE_HZ), STT_RATE_HZ)
         body = {
             "inputs": base64.b64encode(wav).decode(),
             "parameters": {"generate_kwargs": {"language": "en", "task": "transcribe"}},

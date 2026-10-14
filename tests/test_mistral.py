@@ -79,7 +79,8 @@ async def test_voxtral_realtime_declares_16_khz_and_flushes_after_the_silence() 
     await stt.feed(SILENCE, speaking=False)  # 800 ms of silence: the turn is over
     appends = [f for f in sock.sent if f["type"] == "input_audio.append"]
     assert len(appends) == 50
-    assert sum(len(base64.b64decode(f["audio"])) for f in appends) == pytest.approx(50 * 640, abs=4)
+    # all of it at 16 kHz but the resampler's filter lookahead (24 samples), held for the next chunk
+    assert 50 * 640 - sum(len(base64.b64decode(f["audio"])) for f in appends) in range(0, 49)
     assert sock.sent[-1] == {"type": "input_audio.flush"}
 
 

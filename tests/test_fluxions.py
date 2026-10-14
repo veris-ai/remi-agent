@@ -133,7 +133,8 @@ async def test_caller_audio_goes_up_at_16_khz() -> None:
     await line.incoming.put(HELLO)  # 200 ms at 24 kHz
     _, _, _, task = await start(sock, line)
     frame = await sock.wait_for(lambda f: "binary" in f)
-    assert abs(len(frame["binary"]) - len(HELLO) * 2 // 3) <= 4
+    # the resampler holds back its filter lookahead (24 samples, 1.5 ms at 16 kHz) until more audio
+    assert 0 <= len(HELLO) * 2 // 3 - len(frame["binary"]) <= 48
     await stop(task)
 
 
