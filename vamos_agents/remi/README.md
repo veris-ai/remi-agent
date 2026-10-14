@@ -270,12 +270,18 @@ On the hosted orchestrators and LiveKit:
 - **Vapi**: the candidate needs `"public_endpoint": true` (Vapi calls the tools
   back on the pod). Callee first is Vapi's `assistant-waits-for-user`.
 - **Cartesia**: tools run over the agent's own socket (client tools), so no
-  public endpoint. Cartesia reserves the name `end_call`, so Remi's `end_call`
-  is declared as `end_call_` there and mapped back; its gate (the call must be
-  logged first) is unchanged. Cartesia accepts only `type`, `description`,
-  `enum` and `items` in a parameter schema, so bounds and formats (amounts,
-  dates) are not shown to its model; Remi's argument validation still refuses
-  an out-of-range value with a message the model can act on.
+  public endpoint. Cartesia reserves the name `end_call` for its system tool,
+  so Remi's `end_call` is declared as `end_call_` there (same description) and
+  mapped back; its gate (the call must be logged first) is unchanged. Cartesia's
+  own system `end_call` would hang up inside Cartesia, skipping that gate. Cartesia
+  accepts only `type`, `description`, `enum` and `items` in a parameter schema,
+  so `format`/`minimum`/`maximum`/`minLength` are cut; Remi's descriptions state
+  them in words (YYYY-MM-DD, 1-12, ISO-8601) and its argument validation still
+  refuses an out-of-range value. Tool results go unchanged, as on every vendor:
+  Cartesia documents a 4096-byte result cap, but it was tested live on 2026-10-14
+  and not enforced up to 9 KB (a fact at the very end of a 9 KB result reached the
+  model). Remi's largest result, `get_payment_options` on a long plan ladder, is
+  ~5.4 KB.
 - **LiveKit**: the image runs its own `livekit-server`; nothing extra on the bench.
 
 ## Tests

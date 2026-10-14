@@ -479,10 +479,10 @@ whole STT → LLM → TTS loop and its turn taking):
 
 | Capability | vapi | cartesia | livekit |
 |---|---|---|---|
-| What runs where | Vapi: Deepgram `nova-3`, OpenAI `gpt-4.1-mini`, ElevenLabs `eleven_flash_v2` | Cartesia: Ink STT, `gpt-4.1` (its catalog has no `gpt-4.1-mini`), Sonic TTS | this process: LiveKit Agents `AgentSession` (Deepgram `nova-3-general`, `gpt-4.1-mini`, ElevenLabs `eleven_flash_v2`, Silero VAD) in a room on the image's own `livekit-server` |
+| What runs where | Vapi: Deepgram `nova-3`, OpenAI `gpt-4.1-mini`, ElevenLabs `eleven_flash_v2` | Cartesia: Ink STT, `gpt-4.1-mini`, Sonic TTS | this process: LiveKit Agents `AgentSession` (Deepgram `nova-3-general`, `gpt-4.1-mini`, ElevenLabs `eleven_flash_v2`, Silero VAD) in a room on the image's own `livekit-server` |
 | Per-call vendor resources | an inline assistant on the call (nothing stored but the call record) | a managed agent, **deleted at the end of the call**; client tools are shared account resources, reused when identical (an account holds 100) | a room, deleted at the end of the call |
 | Tools reach `CallSession.dispatch` via | Vapi POSTs `tool-calls` to `POST /vendor/vapi/tool` (needs `PUBLIC_BASE_URL`; per-call secret in `X-Vamos-Tool-Secret`, and the message must name the live Vapi call) | `client_tool_call` / `client_tool_result` on the agent's own WebSocket (no webhook, no public endpoint) | raw-schema function tools in-process |
-| Tool schema | the shared JSON schema | cut to `type`/`description`/`enum`/`items` (Cartesia rejects every other keyword); names Cartesia reserves (`end_call`, `send_dtmf`, `voicemail_detection`, `transfer_to_number`) get a trailing `_` on the wire and are mapped back | the shared JSON schema; one tool call per step, up to 10 steps a turn |
+| Tool schema | the shared JSON schema | cut to `type`/`description`/`enum`/`items` (Cartesia rejects every other keyword; Remi's descriptions state the bounds and formats in words); names Cartesia reserves (`end_call`, `send_dtmf`, `voicemail_detection`, `skip_turn`, `transfer_to_number`: HTTP 400, checked live) get a trailing `_` on the wire and are mapped back (its system `end_call` would bypass `CallSession.dispatch`); `pre_tool_speech: off` (required, no default: no vendor nudge to speak first); results go unchanged, as on every vendor (the documented 4096-byte result cap was not enforced in a live check on 2026-10-14, up to 9 KB) | the shared JSON schema; one tool call per step, up to 10 steps a turn |
 | Callee first | `firstMessageMode: assistant-waits-for-user` | `initial_message: null` | nothing is generated before a user turn |
 | Agent first | `assistant-speaks-first-with-model-generated-message` + the opening instruction as a second system message | **no**: no way to request a turn; `opens_calls = False`, startup refuses an agent that speaks first | `generate_reply(instructions=opening_instruction)` |
 | `TurnTaking` mapping | `startSpeakingPlan` (`waitSeconds` = silence, transcription endpointing as the Energy candidate) | none exposed (Cartesia defaults) | Silero silence/prefix/threshold + endpointing `min_delay` |
@@ -567,7 +567,7 @@ Vendors:
 | `VAMOS_VAPI_TRANSCRIBER_MODEL` / `VAMOS_VAPI_TRANSCRIBER_PROVIDER` | vapi | Defaults `nova-3` / `deepgram` (keep a transcriber without its own end-of-turn model, or Vapi ignores `startSpeakingPlan`). |
 | `VAMOS_VAPI_VOICE_ID` / `VAMOS_VAPI_VOICE_MODEL` / `VAMOS_VAPI_VOICE_PROVIDER` | vapi | Defaults `EXAVITQu4vr4xnSDxMaL` / `eleven_flash_v2` / `11labs`. |
 | `CARTESIA_API_KEY` | cartesia | Required. No agent id: the provider creates one per call. |
-| `VAMOS_CARTESIA_MODEL` / `VAMOS_CARTESIA_VOICE_ID` | cartesia | Defaults `gpt-4.1` / `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4` ("Skylar"). |
+| `VAMOS_CARTESIA_MODEL` / `VAMOS_CARTESIA_VOICE_ID` | cartesia | Defaults `gpt-4.1-mini` / `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4` ("Skylar"). |
 | `OPENAI_API_KEY` / `DEEPGRAM_API_KEY` / `ELEVENLABS_API_KEY` | livekit | All required. |
 | `VAMOS_LIVEKIT_LLM_MODEL` / `VAMOS_LIVEKIT_STT_MODEL` / `VAMOS_LIVEKIT_TTS_VOICE_ID` / `VAMOS_LIVEKIT_TTS_MODEL` | livekit | Defaults `gpt-4.1-mini` / `nova-3-general` / `EXAVITQu4vr4xnSDxMaL` / `eleven_flash_v2`. |
 | `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | livekit | Optional. Default: the image's own server at `ws://localhost:7880`, started on loopback with credentials minted per process. Point `LIVEKIT_URL` elsewhere (with its key and secret) to use another server; then none is started. |
@@ -694,7 +694,7 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | `grok_cascade` (Grok 4.3) | omit | `XAI_API_KEY` | `VAMOS_GROK_CASCADE_LLM=grok-4.3` (same image as the row above) |
 | `gradium` | `gradbot` | `GRADIUM_API_KEY`, `OPENAI_API_KEY` | `VAMOS_GRADIUM_LLM_MODEL=gpt-4.1-mini` (Energy's) |
 | `vapi` | `vapi` | `VAPI_API_KEY` (private key) | `VAMOS_VAPI_MODEL` (`gpt-4.1-mini`, as Rory "Vapi"); **and `"public_endpoint": true` in the `image` block** |
-| `cartesia` | `cartesia` | `CARTESIA_API_KEY` | optional `VAMOS_CARTESIA_MODEL` (`gpt-4.1`), `VAMOS_CARTESIA_VOICE_ID`; no public endpoint |
+| `cartesia` | `cartesia` | `CARTESIA_API_KEY` | optional `VAMOS_CARTESIA_MODEL` (`gpt-4.1-mini`), `VAMOS_CARTESIA_VOICE_ID`; no public endpoint |
 | `livekit` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | optional `VAMOS_LIVEKIT_LLM_MODEL` (`gpt-4.1-mini`); no `LIVEKIT_*` (the image's own server) |
 
 Every candidate (every row above) sets `"protocol": "json"` in its channel and

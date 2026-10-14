@@ -338,6 +338,7 @@ def test_cartesia_tools_are_client_tools_cut_to_its_schema_and_renamed_off_its_s
 
     definitions = {d["name"]: d for d in CartesiaProvider("k").tool_format.convert(REMI.setup().tools)}
     assert "end_call" not in definitions and "end_call_" in definitions
+    assert wire_name("skip_turn") == "skip_turn_" and tool_name("skip_turn_") == "skip_turn"
     assert tool_name("end_call_") == "end_call" and tool_name("get_account") == "get_account"
     assert wire_name("transfer_to_human") == "transfer_to_human"
     allowed = {"type", "description", "enum", "items", "properties", "required"}
@@ -352,7 +353,51 @@ def test_cartesia_tools_are_client_tools_cut_to_its_schema_and_renamed_off_its_s
 
     for d in definitions.values():
         assert d["type"] == "client" and d["expects_response"] is True
+        assert d["pre_tool_speech"] == "off", "no vendor nudge to speak before a tool"
         assert keys(d["parameters"]) <= allowed, d["name"]
+
+
+@needs_cartesia
+def test_cartesia_runs_the_shared_text_model() -> None:
+    from vamos_voice.providers.cartesia import CartesiaConfig
+
+    assert CartesiaConfig.from_env({}).model == "gpt-4.1-mini"
+
+
+@needs_cartesia
+async def test_cartesia_sends_a_long_result_byte_identical_to_every_other_vendor() -> None:
+    """Cartesia's documented 4096-byte result cap was not enforced live (2026-10-14, up to 9 KB): no re-encoding."""
+    from pathlib import Path
+
+    # Remi's get_payment_options on the World's longest ladder (TAS-420243: 30 options, ~5.4 KB)
+    ladder = json.loads((Path(__file__).parent / "fixtures" / "remi_long_payment_ladder.json").read_text())
+
+    class LadderSession(ScriptedSession):
+        async def dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+            await super().dispatch(name, args)
+            return ladder
+
+    sock = MixedSocket()
+    rest = CartesiaRest()
+    provider = _cartesia(sock, rest)
+    task = asyncio.create_task(provider.run_call(runtime(REMI, FakeLine(), LadderSession())))
+    await until(lambda: bool(sock.frames()))
+    sock.push({"type": "session_ready", "call_id": "ac_1"})
+    sock.push(
+        {
+            "type": "client_tool_call",
+            "tool_call_id": "c1",
+            "tool_name": "get_payment_options",
+            "parameters": {},
+            "expects_response": True,
+        }
+    )
+    await until(lambda: any(f.get("type") == "client_tool_result" for f in sock.frames()))
+    result = next(f for f in sock.frames() if f.get("type") == "client_tool_result")
+    assert len(result["result"].encode()) > 4096
+    assert result["result"] == json.dumps(ladder, default=str)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @needs_cartesia
