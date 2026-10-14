@@ -546,31 +546,34 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
     payments = " ".join(text.split("# Payments and arrangements")[1].split("# Never")[0].split())
     for line in (
         "The creditor's policy decides the money.",
-        "get_payment_options returns the creditor's options in order and the creditor's rules",
-        "follow those rules exactly",
+        "get_payment_options returns the creditor's options and the creditor's rules: follow those rules exactly.",
         "Offer nothing that is not on the list.",
         "Never offer an option whose conditions the consumer has not met in their own words.",
         'Record a hardship (record_flag "hardship") only when the consumer has stated one.',
         "Nothing on the list fits: transfer_to_human",
-        # smoke v8, the owner's rulings: pay in full first whatever they ask for first; a smaller amount
-        # named turns an option down; a plan's first date is agreed before it is created
-        "Pay in full is always the first offer, even when they ask first for a plan",
-        "When they turn an option down, with a no or by naming a smaller amount, offer the next one",
-        "request_approval before you mention one that needs approval",
+        # smoke v8: a plan's first date is agreed before it is created (how the tools are used, not policy)
         "get their agreement to that date before you create it",
     ):
         assert line in payments, line
-    # one creditor's ladder is the World's rules now, never the prompt's
+    # the bench measures how a model follows the creditor's rules it reads at runtime: the prompt never
+    # restates what to offer, in what order, what unlocks what, or how to move between options
     flat = " ".join(text.split())
-    for hospital in (
+    for policy in (
         "lowest discount",
         "smallest discount",
         "then the plans, then a settlement",
         "A settlement only if",
         "creditor allows no settlement",
         "next rung",
+        "first offer",
+        "offer the next one",
+        "turn an option down",
+        "rules order them",
+        "before you mention one that needs approval",
+        "what to offer first",
+        "what unlocks each option",
     ):
-        assert hospital not in flat, hospital
+        assert policy not in flat, policy
     during = text.split("# During the conversation")[1].split("# Payments")[0]
     for intent, tool in (
         ("Dispute", "log_dispute"),
