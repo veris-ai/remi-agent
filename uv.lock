@@ -1842,7 +1842,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54,<0.55" },
     { name = "websockets", specifier = ">=15,<18" },
 ]
-provides-extras = ["remi", "openai-realtime", "gemini-live", "grok-voice", "gpt-live", "pipecat", "deepgram", "elevenlabs", "fluxions", "mistral", "huggingface", "grok-cascade", "gradium", "vapi", "cartesia", "livekit"]
+provides-extras = ["remi", "openai-realtime", "gemini-live", "grok-voice", "gpt-live", "pipecat", "deepgram", "elevenlabs", "fluxions", "mistral", "huggingface", "grok-cascade", "gradium", "vapi", "cartesia", "livekit", "silent"]
 
 [package.metadata.requires-dev]
 dev = [

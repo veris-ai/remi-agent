@@ -73,6 +73,7 @@ def test_every_vendor_folder_is_covered_here() -> None:
         "vapi",
         "cartesia",
         "livekit",
+        "silent",  # the baseline, not a candidate: tests/test_silent.py
     }
 
 
