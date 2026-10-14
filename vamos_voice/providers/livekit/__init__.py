@@ -22,10 +22,8 @@ Call start: a callee-first agent says nothing until the caller has spoken
 ``generate_reply(instructions=opening_instruction)`` once the session starts.
 The callee-spoke signal is the first non-empty user transcript.
 
-Turn taking is LiveKit's own: Silero VAD with the shared numbers (activation
-threshold, prefix padding, end-of-turn silence) and endpointing ``min_delay``
-at the same silence, no turn-detector model, as on the VAmoS Energy LiveKit
-candidate. Interruptions are LiveKit's. Tool calls run one per step
+Turn taking is LiveKit's own: Silero VAD and ``AgentSession``'s endpointing
+and interruption handling, all on LiveKit's defaults (nothing is passed). Tool calls run one per step
 (``parallel_tool_calls=False``: the tools share verification and payment
 state) and a turn may chain up to 10 tool steps (LiveKit's default of 3 forces
 a spoken reply mid-lookup).
@@ -54,7 +52,7 @@ from livekit.agents.voice import room_io
 from livekit.plugins import deepgram, elevenlabs, openai, silero
 
 from vamos_voice.audio import CHANNEL_RATE_HZ
-from vamos_voice.providers.base import CallRuntime, SessionSetup, TurnTaking, VoiceProvider
+from vamos_voice.providers.base import CallRuntime, SessionSetup, VoiceProvider
 from vamos_voice.providers.wire import run_until_first_done
 from vamos_voice.tools import ToolSpec
 
@@ -115,20 +113,6 @@ class LiveKitConfig:
     @property
     def http_url(self) -> str:
         return self.url.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
-
-
-def vad_options(turns: TurnTaking) -> dict[str, float]:
-    """The shared turn-taking numbers as Silero VAD options."""
-    return {
-        "min_silence_duration": turns.silence_ms / 1000,
-        "prefix_padding_duration": turns.prefix_padding_ms / 1000,
-        "activation_threshold": turns.vad_threshold,
-    }
-
-
-def turn_handling(turns: TurnTaking) -> dict[str, Any]:
-    """Endpointing on silence alone: the effective end of turn is max(VAD silence, ``min_delay``)."""
-    return {"endpointing": {"min_delay": turns.silence_ms / 1000}}
 
 
 class LiveKitToolFormat:
@@ -193,7 +177,7 @@ class LiveKitProvider(VoiceProvider):
         ]
 
     async def warm_up(self) -> None:
-        self._vad = await asyncio.to_thread(silero.VAD.load, **vad_options(TurnTaking()))
+        self._vad = await asyncio.to_thread(silero.VAD.load)
         if not self.config.local_server:
             return
         command = self.server_command()
@@ -213,7 +197,7 @@ class LiveKitProvider(VoiceProvider):
     # --- the pipeline ---------------------------------------------------------------------
 
     def build_session(self, setup: SessionSetup, http: aiohttp.ClientSession) -> AgentSession:
-        c, turns = self.config, setup.turn_taking
+        c = self.config
         return AgentSession(
             # English-only bench: the STT language pinned (the TTS model, eleven_flash_v2, is English-only).
             stt=deepgram.STT(
@@ -223,8 +207,8 @@ class LiveKitProvider(VoiceProvider):
             tts=elevenlabs.TTS(
                 api_key=c.elevenlabs_api_key, voice_id=c.tts_voice_id, model=c.tts_model, http_session=http
             ),
-            vad=self._vad or silero.VAD.load(**vad_options(turns)),
-            turn_handling=turn_handling(turns),
+            # LiveKit's own turn taking: Silero and endpointing on their defaults.
+            vad=self._vad or silero.VAD.load(),
             max_tool_steps=MAX_TOOL_STEPS,
         )
 

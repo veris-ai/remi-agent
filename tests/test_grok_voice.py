@@ -33,7 +33,7 @@ def test_session_keeps_voice_instructions_and_vad_at_the_top_level() -> None:
     session = GrokVoiceProvider("k", "m", "eve").session_config(setup)
     assert session["voice"] == "eve"
     assert session["instructions"] == setup.instructions
-    assert session["turn_detection"] == {"type": "server_vad", "silence_duration_ms": 800}
+    assert session["turn_detection"] == {"type": "server_vad"}, "xAI's own VAD defaults"
     pcm = {"type": "audio/pcm", "rate": 24_000}
     assert session["audio"] == {
         "input": {"format": pcm, "transcription": {"model": "grok-transcribe"}},

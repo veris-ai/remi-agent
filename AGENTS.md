@@ -351,7 +351,9 @@ Remi, and document it here.
    `name = "<name>"`, `trace_adapter`, `required_env`; implement `from_env`
    and `run_call`; export `PROVIDER`.
 2. A `ToolFormat` converting `setup.tools` to the vendor's declarations.
-3. Map `setup.turn_taking` onto the vendor's VAD; send `setup.instructions` verbatim.
+3. Leave turn taking, VAD, endpointing, interruption and noise handling on the vendor's own
+   defaults (send none of `setup.turn_taking`: it is only for the in-pod cascades, whose
+   vendors have none); send `setup.instructions` verbatim.
 4. Call start: send `setup.instructions` (the screen pop is already in them)
    in the session setup; once the vendor accepts audio, `call.inbound.bind(...)`
    and run `call.inbound.run()`; if `setup.start_policy.agent_opens` request
@@ -382,7 +384,7 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 | Forced tool choice (never used: the screen pop needs none) | `response.create` `tool_choice` | **no** (undocumented) | **no** | on the backend only (left `"auto"`) | `tool_choice` on the SDK call |
 | Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`) | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
 | Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |
-| `TurnTaking` mapping | silence, prefix padding, threshold | silence only (`threshold`/`prefix_padding_ms` not documented; xAI defaults) | silence, prefix padding | **none**: no VAD settings exist | silence via VAD + turn timeout |
+| `TurnTaking` mapping | **none**: `server_vad` on OpenAI's defaults | **none**: `server_vad` on xAI's defaults | **none**: automatic activity detection on Gemini's defaults | **none**: no VAD settings exist | **none**: Silero `VADParams()`, Pipecat's default start strategies and Smart Turn v3 stop |
 | Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat |
 | Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
 | Language (every VAmoS call is English) | transcription `language: "en"` | **none** documented (the prompt holds it) | **none**: native-audio models choose the language themselves and take no `languageCode` (the prompt holds it) | **none** documented (the prompt holds it) | `Language.EN` on Deepgram STT, OpenAI STT and Cartesia TTS (OpenAI's speech endpoint takes none) |
@@ -424,26 +426,23 @@ same vendor (rory-agent `mistral/`, `huggingface/`, `grok-cascade/`), so the
 vendors are compared under the same plumbing on both benches.
 
 - **Turns.** The model runs only on a finished caller turn. Where the vendor
-  has endpointing it decides (xAI STT's Smart Turn, `speech_final`). Where it
+  has endpointing it decides, on its defaults (xAI STT: `speech_final` after
+  its default 400 ms `endpointing`; Smart Turn has no default and is not
+  turned on). Where it
   has none (Voxtral Realtime documents none; Whisper on HF is
   request/response), the turn ends after `TurnTaking.silence_ms` of
   non-speech by Silero (`SilenceEndpoint`, counted in audio time), the
   Energy candidates' rule. Turns that finish while the agent answers are
   answered together, in one user message.
 - **Barge-in.** None of these vendors detects the caller talking over the
-  agent, so Silero (`silero.py`, the model Pipecat ships, vendored with its
-  MIT licence) runs on the caller's audio. Under `BargeInRule`, a framework
-  default identical for every cascade, the caller interrupts a turn being
-  answered only after **0.5 s of Silero speech** in one utterance (pauses under
-  300 ms don't end it; counted from when the reply began) **and at least one
-  transcribed word** where the STT leg streams interim text (Voxtral
-  `transcription.text.delta`, xAI `transcript.partial`; Whisper has none, so
-  the duration rule alone). That is the shape of LiveKit Agents' and Pipecat's
-  defaults (`min_interruption_duration` 0.5 s, a minimum word count). Before it,
-  the first Silero speech onset interrupted, so under the bench's background
-  noise a 0.4 s blip muted every reply (smoke trial
-  `trial_5bah0up0gmvijc2xo4zfb`, grok_cascade: Remi never spoke). Noise stays
-  a benchmark condition; sustained speech still interrupts. The interruption
+  agent, and a cascade we assemble has no vendor default to fall back on, so
+  Silero (`silero.py`, the model Pipecat ships, vendored with its MIT licence)
+  runs on the caller's audio. `BargeInRule` is LiveKit Agents' default
+  interruption rule taken as is (`min_duration` 0.5 s, `min_words` 0),
+  identical for every cascade: the caller interrupts a turn being answered
+  after **0.5 s of Silero speech** in one utterance (pauses under 300 ms don't
+  end it; counted from when the reply began). No word count or other noise
+  filter: noise is a benchmark condition. The interruption
   stops the audio (`OutboundAudio.interrupted`), clears the vendor's
   TTS utterance (xAI `text.clear`), and silences the rest of the turn. The LLM
   round it lands in still completes and its tool calls still run; the reply is
@@ -468,8 +467,8 @@ on Energy.
 
 | Capability | mistral | huggingface | grok_cascade | gradium |
 |---|---|---|---|---|
-| End of turn | local: Silero + `silence_ms`, then `input_audio.flush` | local: Silero + `silence_ms`, utterance to Whisper | xAI Smart Turn (`smart_turn=0.7`, 3 s timeout) | gradbot |
-| Barge-in | local Silero, `BargeInRule` (0.5 s + 1 interim word) | local Silero, `BargeInRule` (0.5 s; no interim text) | local Silero, `BargeInRule` (0.5 s + 1 interim word) + `text.clear` | gradbot (`interrupted` event) |
+| End of turn | local: Silero + `silence_ms`, then `input_audio.flush` | local: Silero + `silence_ms`, utterance to Whisper | xAI's default endpointing (400 ms, no Smart Turn) | gradbot |
+| Barge-in | local Silero, `BargeInRule` (0.5 s) | local Silero, `BargeInRule` (0.5 s) | local Silero, `BargeInRule` (0.5 s) + `text.clear` | gradbot (`interrupted` event) |
 | History after barge-in | trimmed to what played | trimmed | trimmed | gradbot keeps only transmitted words |
 | Forced tool choice | never (`tool_choice="auto"`) | same | same | not exposed |
 | Callee-spoke signal | first finished turn | same | same | first `stt_text` |
@@ -485,7 +484,7 @@ whole STT → LLM → TTS loop and its turn taking):
 | Tool schema | the shared JSON schema | cut to `type`/`description`/`enum`/`items` (Cartesia rejects every other keyword; Remi's descriptions state the bounds and formats in words); names Cartesia reserves (`end_call`, `send_dtmf`, `voicemail_detection`, `skip_turn`, `transfer_to_number`: HTTP 400, checked live) get a trailing `_` on the wire and are mapped back (its system `end_call` would bypass `CallSession.dispatch`); `pre_tool_speech: off` (required, no default: no vendor nudge to speak first); results go unchanged, as on every vendor (the documented 4096-byte result cap was not enforced in a live check on 2026-10-14, up to 9 KB) | the shared JSON schema; one tool call per step, up to 10 steps a turn |
 | Callee first | `firstMessageMode: assistant-waits-for-user` | `initial_message: null` | nothing is generated before a user turn |
 | Agent first | `assistant-speaks-first-with-model-generated-message` + the opening instruction as a second system message | **no**: no way to request a turn; `opens_calls = False`, startup refuses an agent that speaks first | `generate_reply(instructions=opening_instruction)` |
-| `TurnTaking` mapping | `startSpeakingPlan` (`waitSeconds` = silence, transcription endpointing as the Energy candidate) | none exposed (Cartesia defaults) | Silero silence/prefix/threshold + endpointing `min_delay` |
+| `TurnTaking` mapping | **none**: no `startSpeakingPlan` (Vapi's defaults) | none exposed (Cartesia defaults) | **none**: Silero and `AgentSession` endpointing/interruptions on LiveKit's defaults |
 | Callee-spoke signal | first user `transcript` | first user `turn_ended` with text | first `user_input_transcribed` |
 | Agent hang-up | after the tool: wait for Vapi's audio to stop (`OutboundAudio.wait_until_quiet`, digital silence counts as quiet: Vapi streams it), drain, close the line, send Vapi `end-call` | same wait, then close (the agent is deleted) | `wait_for_playout()` of the words before the tool, `StopResponse` (no reply), close |
 
@@ -564,7 +563,7 @@ Vendors:
 | `VAPI_API_KEY` | vapi | Vapi **private** key. Required. |
 | `PUBLIC_BASE_URL` | vapi | The pod's public https URL; set by Veris Bench when the candidate has `"public_endpoint": true`. Required. |
 | `VAMOS_VAPI_MODEL` / `VAMOS_VAPI_MODEL_PROVIDER` | vapi | Defaults `gpt-4.1-mini` / `openai`. |
-| `VAMOS_VAPI_TRANSCRIBER_MODEL` / `VAMOS_VAPI_TRANSCRIBER_PROVIDER` | vapi | Defaults `nova-3` / `deepgram` (keep a transcriber without its own end-of-turn model, or Vapi ignores `startSpeakingPlan`). |
+| `VAMOS_VAPI_TRANSCRIBER_MODEL` / `VAMOS_VAPI_TRANSCRIBER_PROVIDER` | vapi | Defaults `nova-3` / `deepgram`. |
 | `VAMOS_VAPI_VOICE_ID` / `VAMOS_VAPI_VOICE_MODEL` / `VAMOS_VAPI_VOICE_PROVIDER` | vapi | Defaults `EXAVITQu4vr4xnSDxMaL` / `eleven_flash_v2` / `11labs`. |
 | `CARTESIA_API_KEY` | cartesia | Required. No agent id: the provider creates one per call. |
 | `VAMOS_CARTESIA_MODEL` / `VAMOS_CARTESIA_VOICE_ID` | cartesia | Defaults `gpt-4.1-mini` / `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4` ("Skylar"). |
@@ -720,7 +719,7 @@ configured so the actor waits for the agent's greeting.
 | One repo per agent; a new benchmark means copying the whole stack | One framework, one pack per agent; adding an agent touches no framework file (section 9). |
 | ~1,500 duplicated lines: 15 `web.py`, tool-surface copies, 13 Dockerfiles, Grok ≈ copy of OpenAI | One `server.py`, one dispatch path, one `Dockerfile` (`ARG AGENT` x `ARG VENDOR`), one Realtime-protocol base. |
 | Call start implemented 15 ways (greeting fields, TTS frames, instructed turns) | One `CallStartPolicy`, honoured by every provider; parity tests assert what each sends, for both policies. |
-| Vendor behaviour drift (barge-in truncation, VAD thresholds, date injection) | `TurnTaking` mapped into each VAD; `OutboundAudio.played_ms` drives truncation; the date is rendered into one prompt. Parity tests assert the frames each vendor sends. |
+| Vendor behaviour drift (barge-in truncation, VAD thresholds, date injection) | every vendor on its own turn-taking defaults (no shared numbers sent); `OutboundAudio.played_ms` drives truncation; the date is rendered into one prompt. Parity tests assert the frames each vendor sends. |
 | Parity tests that only checked module attributes | `tests/test_parity.py` runs each provider through scripted calls, agents x vendors. |
 | 73 unbounded `>=` deps, `uv:latest` | Every dependency bounded; `uv` and Python images pinned; `uv.lock` committed; `uv sync --locked`. |
 | Unauthenticated inbound webhooks / tunnels for hosted vendors | No tunnels. Only a provider's own `/vendor/<name>` routes, authenticated with a per-call secret and checked against the live call, dispatching through `CallSession`; Cartesia needs none (client tools on its socket). |
@@ -783,7 +782,7 @@ uv run ruff check . && uv run ruff format --check .
   cap, full voice id, 16 kHz uplink and playback buffer), each with its hang-up timing.
 - `tests/test_cascade.py`: the shared in-pod cascade with scripted legs (`tests/cascade_fakes.py`):
   callee first / agent first, rounds and tools, hang-up, barge-in (tools still run, history trimmed;
-  `BargeInRule`: a blip does not interrupt, 0.5 s does, interim words required where the leg streams them),
+  `BargeInRule`: a blip does not interrupt, 0.5 s of speech does),
   playout pacing; `SilenceEndpoint`; Silero on recorded speech (`tests/fixtures/caller_speech_24k.pcm`).
 - `tests/test_mistral.py`, `tests/test_huggingface.py`, `tests/test_grok_cascade.py`, `tests/test_gradium.py`:
   each cascade's own legs (Voxtral frames and flush, Whisper/fal requests on `httpx.MockTransport`,

@@ -46,7 +46,6 @@ class OpenAIRealtimeProvider(RealtimeProtocolProvider):
         return {"Authorization": f"Bearer {self._api_key}"}
 
     def session_config(self, setup: SessionSetup) -> dict[str, Any]:
-        turns = setup.turn_taking
         pcm = {"type": "audio/pcm", "rate": RATE_HZ}
         return {
             "type": "realtime",
@@ -57,12 +56,10 @@ class OpenAIRealtimeProvider(RealtimeProtocolProvider):
                     "format": pcm,
                     # The bench is English-only: pin the caller transcription's language (ISO-639-1).
                     "transcription": {"model": self.transcribe_model, "language": LANGUAGE},
+                    # Vendor-native turn taking: OpenAI's server VAD on its own threshold, padding and
+                    # silence; it replies and interrupts.
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": turns.vad_threshold,
-                        "prefix_padding_ms": turns.prefix_padding_ms,
-                        "silence_duration_ms": turns.silence_ms,
-                        # Vendor-native turn taking: OpenAI's VAD replies and interrupts.
                         "create_response": True,
                         "interrupt_response": True,
                     },

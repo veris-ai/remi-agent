@@ -326,9 +326,9 @@ the same gates; only the voice stack differs.
 
 | Vendor | Stack | Turn taking |
 |---|---|---|
-| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; barge-in after 0.5 s of Silero speech and a transcribed word |
+| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; barge-in after 0.5 s of Silero speech |
 | `huggingface` | Whisper large-v3 → `openai/gpt-oss-120b:groq` → Kokoro (fal-ai), all on HF inference | Silero + 0.8 s of silence; barge-in after 0.5 s of Silero speech |
-| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI Smart Turn; barge-in after 0.5 s of Silero speech and a transcribed word |
+| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI's default endpointing (400 ms); barge-in after 0.5 s of Silero speech |
 | `gradium` | gradbot: Gradium STT → `gpt-4.1-mini` → Gradium TTS | gradbot's own |
 
 On the cascades Remi's first words wait for the callee's first finished turn

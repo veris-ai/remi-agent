@@ -48,7 +48,6 @@ from vamos_voice.audio import CHANNEL_RATE_HZ, Resampler, pcm_ms
 from vamos_voice.providers.base import CallRuntime
 from vamos_voice.providers.cascade import (
     CascadeProvider,
-    InterimSink,
     SilenceEndpoint,
     SpeechToText,
     TextToSpeech,
@@ -157,7 +156,7 @@ class WhisperSTT(SpeechToText):
             self.utterances.put_nowait(b"".join(self.utterance))
             self.utterance = []
 
-    async def run(self, on_turn: TurnSink, on_interim: InterimSink) -> None:  # Whisper: no interim text
+    async def run(self, on_turn: TurnSink) -> None:
         while True:
             await on_turn(await self.transcribe(await self.utterances.get()))
 

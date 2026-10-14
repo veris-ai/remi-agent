@@ -16,10 +16,8 @@ veris-ai/rory-agent ``grok-voice/README.md``):
 - **Caller transcription** is emitted only when
   ``audio.input.transcription.model`` is ``grok-transcribe``; without it the
   caller's words never reach the judge's trace. Always sent.
-- **Turn detection** accepts ``type`` and ``silence_duration_ms`` (plus
-  ``idle_timeout_ms``); ``threshold`` and ``prefix_padding_ms`` are not part
-  of the documented session, so only ``TurnTaking.silence_ms`` is mapped and
-  the rest stay on xAI's defaults.
+- **Turn detection** is ``server_vad`` on xAI's own defaults: nothing else
+  is sent.
 - **No forced tool choice.** ``response.create`` documents only
   ``instructions``. Nothing here needs one: the connect-time reads are the
   agent's screen pop, already in the session instructions.
@@ -81,7 +79,7 @@ class GrokVoiceProvider(RealtimeProtocolProvider):
         return {
             "voice": self.voice,
             "instructions": setup.instructions,
-            "turn_detection": {"type": "server_vad", "silence_duration_ms": setup.turn_taking.silence_ms},
+            "turn_detection": {"type": "server_vad"},
             "audio": {
                 "input": {"format": pcm, "transcription": {"model": TRANSCRIBE_MODEL}},
                 "output": {"format": pcm},

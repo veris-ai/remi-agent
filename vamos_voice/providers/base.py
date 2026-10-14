@@ -49,10 +49,17 @@ VENDOR_ROUTE_PREFIX = "/vendor"
 
 @dataclass(frozen=True)
 class TurnTaking:
-    """End-of-turn detection, the same for every vendor (mapped to each one's VAD)."""
+    """Local speech detection for the in-pod cascades, the only stacks with no vendor turn taking.
+
+    Never sent to a vendor: every vendor that detects turns (Realtime, Gemini
+    Live, Pipecat, LiveKit, Vapi, the managed agents, xAI STT) runs on its own
+    defaults. ``silence_ms`` ends a caller turn where the STT leg has no
+    endpointing (Mistral's Voxtral Realtime, Whisper on Hugging Face);
+    ``vad_threshold`` is Silero's start threshold (its own default) for that
+    end of turn and for cascade barge-in.
+    """
 
     silence_ms: int = 800
-    prefix_padding_ms: int = 300
     vad_threshold: float = 0.5
 
 

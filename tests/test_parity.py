@@ -171,8 +171,8 @@ class OpenAIScript:
     def callee_spoke(self) -> None:
         self.sock.push({"type": "input_audio_buffer.committed", "item_id": "u1"})
 
-    #: (silence_ms, prefix_padding_ms) the vendor is sent; None where it has no such setting.
-    expected_vad = (800, 300)
+    #: (silence_ms, prefix_padding_ms) the vendor is sent: None everywhere, every vendor runs its own defaults.
+    expected_vad = (None, None)
 
     @staticmethod
     def setup(frame: dict[str, Any]) -> dict[str, Any]:
@@ -184,8 +184,8 @@ class OpenAIScript:
                 t["name"]: (set(t["parameters"]["properties"]), set(t["parameters"]["required"]))
                 for t in session["tools"]
             },
-            "silence_ms": vad["silence_duration_ms"],
-            "prefix_ms": vad["prefix_padding_ms"],
+            "silence_ms": vad.get("silence_duration_ms"),
+            "prefix_ms": vad.get("prefix_padding_ms"),
             "transcribes_caller": bool(session["audio"]["input"]["transcription"]),
         }
 
@@ -209,7 +209,7 @@ class OpenAIScript:
 class GrokScript(OpenAIScript):
     """Grok's Realtime dialect: top-level VAD, grok-transcribe."""
 
-    expected_vad = (800, None)
+    expected_vad = (None, None)
 
     @staticmethod
     def setup(frame: dict[str, Any]) -> dict[str, Any]:
@@ -221,7 +221,7 @@ class GrokScript(OpenAIScript):
                 t["name"]: (set(t["parameters"]["properties"]), set(t["parameters"]["required"]))
                 for t in session["tools"]
             },
-            "silence_ms": vad["silence_duration_ms"],
+            "silence_ms": vad.get("silence_duration_ms"),
             "prefix_ms": vad.get("prefix_padding_ms"),
             "transcribes_caller": session["audio"]["input"]["transcription"] == {"model": "grok-transcribe"},
         }
@@ -321,7 +321,7 @@ def gpt_live_call(sock: FakeVendorSocket) -> dict[str, Any]:
 class GeminiScript:
     """Server messages in the Gemini Live protocol."""
 
-    expected_vad = (800, 300)
+    expected_vad = (None, None)
 
     def __init__(self, sock: FakeVendorSocket) -> None:
         self.sock, self.n = sock, 0
@@ -368,8 +368,8 @@ class GeminiScript:
                 d["name"]: (set(d["parameters"]["properties"]), set(d["parameters"]["required"]))
                 for d in decls
             },
-            "silence_ms": vad["silenceDurationMs"],
-            "prefix_ms": vad["prefixPaddingMs"],
+            "silence_ms": vad.get("silenceDurationMs"),
+            "prefix_ms": vad.get("prefixPaddingMs"),
             "transcribes_caller": "inputAudioTranscription" in s,
         }
 
@@ -778,8 +778,7 @@ async def test_socket_vendor_lets_an_inbound_agent_speak_first(name: str, agent:
 @pytest.mark.parametrize("agent", sorted(CASES))
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
 def test_pipecat_sends_the_same_instructions_and_tools(agent: str) -> None:
-    from vamos_voice.providers.base import TurnTaking
-    from vamos_voice.providers.pipecat import PipecatProvider, user_speech_timeout_s, vad_params
+    from vamos_voice.providers.pipecat import PipecatProvider
     from vamos_voice.providers.pipecat.services import ServiceConfig
 
     case = CASES[agent]
@@ -797,24 +796,24 @@ def test_pipecat_sends_the_same_instructions_and_tools(agent: str) -> None:
         for t in params["tools"]
     } == case.expected_tools()
 
-    turns = TurnTaking()
-    assert vad_params(turns).stop_secs + user_speech_timeout_s(turns) == pytest.approx(
-        turns.silence_ms / 1000
-    )
-
 
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
-def test_pipecat_runs_its_own_model_default_and_turn_start() -> None:
-    from pipecat.turns.user_turn_strategies import default_user_turn_start_strategies
-
-    from vamos_voice.providers.base import TurnTaking
-    from vamos_voice.providers.pipecat import PipecatProvider, turn_strategies
-
-    assert (
-        PipecatProvider.from_env({"OPENAI_API_KEY": "k", "DEEPGRAM_API_KEY": "d"}).llm_model == "gpt-4.1-mini"
+def test_pipecat_runs_its_own_model_default_and_turn_taking() -> None:
+    from pipecat.audio.vad.vad_analyzer import VADParams
+    from pipecat.turns.user_turn_strategies import (
+        default_user_turn_start_strategies,
+        default_user_turn_stop_strategies,
     )
-    start = turn_strategies(TurnTaking()).start or []
-    assert [type(s) for s in start] == [type(s) for s in default_user_turn_start_strategies()]
+
+    from vamos_voice.providers.pipecat import PipecatProvider
+
+    provider = PipecatProvider.from_env({"OPENAI_API_KEY": "k", "DEEPGRAM_API_KEY": "d"})
+    assert provider.llm_model == "gpt-4.1-mini"
+    params = provider.user_params()
+    assert params.vad_analyzer.params == VADParams(), "Silero on Pipecat's defaults"
+    strategies = params.user_turn_strategies
+    assert [type(s) for s in strategies.start] == [type(s) for s in default_user_turn_start_strategies()]
+    assert [type(s) for s in strategies.stop] == [type(s) for s in default_user_turn_stop_strategies()]
 
 
 def _pipecat_request(provider: Any, call: Any) -> dict[str, Any]:

@@ -158,7 +158,7 @@ def test_vapi_assistant_waits_for_the_callee_and_carries_the_secret_only_in_tool
     assert {"transcript", "tool-calls", "tool-calls-result", "conversation-update", "status-update"} <= set(
         CLIENT_MESSAGES
     )
-    assert assistant["startSpeakingPlan"]["waitSeconds"] == 0.8
+    assert "startSpeakingPlan" not in assistant, "Vapi's own end-of-turn defaults"
 
 
 @needs_vapi
@@ -528,17 +528,9 @@ async def test_cartesia_tool_error_results_are_flagged() -> None:
 
 
 @needs_livekit
-def test_livekit_maps_the_shared_turn_taking_and_runs_its_server_on_loopback_only() -> None:
-    from vamos_voice.providers.base import TurnTaking
-    from vamos_voice.providers.livekit import LiveKitConfig, LiveKitProvider, turn_handling, vad_options
+def test_livekit_runs_its_server_on_loopback_only() -> None:
+    from vamos_voice.providers.livekit import LiveKitConfig, LiveKitProvider
 
-    turns = TurnTaking()
-    assert vad_options(turns) == {
-        "min_silence_duration": 0.8,
-        "prefix_padding_duration": 0.3,
-        "activation_threshold": 0.5,
-    }
-    assert turn_handling(turns) == {"endpointing": {"min_delay": 0.8}}
     config = LiveKitConfig.from_env(
         {"OPENAI_API_KEY": "o", "DEEPGRAM_API_KEY": "d", "ELEVENLABS_API_KEY": "e"}
     )

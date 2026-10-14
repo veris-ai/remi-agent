@@ -21,8 +21,8 @@ Call start: ``firstMessageMode = assistant-waits-for-user`` for a callee-first
 agent (Vapi's native "wait for the user"); for an agent that speaks first,
 ``assistant-speaks-first-with-model-generated-message`` with the opening
 instruction as a second system message. Turn taking, interruptions and noise
-handling are Vapi's own; ``startSpeakingPlan`` maps the shared end-of-turn
-silence the way the VAmoS Energy Vapi candidate does.
+handling are Vapi's own: no ``startSpeakingPlan``, so Vapi's defaults decide
+when the caller's turn has ended.
 
 Trace: ``trace_adapter = "vapi"`` reads the transport socket's JSON messages
 (``transcript``, ``speech-update``, ``tool-calls``, ``tool-calls-result``,
@@ -85,7 +85,6 @@ class VapiConfig:
     #: Vapi's default of 250 cuts longer turns and tool results short.
     max_tokens: int = 500
     transcriber_provider: str = "deepgram"
-    #: A transcriber without its own end-of-turn model, so ``startSpeakingPlan`` applies.
     transcriber_model: str = "nova-3"
     voice_provider: str = "11labs"
     voice_id: str = "EXAVITQu4vr4xnSDxMaL"
@@ -167,7 +166,6 @@ class VapiProvider(VoiceProvider):
         policy = setup.start_policy
         if policy.agent_opens:
             messages.append({"role": "system", "content": policy.opening_instruction})
-        end_of_turn_s = setup.turn_taking.silence_ms / 1000
         return {
             "firstMessageMode": (
                 "assistant-speaks-first-with-model-generated-message"
@@ -186,17 +184,6 @@ class VapiProvider(VoiceProvider):
                 "provider": c.transcriber_provider,
                 "model": c.transcriber_model,
                 "language": "en",
-            },
-            # The shared end-of-turn silence, mapped as on the VAmoS Energy Vapi candidate: the
-            # transcription endpointing countdown starts ~0.2 s after speech stops, once the
-            # transcript lands.
-            "startSpeakingPlan": {
-                "waitSeconds": end_of_turn_s,
-                "transcriptionEndpointingPlan": {
-                    "onPunctuationSeconds": round(max(0.1, end_of_turn_s - 0.2), 2),
-                    "onNoPunctuationSeconds": round(end_of_turn_s * 1.5, 2),
-                    "onNumberSeconds": round(max(0.1, end_of_turn_s - 0.1), 2),
-                },
             },
             "maxDurationSeconds": 1800,
             "clientMessages": CLIENT_MESSAGES,

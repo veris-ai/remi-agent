@@ -54,7 +54,7 @@ def test_an_unknown_llm_stops_startup() -> None:
         GrokCascadeConfig.from_env({**XAI, "VAMOS_GROK_CASCADE_LLM": "grok-9"})
 
 
-def test_stt_uses_smart_turn_and_tts_streams_24_khz_pcm() -> None:
+def test_stt_uses_xai_endpointing_defaults_and_tts_streams_24_khz_pcm() -> None:
     config = GrokCascadeConfig.from_env({**XAI, "OPENAI_API_KEY": "sk"})
     stt = urlparse(config.stt_url())
     assert (stt.scheme, stt.netloc, stt.path) == ("wss", "api.x.ai", "/v1/stt")
@@ -64,8 +64,6 @@ def test_stt_uses_smart_turn_and_tts_streams_24_khz_pcm() -> None:
         "sample_rate": "24000",
         "language": "en",
         "format": "true",
-        "smart_turn": "0.7",
-        "smart_turn_timeout": "3000",
     }
     tts = urlparse(config.tts_url())
     assert tts.path == "/v1/tts"
@@ -101,15 +99,11 @@ async def test_stt_sends_the_callers_audio_unchanged_and_only_utterance_finals_a
             "text": "447 129",
             "is_final": True,
             "speech_final": True,
-            "end_of_turn_confidence": 0.9,
         }
     )
     sock.inbox.put_nowait(None)  # xAI closes
-    interim: list[str] = []
-    await stt.run(on_turn, interim.append)
-    assert turns == ["447 129"]
-    assert interim == ["four four", "four four seven"], "partials feed barge-in, never a turn"
-    assert GrokSTT.interim_text
+    await stt.run(on_turn)
+    assert turns == ["447 129"], "only an utterance final is a turn"
 
 
 async def test_stt_must_open_with_transcript_created() -> None:
