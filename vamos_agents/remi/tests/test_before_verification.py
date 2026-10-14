@@ -288,8 +288,12 @@ def test_push_back_gets_a_reason_and_a_way_out() -> None:
         "stop_calling_this_number",
     ):
         assert line in pushback, line
-    refusal = pushback.split("- They won't verify")[1].split('- "Stop calling"')[0]
+    refusal = pushback.split("- They decline to verify")[1].split('- "Stop calling"')[0]
     assert "give the callback number" in refusal and "never argue" in refusal
+    # smoke v8: ~30 calls ended when a wary consumer asked for a number or a letter; those are questions
+    assert "send me a letter" not in refusal.lower() and "not giving you that" not in refusal
+    question = pushback.split("- A question or a condition is not a refusal")[1].split("\n- ")[0]
+    assert "for a number, for a" in question and "ask for the verification detail again" in question
 
 
 def test_no_leaked_example_amount_or_name_and_no_narration() -> None:
