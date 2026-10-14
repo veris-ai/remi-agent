@@ -8,7 +8,16 @@ under `vamos_agents/` that supplies its prompt, tools, rules and world clients.
 
 | Agent | Benchmark | Calls | Vendors |
 |---|---|---|---|
-| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Grok Voice, GPT-Live, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS), Mistral (Voxtral cascade), Hugging Face (Whisper → gpt-oss → Kokoro), Grok STT + TTS cascade, Gradium (gradbot), Vapi, Cartesia, LiveKit |
+| [Remi](vamos_agents/remi/README.md) | VAmoS Debt Collection | outbound (the callee speaks first) | OpenAI Realtime, Grok Voice, GPT-Live, Gemini Live, Pipecat (Deepgram → OpenAI → OpenAI TTS), Mistral (Voxtral cascade), Hugging Face (Whisper → gpt-oss → Kokoro), Grok STT + TTS cascade, Gradium (gradbot), Vapi, Cartesia, LiveKit; plus the `silent` baseline |
+
+**Baselines, not candidates.** `VENDOR=silent` builds a null agent for a
+benchmark sanity check: it answers `/voice` like every vendor, then never
+speaks, never calls a tool and never hangs up (the caller or the platform's
+timeout ends the call). A grader must give it 0. It needs no key.
+
+| Baseline | `VENDOR` | Image | Behaviour | Expected score |
+|---|---|---|---|---|
+| Silent | `silent` | `<agent>-silent` (e.g. `remi-silent`) | connects, listens, says nothing, calls no tool, never hangs up | 0 |
 
 ## Quickstart
 
@@ -31,7 +40,8 @@ curl localhost:8008/health
 `gemini_live`, `pipecat`, and the cascades `mistral` (`MISTRAL_API_KEY`), `huggingface`
 (`HF_TOKEN`), `grok_cascade` (`XAI_API_KEY`, plus `OPENAI_API_KEY` for its default
 `gpt-4.1-mini`) and `gradium` (`GRADIUM_API_KEY`, `OPENAI_API_KEY`). `vapi` and `cartesia`
-(hosted orchestrators), `livekit` (LiveKit Agents; the image runs its own LiveKit server). Vendors differ in what they support (barge-in
+(hosted orchestrators), `livekit` (LiveKit Agents; the image runs its own LiveKit server), and
+`silent` (the null baseline above; no key). Vendors differ in what they support (barge-in
 truncation, VAD settings); what the agent knows when the call connects does
 not: the agent's own screen pop puts it in every vendor's instructions
 (AGENTS.md section 6). AGENTS.md section 10 lists the

@@ -55,6 +55,7 @@ vamos_voice/                      # the framework: never imports an agent
     gradium/                                    # gradbot: Gradium's engine runs the cascade itself
     vapi/  cartesia/                  # hosted orchestrators (the vendor runs STT, LLM, TTS)
     livekit/                          # LiveKit Agents in a room on the image's own livekit-server
+    silent/                           # the null baseline: answers, never speaks (a sanity check, not a candidate)
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
     agent.py ... tests/           # world clients (db; payments via the World's gateway; the Fineract ledger), and its own tests
@@ -99,6 +100,7 @@ pyproject.toml  uv.lock           # one package; one extra per agent and per ven
 │ cartesia        → hosted: managed agent, client tools on its WS    │
 │ livekit         → LiveKit Agents (Deepgram, OpenAI, ElevenLabs) in │
 │                   a room on the image's own livekit-server         │
+│ silent          → baseline: listens, never speaks, calls no tool   │
 └─────────────────────────────────────────────────────────────────────┘
       │ every tool call: session.dispatch(name, args) → dict ({"error": ...} on refusal)
       ▼
@@ -627,7 +629,8 @@ Images: `us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e/
 with the vendor's underscores as dashes (the registry's convention, e.g.
 `riley-gemini-live`): `remi-openai-realtime`, `remi-gemini-live`, `remi-grok-voice`,
 `remi-gpt-live`, `remi-pipecat`, `remi-deepgram`, `remi-elevenlabs`, `remi-fluxions`, `remi-mistral`,
-`remi-huggingface`, `remi-grok-cascade`, `remi-gradium`, `remi-vapi`, `remi-cartesia`, `remi-livekit`.
+`remi-huggingface`, `remi-grok-cascade`, `remi-gradium`, `remi-vapi`, `remi-cartesia`, `remi-livekit`,
+and the baseline `remi-silent` (`--build-arg VENDOR=silent`).
 
 ```bash
 REPO=us-central1-docker.pkg.dev/veris-ai-dev/bench-private-images/bench-e2e
@@ -695,6 +698,7 @@ Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
 | `vapi` | `vapi` | `VAPI_API_KEY` (private key) | `VAMOS_VAPI_MODEL` (`gpt-4.1-mini`, as Rory "Vapi"); **and `"public_endpoint": true` in the `image` block** |
 | `cartesia` | `cartesia` | `CARTESIA_API_KEY` | optional `VAMOS_CARTESIA_MODEL` (`gpt-4.1-mini`), `VAMOS_CARTESIA_VOICE_ID`; no public endpoint |
 | `livekit` | omit | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | optional `VAMOS_LIVEKIT_LLM_MODEL` (`gpt-4.1-mini`); no `LIVEKIT_*` (the image's own server) |
+| `silent` (baseline, not a candidate) | omit | none | none; a sanity check that the grader scores a do-nothing agent 0 |
 
 Every candidate (every row above) sets `"protocol": "json"` in its channel and
 `VAMOS_VOICE_FRAMING=json` in its `image.env`, together (both, or neither): with `binary` an agent that ends the call is

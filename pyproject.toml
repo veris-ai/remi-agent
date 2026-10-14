@@ -75,6 +75,8 @@ livekit = [
     "livekit-plugins-elevenlabs>=1.8,<1.9",
     "livekit-plugins-silero>=1.8,<1.9",
 ]
+# The silent baseline (a null agent for benchmark sanity checks, not a candidate): no dependencies.
+silent = []
 
 [dependency-groups]
 dev = [
