@@ -14,9 +14,11 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
+import psycopg
 import pytest
 
 from tests.guards import assert_no_wall_clock
+from vamos_agents.remi.db import Database
 from vamos_agents.remi.ledger import LedgerUnavailable
 from vamos_voice.session import CallSession
 
@@ -30,6 +32,7 @@ from .support import (
     GOOD_CARD,
     INSUFFICIENT_FUNDS_CARD,
     all_text,
+    app_dsn,
     changes,
     rows,
     seed_full_world,
@@ -135,6 +138,28 @@ async def test_connect_reads_return_no_secrets_and_assess_the_call(pg_dsn, make_
     assert last["call_assessment"]["proceed"] is True
     assert last["call_assessment"]["first_conversation"] is True
     assert s.tool_log[:3] == ["get_account", "get_account", "get_dialed_phone"]
+
+
+def _drop_connection(owner_dsn: str, db: Database) -> None:
+    """The server ends the app's connection, as the World's did mid-call (smoke v8, 17:44:43)."""
+    with psycopg.connect(owner_dsn, autocommit=True) as admin:
+        admin.execute("select pg_terminate_backend(%s)", (db._conn.info.backend_pid,))
+
+
+async def test_a_dropped_database_connection_is_opened_again(pg_dsn) -> None:
+    """A read and a transaction each find the connection gone and run on a new one; nothing runs twice."""
+    seed_world(pg_dsn)
+    db = await Database.connect(app_dsn(pg_dsn))
+    try:
+        _drop_connection(pg_dsn, db)
+        assert (await db.agency()).name
+        _drop_connection(pg_dsn, db)
+        async with db.transaction() as tx:
+            assert await tx.policy_function("payment_options", {"account_id": "TAS-420101"})
+        _drop_connection(pg_dsn, db)
+        await db.ping()
+    finally:
+        await db.close()
 
 
 async def test_the_screen_pop_runs_the_connect_reads_and_shows_no_secrets(pg_dsn, make_session) -> None:
