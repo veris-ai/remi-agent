@@ -1,6 +1,6 @@
 """``FineractLedger`` against a real Fineract seeded as the World (opt-in).
 
-Set ``REMI_TEST_FINERACT_URL`` to a Fineract that utility-bench's World seeder has
+Set ``REMI_TEST_FINERACT_URL`` to a Fineract that the benchmark repo's World seeder has
 seeded (``FINERACT_API_BASE=… python -m collections_bench.world.fineract --seed``),
 with its business date on 2027-02-10, as the twin holds it; a local one runs from
 the pinned image (services-sandbox ``services/fineract/docs/fineract-measurements.md``).

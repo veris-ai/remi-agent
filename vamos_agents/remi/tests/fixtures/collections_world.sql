@@ -1,14 +1,14 @@
 -- The VAmoS Debt Collection World's database, vendored for Remi's tests: schema, payment gateway,
 -- the creditors' decision engine and rows, in the order the World is seeded (collections_bench/world/seed.py, seed_sql).
 --
--- Source: veris-ai/utility-bench @ 1a95b9f9af9d2275c65002442047227cd5293065
+-- Source: the benchmark repo @ 1a95b9f9af9d2275c65002442047227cd5293065
 --   collections_bench/generated/world/schema.sql
 --   collections_bench/world/gateway.sql
 --   collections_bench/world/creditor_policy.sql
 --   collections_bench/generated/world/rows.sql
--- Test data, not a migration: Remi never imports utility-bench and never runs this at runtime.
+-- Test data, not a migration: Remi never imports the benchmark repo and never runs this at runtime.
 --
--- Resync: vamos_agents/remi/tests/fixtures/resync_world.sh <utility-bench checkout> [ref]
+-- Resync: vamos_agents/remi/tests/fixtures/resync_world.sh <benchmark repo checkout> [ref]
 -- (rewrites this file, header included), then run Remi's tests.
 
 -- ===== collections_bench/generated/world/schema.sql =====

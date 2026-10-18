@@ -1,7 +1,7 @@
 """``FineractLedger`` on the wire: what it sends, how it reads Fineract's answers, and how it fails.
 
 Fineract is replaced by an ``httpx.MockTransport`` that answers with bodies
-shaped as the pinned engine answers (recorded in utility-bench
+shaped as the pinned engine answers (recorded in the benchmark repo
 ``tests/test_collections_fineract.py`` and services-sandbox
 ``services/fineract/docs/fineract-measurements.md``). ``test_ledger_live`` runs
 the same client against a real Fineract.

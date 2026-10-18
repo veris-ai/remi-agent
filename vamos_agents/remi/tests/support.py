@@ -6,7 +6,7 @@ neither available the database tests are skipped with that reason; there is
 no fake database and no fake gateway (the SQL is the thing under test).
 
 The World's SQL is vendored in ``fixtures/collections_world.sql`` (its header
-names the utility-bench commit), and every account's money, which the World
+names the benchmark repo commit), and every account's money, which the World
 keeps in its Fineract ledger, in ``fixtures/collections_ledger.json``: seeding
 also rebuilds ``LEDGER``, the in-memory ledger (``fake_ledger.FakeLedger``) a
 test's calls post to. The DSN the fixtures hand out is the owner's,

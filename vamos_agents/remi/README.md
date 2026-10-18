@@ -5,8 +5,8 @@ Remi is the debt-collection voice agent, the **candidate under test** for the
 Account Services, LLC, places **outbound** calls to consumers in New York
 City, and must apply the benchmark's policy against the benchmark's world:
 
-- Policy: [`collections_bench/RULES.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/RULES.md) (veris-ai/utility-bench)
-- World: [`collections_bench/WORLD.md`](https://github.com/veris-ai/utility-bench/blob/main/collections_bench/WORLD.md): a Postgres collections database, with the payment gateway inside it (no Stripe: Stripe does not serve debt collection agencies), and a Fineract ledger holding every account's money
+- Policy: the benchmark's `RULES.md` (not public; the rules Remi follows are summarised in the root [README](../../README.md#what-remi-does))
+- World: the benchmark's `WORLD.md` (not public): a Postgres collections database, with the payment gateway inside it (no Stripe: Stripe does not serve debt collection agencies), and a Fineract ledger holding every account's money
 
 Remi reads those documents' rules into its own code (`policy.py`, the gates,
 the prompt). It never imports or copies the benchmark's grader.
@@ -298,9 +298,9 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   whole World); declines and their fallbacks; card data in no row, log or
   result; the wall-clock guard over every Remi module.
 - `tests/fixtures/collections_world.sql`: the World's schema, payment gateway and
-  rows, vendored from utility-bench (the header names the commit). Resync with
-  `tests/fixtures/resync_world.sh <utility-bench checkout> [ref]`. Remi never
-  imports utility-bench. The tests seed as the owner and connect Remi as a login
+  rows, vendored from the benchmark repo (the header names the commit). Resync with
+  `tests/fixtures/resync_world.sh <benchmark repo checkout> [ref]`. Remi never
+  imports the benchmark repo. The tests seed as the owner and connect Remi as a login
   that owns nothing, so the gateway's write guards bind.
 - `tests/test_payment_options.py`: the creditor's menu against the same Postgres: the ladder the model
   sees, off-menu and locked options refused before any charge, approvals (denied is never chargeable),
@@ -311,7 +311,7 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   `support.TEST_POLICY` (overridable per test) priced from the ledger's balance.
 - `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
 - `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, no account change, no direct writes.
-- `tests/fixtures/collections_ledger.json`: every account's money from the same utility-bench commit, loaded into the in-memory ledger by `seed_full_world` (`resync_world.sh` writes both fixtures).
+- `tests/fixtures/collections_ledger.json`: every account's money from the same the benchmark repo commit, loaded into the in-memory ledger by `seed_full_world` (`resync_world.sh` writes both fixtures).
 - `tests/test_ledger.py`: `FineractLedger` on the wire (`httpx.MockTransport`): the requests it sends, the debt it reads, idempotent posting, refusals vs an unreachable ledger.
 - `tests/test_ledger_live.py`: the same client against a real Fineract seeded as the World (opt-in: `REMI_TEST_FINERACT_URL`).
 - `tests/test_tools.py` also runs the screen pop against that Postgres: reads done, gates past them, no secrets in the section, the should-not-call case.
