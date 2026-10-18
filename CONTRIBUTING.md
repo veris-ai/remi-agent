@@ -7,7 +7,7 @@ new voice-stack implementations and fixes to existing ones.
 
 - **The published results are pinned.** The VAmoS Debt Collection results come
   from the tag
-  [`vamos-debt-collection-2026-10`](https://github.com/veris-ai/remi-agent/tree/vamos-debt-collection-2026-10).
+  [`v0.2.0`](https://github.com/veris-ai/remi-agent/tree/v0.2.0).
   Changes on `main` improve the agent for everyone, but they don't change those
   results. A new result needs a new benchmark run.
 - **Every vendor runs the same Remi.** The prompt, tools, gates and policy are
@@ -54,7 +54,7 @@ full testing guide.
 5. Never commit API keys or recordings of real people. Vendor keys come from
    the environment (see [AGENTS.md](AGENTS.md#11-config-contract-environment)).
 
-Pull requests are squash-merged by the maintainer. Review comments must be
+Pull requests are squash-merged by a Veris maintainer. Review comments must be
 resolved before a merge.
 
 ## Reporting bugs and security issues
