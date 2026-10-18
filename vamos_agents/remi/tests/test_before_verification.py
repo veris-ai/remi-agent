@@ -2,7 +2,7 @@
 
 Unit tests on one seeded account, then scripted sessions of the bench's REMI-128 ("No, I will
 not. Send me a letter.") and REMI-134 ("Stop calling me.") on the whole vendored World, checked
-against those cases' answer-key postconditions (utility-bench
+against those cases' answer-key postconditions (the benchmark repo
 collections_bench/generated/manifest.json at the commit collections_world.sql names).
 """
 

@@ -1,7 +1,7 @@
 """The tools and the session gate against a real Postgres seeded with WORLD.md's schema.
 
 Each flow asserts the exact rows the call leaves, in the shape the benchmark's
-answer key (``policy.simulate`` in utility-bench) expects for that case. Cards
+answer key (``policy.simulate`` in the benchmark repo) expects for that case. Cards
 and bank accounts go through the World's real payment gateway functions, and
 Remi connects as a login that cannot write ``payment_methods`` or ``payments``
 itself (see ``support``).
@@ -371,7 +371,7 @@ async def test_money_crosses_the_tools_in_dollars(pg_dsn, make_session) -> None:
 
 
 #: REMI-001 (pay a small balance in full by card): the answer key's postconditions from
-#: utility-bench collections_bench/generated/manifest.json at the commit collections_world.sql names,
+#: the benchmark repo's collections_bench/generated/manifest.json at the commit collections_world.sql names,
 #: minus the consumers.language_preference update: the bench is English-only for now, so Remi has no
 #: language step and never writes that column.
 REMI_001_POSTCONDITIONS = [

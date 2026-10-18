@@ -7,7 +7,7 @@ come) gets its own agent, and every agent runs on several voice vendors.
 
 | Agent | Benchmark | Direction | Pack |
 |---|---|---|---|
-| **Remi** | VAmoS Debt Collection (`collections_bench` in veris-ai/utility-bench) | outbound, the callee speaks first | `vamos_agents/remi/` ([README](vamos_agents/remi/README.md)) |
+| **Remi** | VAmoS Debt Collection | outbound, the callee speaks first | `vamos_agents/remi/` ([README](vamos_agents/remi/README.md)) |
 | Rory (energy), Riley (banking) | VAmoS Energy / Banking | inbound, the agent speaks first | live in their own repos today; see section 14 |
 
 This file is the canonical guide. `CLAUDE.md` points here and repeats only the hard rules.
@@ -586,7 +586,7 @@ Agents:
 | `VERIS_AGENT_CONTEXT` keys `account_id`, `phone_id`, `call_time` | remi | Required; `TAS-NNNNNN`, a `phones` row id, ISO-8601 with offset. |
 | `DATABASE_URL` | remi | Postgres DSN of the collections twin (bench-injected). Required. Payments are charged through the payment gateway inside that database (`gateway_tokenize_card`, `gateway_tokenize_ach`, `gateway_charge`). |
 | `FINERACT_API_BASE` | remi | The Fineract twin's host (bench-injected): the ledger holding every account's money. Required. |
-| `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | remi | Fineract's Basic pair and tenant (bench-wide candidate-env, set by utility-bench `publish world`). Required. |
+| `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | remi | Fineract's Basic pair and tenant (bench-wide candidate-env, set by the benchmark's `publish world`). Required. |
 
 Any missing required variable stops the process at startup (exit 2) with a message naming it.
 
@@ -663,7 +663,7 @@ candidate-env holds `FINERACT_USER`, `FINERACT_PASSWORD` and `FINERACT_TENANT`.
 That is Remi's whole world: the debt-collection World has no Stripe twin (Stripe
 does not serve debt collection agencies); payments are charged through the
 payment gateway inside the collections database and posted to the account's
-Fineract loan (utility-bench `collections_bench/WORLD.md`, "The payment gateway"
+Fineract loan (the benchmark repo `collections_bench/WORLD.md`, "The payment gateway"
 and "Money: the Fineract ledger"). No `STRIPE_*` value is needed on the bench; one
 left over in candidate-env is ignored.
 

@@ -1,6 +1,6 @@
 """An in-memory ledger for Remi's tool tests, keeping the behaviour of the World's Fineract that Remi relies on.
 
-Each rule here was measured on the pinned Fineract engine (utility-bench
+Each rule here was measured on the pinned Fineract engine (the benchmark repo
 ``tests/test_collections_fineract.py`` runs the same operations live, and
 ``test_ledger_live.py`` runs ``FineractLedger`` itself against one):
 
