@@ -7,7 +7,7 @@ test in Veris's **VAmoS Debt Collection** benchmark.
 
 - **Results:** [80% of the money voice agents collected broke the creditor's rules](https://veris.ai/blog/vamos-debt-collection-policy-vs-money)
 - **The exact code that was benchmarked:** tag
-  [`vamos-debt-collection-2026-10`](https://github.com/veris-ai/remi-agent/tree/vamos-debt-collection-2026-10)
+  [`v0.2.0`](https://github.com/veris-ai/remi-agent/tree/v0.2.0)
   (commit `3e14954`), run October 15 to 17, 2026. Later commits on `main` are not
   part of those results.
 
