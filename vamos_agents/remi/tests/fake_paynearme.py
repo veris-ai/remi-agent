@@ -21,10 +21,13 @@ from that code (the stack's head, aec8fdba):
   security code was invalid."). A bank account: a 9-digit routing number with
   its ABA check digit ("ABA isn’t valid (bad checksum)") and an account number
   of 4 to 17 digits ("This account number is invalid");
-- ``make_payment`` charges it: a test instrument's outcome by its fingerprint
-  (World v2: ``51``, ``05``, ``54``, ``GS02``), a card that lapsed since it was
-  saved ``54``, anything else approved (``0``, ``Approved``). A card charge's
-  ``cvv_pii``, when sent, is checked as at tokenization. An up-to order refuses a
+- ``make_payment`` charges it, and these decline as a rejected payment, in this
+  order: a card number of a length its brand does not issue (``14``, "This card
+  number is invalid."), a card past its expiry month (``54``, "This card is
+  expired."; an expired card is accepted when saved), a card charge's
+  ``cvv_pii`` of the wrong length when sent (``NZ``), then a test instrument's
+  outcome by its fingerprint (World v2: ``51``, ``05``, ``54``, ``GS02``);
+  anything else is approved (``0``, ``Approved``). An up-to order refuses a
   payment that would take its payments above its amount;
 - a refusal is ``{"status": "error", "errors": [{"description": ...}]}``.
 
@@ -59,6 +62,9 @@ INVALID_CARD_CHECKSUM = "Card number isn’t valid (bad checksum)"
 INVALID_ROUTING_CHECKSUM = "ABA isn’t valid (bad checksum)"
 INVALID_EXPIRY = "Invalid expiration date"
 EXPIRED_CARD = "This card is expired."
+#: Declines at charge: (response_code, response_message), as the twin's payments.py has them.
+CARD_NUMBER_DECLINE = ("14", "This card number is invalid.")
+EXPIRED_CARD_DECLINE = ("54", EXPIRED_CARD)
 INVALID_SECURITY_CODE = "This payment didn't complete because the security code was invalid."
 INVALID_ACCOUNT_NUMBER = "This account number is invalid"
 #: Card-network PAN lengths; an unrecognised prefix may be 12 to 19 digits.
@@ -123,6 +129,11 @@ def luhn_valid(digits: str) -> bool:
             digit = digit * 2 - 9 if digit > 4 else digit * 2
         total += digit
     return total % 10 == 0
+
+
+def card_length_issued(brand: str | None, length: int) -> bool:
+    """Whether the brand issues card numbers of this length (an unrecognised prefix: 12 to 19 digits)."""
+    return length in CARD_LENGTHS.get(brand or "", set(range(12, 20)))
 
 
 def card_number_valid(number: Any) -> bool:
@@ -229,6 +240,24 @@ class FakePayNearMe:
         """The twin's clock now: running when a clock is set, else frozen at ``now``."""
         return self.clock() if self.clock is not None else self.now
 
+    def _decline(self, method: dict[str, Any], security_code: Any) -> tuple[str, str] | None:
+        """The twin's declines at charge, in its order (payments.py ``_decline``)."""
+        card = method["type"] == "card"
+        if card and not card_length_issued(method["brand"], method["length"]):
+            return CARD_NUMBER_DECLINE
+        if card and self._expired(method["expiry"]):
+            return EXPIRED_CARD_DECLINE
+        if (
+            card
+            and security_code not in (None, "")
+            and not security_code_valid(security_code, method["brand"])
+        ):
+            return ("NZ", INVALID_SECURITY_CODE)
+        behavior = self.behaviors.get(method["fingerprint"])
+        if behavior is not None and behavior["outcome"] in ("decline", "ach_validation_failure"):
+            return behavior["response_code"], behavior["response_message"]
+        return None
+
     def _expired(self, expiry: str) -> bool:
         month, year = (int(part) for part in expiry.split("/"))
         today = datetime.fromtimestamp(self.virtual_now(), UTC)
@@ -253,8 +282,6 @@ class FakePayNearMe:
             expiry = card_expiry(raw_expiry)
             if expiry is None:
                 return _error(INVALID_EXPIRY)
-            if self._expired(expiry):
-                return _error(EXPIRED_CARD)
             brand = card_brand(number)
             cvv = body.get("payment_method_cvv_pii")
             if cvv not in (None, "") and not security_code_valid(cvv, brand):
@@ -292,6 +319,7 @@ class FakePayNearMe:
             "fingerprint": fingerprint,
             "expiry": expiry,
             "brand": brand,
+            "length": len(entered_digits(number) or "") if kind == "card" else None,
             "account": account,
         }
         return {
@@ -307,12 +335,6 @@ class FakePayNearMe:
         method = self.methods.get(str(body.get("payment_method_identifier")))
         if order is None or method is None or method["order"] != order["pnm_order_identifier"]:
             return _error("Order or payment method not found")
-        if (
-            method["type"] == "card"
-            and body.get("cvv_pii") not in (None, "")
-            and not security_code_valid(body["cvv_pii"], method["brand"])
-        ):
-            return _error(INVALID_SECURITY_CODE)
         try:
             minor = int((Decimal(str(body.get("payment_amount"))) * 100).to_integral_exact())
         except (InvalidOperation, ValueError):
@@ -328,11 +350,9 @@ class FakePayNearMe:
         )
         if paid + minor > order["order_amount_minor"]:
             return _error("Payment amount exceeds the amount remaining on the order")
-        behavior = self.behaviors.get(method["fingerprint"])
-        if behavior is not None and behavior["outcome"] in ("decline", "ach_validation_failure"):
-            status, code, message = "rejected", behavior["response_code"], behavior["response_message"]
-        elif method["expiry"] is not None and self._expired(method["expiry"]):
-            status, code, message = "rejected", "54", EXPIRED_CARD
+        decline = self._decline(method, body.get("cvv_pii"))
+        if decline is not None:
+            status, (code, message) = "rejected", decline
         else:
             status, code, message = "approved", "0", "Approved"
         payment_id = self._next_id("88")

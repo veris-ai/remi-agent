@@ -275,3 +275,58 @@ async def test_the_world_v2_test_cards_decline_as_the_twin_answers(
     paid = await client.pay(order=ORDER, method=card, amount_cents=10_000, at=AT)
     assert (paid.status, paid.response_code, paid.response_message) == ("rejected", code, words)
     await client.close()
+
+
+@pytest.mark.parametrize(
+    ("number", "exp_month", "exp_year", "code", "words"),
+    [
+        (
+            "4111111111111111",
+            10,
+            2026,
+            "54",
+            "This card is expired.",
+        ),  # accepted when saved, declined at charge
+        ("411111111111116", 8, 2028, "14", "This card number is invalid."),  # a length Visa does not issue
+    ],
+)
+async def test_a_card_the_twin_saves_can_still_decline_at_charge(
+    number: str, exp_month: int, exp_year: int, code: str, words: str
+) -> None:
+    twin, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number=number, exp_month=exp_month, exp_year=exp_year, cvc="123", holder="M B", at=AT
+    )
+    paid = await client.pay(order=ORDER, method=card, amount_cents=10_000, at=AT)
+    assert (paid.status, paid.response_code, paid.response_message) == ("rejected", code, words)
+    assert twin.payments[-1]["status"] == "rejected"
+    await client.close()
+
+
+async def test_a_bad_security_code_sent_at_charge_is_a_rejected_payment_nz() -> None:
+    """The double as the twin: a card charge's cvv_pii, when sent, declines NZ when it is the wrong length for the
+    card (Remi sends the security code only when the card is saved)."""
+    twin, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+    )
+    body = {
+        "version": "3.0",
+        "site_identifier": SITE_IDENTIFIER,
+        "timestamp": str(int(AT.timestamp())),
+        "pnm_order_identifier": ORDER,
+        "payment_method_identifier": card.method_id,
+        "payment_amount": "100.00",
+        "payment_currency": "USD",
+        "cvv_pii": "12",
+    }
+    body["signature"] = signature(body, HMAC_SECRET)
+    answer = twin.handle(
+        httpx.Request("POST", "https://twin.example/json-api/make_payment", json=body)
+    ).json()
+    assert (answer["payment"]["payment_status"], answer["payment"]["response_code"]) == ("rejected", "NZ")
+    assert (
+        answer["payment"]["response_message"]
+        == "This payment didn't complete because the security code was invalid."
+    )
+    await client.close()
