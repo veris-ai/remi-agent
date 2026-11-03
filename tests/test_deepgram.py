@@ -2,22 +2,24 @@
 
 The parity matrix covers the shared contract (instructions, tools, call start,
 end_call); these cover what is Deepgram's own: the one ``Settings`` message,
-audio held until ``SettingsApplied``, binary audio both ways, barge-in, and a
-hang-up that waits for the agent to finish speaking.
+audio held until ``SettingsApplied``, binary audio both ways, barge-in, a
+hang-up that waits for the agent to finish speaking, and the managed LLM's
+prompt cap (refused before connecting; ``PROMPT_TOO_LONG`` fails the call).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 
-from .fakes import HELLO, REMI, FakeLine, FakeVendorSocket, ScriptedSession, runtime
+from .fakes import HELLO, REMI, FakeLine, FakeVendorSocket, ScriptedSession, remi_screen_pop_runtime, runtime
 
 pytest.importorskip("vamos_voice.providers.deepgram")
 
-from vamos_voice.providers.deepgram import DeepgramProvider
+from vamos_voice.providers.deepgram import MANAGED_LLM_PROMPT_MAX_CHARS, DeepgramProvider
 
 AUDIO = b"\x00\x01" * 240
 
@@ -132,3 +134,52 @@ async def test_a_vendor_error_fails_the_call() -> None:
     sock.push({"type": "Error", "code": "UNPARSABLE_CLIENT_MESSAGE", "description": "bad"})
     with pytest.raises(RuntimeError, match="UNPARSABLE_CLIENT_MESSAGE"):
         await asyncio.wait_for(task, 3)
+
+
+async def test_instructions_over_the_managed_llm_cap_are_refused_before_connecting() -> None:
+    sock = FakeVendorSocket()
+    call = runtime(REMI)
+    call.setup = replace(call.setup, instructions="x" * (MANAGED_LLM_PROMPT_MAX_CHARS + 1))
+    with pytest.raises(RuntimeError, match="truncated prompt"):
+        await asyncio.wait_for(provider(sock).run_call(call), 3)
+    assert not hasattr(sock, "url"), "never connected"
+
+
+async def test_instructions_at_the_managed_llm_cap_are_sent_whole() -> None:
+    sock = FakeVendorSocket()
+    call = runtime(REMI)
+    call.setup = replace(call.setup, instructions="x" * MANAGED_LLM_PROMPT_MAX_CHARS)
+    task = asyncio.create_task(provider(sock).run_call(call))
+    settings = await sock.wait_for(lambda f: f.get("type") == "Settings")
+    assert settings["agent"]["think"]["prompt"] == call.setup.instructions
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_remis_instructions_with_the_screen_pop_fit_the_managed_llm_cap() -> None:
+    call = await remi_screen_pop_runtime([], FakeLine())
+    assert "# Account on screen" in call.setup.instructions
+    assert len(call.setup.instructions) <= MANAGED_LLM_PROMPT_MAX_CHARS
+
+
+@pytest.mark.parametrize("settings_applied", [False, True])
+async def test_a_prompt_too_long_warning_fails_the_call(settings_applied: bool) -> None:
+    sock = FakeVendorSocket()
+    _, _, _, task = await start(sock)
+    if settings_applied:
+        sock.push({"type": "SettingsApplied"})
+    truncated = "The prompt exceeded the maximum allowed length and was truncated."
+    sock.push({"type": "Warning", "code": "PROMPT_TOO_LONG", "description": truncated})
+    with pytest.raises(RuntimeError, match="PROMPT_TOO_LONG"):
+        await asyncio.wait_for(task, 3)
+
+
+async def test_other_warnings_are_logged_and_the_call_goes_on(caplog: pytest.LogCaptureFixture) -> None:
+    sock = FakeVendorSocket()
+    _, _, _, task = await start(sock)
+    sock.push({"type": "SettingsApplied"})
+    sock.push({"type": "Warning", "code": "VOICE_PROMPT_ADDED", "description": "voice instructions added"})
+    await asyncio.sleep(0.05)
+    assert not task.done() and "VOICE_PROMPT_ADDED" in caplog.text
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)

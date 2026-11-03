@@ -396,7 +396,7 @@ client-side over the same socket):
 
 | Capability | deepgram | elevenlabs | fluxions |
 |---|---|---|---|
-| Where the instructions and tools go | `Settings` (`agent.think.prompt` / `.functions`), per call | a stored agent **created per call** (REST) and deleted after it; the prompt also rides `conversation_initiation_client_data` (for the trace) | `session.update` `soul` / `tools`, per call. **The host caps the soul** (`GET /config` `max_soul_chars`, 4,000 on `api.fluxions.ai`) and silently truncates: a call over the cap fails before connecting |
+| Where the instructions and tools go | `Settings` (`agent.think.prompt` / `.functions`), per call. **The managed LLM caps the prompt** at 25,000 characters and truncates a longer one (`PROMPT_TOO_LONG` warning): a call over the cap fails before connecting, and that warning fails the call | a stored agent **created per call** (REST) and deleted after it; the prompt also rides `conversation_initiation_client_data` (for the trace) | `session.update` `soul` / `tools`, per call. **The host caps the soul** (`GET /config` `max_soul_chars`, 4,000 on `api.fluxions.ai`) and silently truncates: a call over the cap fails before connecting |
 | Tool schema changes | none | every parameter needs a `description`; an undescribed one gets its own name | none |
 | Barge-in truncation | **no**: Deepgram stops itself on `UserStartedSpeaking` | **no**: ElevenLabs stops itself (`interruption`) | the client is the playback buffer: audio arrives ~6x real time, is released at most 1 s ahead, `audio.flush` drops the rest, `playback.pos` reports what was heard |
 | Caller transcription | `ConversationText` (role `user`) | `user_transcript` | `user.transcript` |
@@ -787,7 +787,7 @@ uv run ruff check . && uv run ruff format --check .
   frame translation (session shape, the screen pop in both GPT-Live instruction sets,
   barge-in, end of call), pinned where it differs from OpenAI Realtime.
 - `tests/test_deepgram.py`, `tests/test_elevenlabs.py`, `tests/test_fluxions.py`: the managed
-  voice agents' own protocol (Deepgram's `Settings` and audio held until `SettingsApplied`;
+  voice agents' own protocol (Deepgram's `Settings`, audio held until `SettingsApplied` and its prompt cap;
   ElevenLabs' per-call agent, always deleted, and its parameter descriptions; Fluxions' soul
   cap, full voice id, 16 kHz uplink and playback buffer), each with its hang-up timing.
 - `tests/test_cascade.py`: the shared in-pod cascade with scripted legs (`tests/cascade_fakes.py`):
