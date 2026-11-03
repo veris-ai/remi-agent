@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 
+from vamos_voice.providers.base import CallRuntime
 from vamos_voice.providers.grok_voice import API_KEY_ENV, GrokVoiceProvider
 
 from .fakes import REMI, FakeLine, FakeVendorSocket, ScriptedSession, runtime
@@ -44,38 +45,49 @@ def test_session_keeps_voice_instructions_and_vad_at_the_top_level() -> None:
     assert all(t["type"] == "function" for t in session["tools"])
 
 
-async def _started_call(sock: FakeVendorSocket, provider, script) -> tuple[FakeLine, asyncio.Task]:
+async def _started_call(
+    sock: FakeVendorSocket, provider, script
+) -> tuple[FakeLine, CallRuntime, asyncio.Task]:
     line = FakeLine()
-    task = asyncio.create_task(provider.run_call(runtime(REMI, line, ScriptedSession())))
+    call = runtime(REMI, line, ScriptedSession())
+    task = asyncio.create_task(provider.run_call(call))
     await sock.wait_for(script.is_setup)
-    return line, task
+    return line, call, task
 
 
-async def _barge_in(provider, script_cls) -> list[dict]:
+async def _barge_in(provider, script_cls) -> tuple[list[dict], int]:
+    """Three seconds of reply at once, then the caller cuts in: the truncates sent, and the ms of
+    the reply still accepted (written or queued) at the barge-in."""
     sock = FakeVendorSocket()
     script = script_cls(sock)
     provider.connect = sock.connector()
-    line, task = await _started_call(sock, provider, script)
+    line, call, task = await _started_call(sock, provider, script)
     script.callee_spoke()
-    sock.push(
-        {
-            "type": "response.output_audio.delta",
-            "item_id": "itemA",
-            "delta": base64.b64encode(ONE_SECOND).decode(),
-        }
-    )
+    for _ in range(3):  # three seconds at once: two go to the line (the 1 s lead), one is queued
+        sock.push(
+            {
+                "type": "response.output_audio.delta",
+                "item_id": "itemA",
+                "delta": base64.b64encode(ONE_SECOND).decode(),
+            }
+        )
     await asyncio.sleep(0.05)
     assert line.sent, "the reply reached the caller"
     sock.push({"type": "input_audio_buffer.speech_started", "item_id": "u2"})
     await asyncio.sleep(0.05)
+    accepted = call.outbound.sent_ms("itemA")
     task.cancel()
-    return [f for f in sock.sent if f.get("type") == "conversation.item.truncate"]
+    await call.outbound.close()  # as the server does when a call ends
+    return [f for f in sock.sent if f.get("type") == "conversation.item.truncate"], accepted
 
 
-async def test_barge_in_sends_no_truncate_to_grok() -> None:
-    assert await _barge_in(GrokVoiceProvider("k", "m", "eve"), GrokScript) == []
+async def test_barge_in_sends_no_truncate_to_grok_and_drops_nothing() -> None:
+    truncates, accepted = await _barge_in(GrokVoiceProvider("k", "m", "eve"), GrokScript)
+    assert truncates == []
+    assert accepted == 3000, "Grok keeps the whole reply in its context: all of it is still to be heard"
 
 
 async def test_barge_in_still_truncates_on_openai() -> None:
-    (truncate,) = await _barge_in(openai_call(FakeVendorSocket())["provider"], OpenAIScript)
-    assert truncate["item_id"] == "itemA" and 0 <= truncate["audio_end_ms"] < 1000
+    (truncate,), accepted = await _barge_in(openai_call(FakeVendorSocket())["provider"], OpenAIScript)
+    assert truncate["item_id"] == "itemA" and truncate["audio_end_ms"] == 2000, "what reached the caller"
+    assert accepted == 2000, "the queued second was dropped"

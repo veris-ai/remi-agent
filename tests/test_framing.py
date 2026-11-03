@@ -261,3 +261,42 @@ async def test_pipecat_serializer_binary_framing_is_unchanged() -> None:
     assert (await binary.deserialize(HELLO)).audio == HELLO
     assert await binary.serialize(EndFrame()) is None, "binary hangs up with the close alone"
     assert await binary.deserialize('{"type": "end"}') is None
+
+
+@pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
+async def test_pipecat_transport_writes_agent_audio_at_speaking_pace() -> None:
+    """The caller plays every byte it is sent, so agent audio must leave at speaking speed (the
+    other vendors' ``OutboundAudio`` sees to it). Pipecat's own transport already does, on the
+    pinned pipecat-ai 1.12: one 40 ms chunk per 40 ms (its ``_send_interval`` halves bytes per
+    second because PCM16 has two bytes a sample), so this pins it against a version bump."""
+    from pipecat.clocks.system_clock import SystemClock
+    from pipecat.frames.frames import OutputAudioRawFrame
+    from pipecat.processors.frame_processor import FrameProcessorSetup
+    from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
+    from pipecat.utils.asyncio.task_manager import TaskManager
+    from starlette.websockets import WebSocketState
+
+    from vamos_voice.providers.pipecat.serializer import LineSerializer
+
+    class Socket:
+        client_state = application_state = WebSocketState.CONNECTED
+
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        async def send_bytes(self, data: bytes) -> None:
+            self.sent.append(data)
+
+    socket = Socket()
+    params = FastAPIWebsocketParams(  # as PipecatProvider.build_worker sets the output
+        audio_out_enabled=True, audio_out_sample_rate=24_000, serializer=LineSerializer(Framing.BINARY)
+    )
+    output = FastAPIWebsocketTransport(websocket=socket, params=params).output()  # type: ignore[arg-type]
+    await output.setup(FrameProcessorSetup(SystemClock(), TaskManager(), None))  # type: ignore[arg-type]
+    chunk = OutputAudioRawFrame(b"\x01\x00" * (output.audio_chunk_size // 2), 24_000, 1)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    for _ in range(12):  # 480 ms of audio
+        await output.write_audio_frame(chunk)
+    assert len(b"".join(socket.sent)) == 12 * len(chunk.audio) == 12 * 48 * 40
+    assert loop.time() - began >= 0.4, "written faster than it plays"
