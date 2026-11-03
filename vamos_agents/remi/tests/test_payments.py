@@ -25,12 +25,7 @@ from vamos_agents.remi.payments import (
 )
 
 from .fake_paynearme import (
-    EXPIRED_CARD,
     HMAC_SECRET,
-    INVALID_ACCOUNT_NUMBER,
-    INVALID_CARD_NUMBER,
-    INVALID_ROUTING_NUMBER,
-    INVALID_SECURITY_CODE,
     SITE_IDENTIFIER,
     FakePayNearMe,
     signature,
@@ -207,29 +202,25 @@ async def test_card_details_are_never_logged_or_kept(caplog) -> None:
     await client.close()
 
 
+#: The twin's own words (services-sandbox services/paynearme), asserted as literals.
+BAD_CHECKSUM = "Card number isn’t valid (bad checksum)"
+BAD_ABA = "ABA isn’t valid (bad checksum)"
+BAD_ACCOUNT = "This account number is invalid"
+BAD_SECURITY_CODE = "This payment didn't complete because the security code was invalid."
+
+
 @pytest.mark.parametrize(
     ("details", "words"),
     [
         (
             {"number": "4111111111111112", "exp_month": 8, "exp_year": 2028, "cvc": "123"},
-            INVALID_CARD_NUMBER,
+            BAD_CHECKSUM,
         ),  # Luhn
-        (
-            {"number": "411111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "123"},
-            INVALID_CARD_NUMBER,
-        ),  # 15-digit Visa
-        ({"number": "4111111111111111", "exp_month": 10, "exp_year": 2026, "cvc": "123"}, EXPIRED_CARD),
-        (
-            {"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "12"},
-            INVALID_SECURITY_CODE,
-        ),
-        (
-            {"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "1234"},
-            INVALID_SECURITY_CODE,
-        ),
+        ({"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "12"}, BAD_SECURITY_CODE),
+        ({"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "1234"}, BAD_SECURITY_CODE),
         (
             {"number": "378282246310005", "exp_month": 8, "exp_year": 2028, "cvc": "123"},
-            INVALID_SECURITY_CODE,
+            BAD_SECURITY_CODE,
         ),  # Amex: 4
     ],
 )
@@ -248,7 +239,7 @@ async def test_the_twins_card_validation_is_reported_in_its_words(details: dict,
 
 @pytest.mark.parametrize(
     ("routing", "account", "words"),
-    [("110000001", "000123456789", INVALID_ROUTING_NUMBER), ("110000000", "123", INVALID_ACCOUNT_NUMBER)],
+    [("110000001", "000123456789", BAD_ABA), ("110000000", "123", BAD_ACCOUNT)],
 )
 async def test_the_twins_bank_validation_is_reported_in_its_words(
     routing: str, account: str, words: str

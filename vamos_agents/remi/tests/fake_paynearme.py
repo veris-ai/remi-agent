@@ -1,11 +1,11 @@
 """The PayNearMe twin's vendor API as a test double: what Remi's payments client relies on, served in memory.
 
 The twin is services-sandbox ``services/paynearme`` (PayNearMe JSON API v3.0)
-with #2054 (the up-to order, no implied fee, the vendor's error envelope) and
-#2056 (input validation), seeded by World v2 (``world_v2/paynearme.py``): one
-``up-to`` order per placed account, no fee, and World v1's test instruments.
-This double keeps its rules and its words, as read from that code (#2056 at
-844729e):
+with #2054 (the up-to order, no implied fee, the vendor's error envelope),
+#2056 (input validation) and #2058 (required billing fields), seeded by World v2
+(``world_v2/paynearme.py``): one ``up-to`` order per placed account, no fee, and
+World v1's test instruments. This double keeps its rules and its words, as read
+from that code (the stack's head, aec8fdba):
 
 - every request is ``POST /json-api/<operation>`` with a JSON body carrying
   ``version`` ``3.0``, ``site_identifier``, ``timestamp`` and ``signature``:
@@ -15,13 +15,12 @@ This double keeps its rules and its words, as read from that code (#2056 at
   clock, answers ``Authentication failed``;
 - ``create_payment_method`` validates what a debtor reads out, then tokenizes
   it on the order and answers only the new method. A card: the number's Luhn
-  check digit and a length its brand issues ("This card number is invalid."),
-  an expiry of MM/YY, MM/YYYY, MMYY or MMYYYY ("Invalid expiration date"), not
-  already past its month ("This card is expired."), and a security code of 3
+  checksum only ("Card number isn’t valid (bad checksum)"), an expiry of MM/YY,
+  MM/YYYY, MMYY or MMYYYY ("Invalid expiration date"), and a security code of 3
   digits, 4 for American Express ("This payment didn't complete because the
   security code was invalid."). A bank account: a 9-digit routing number with
-  its ABA check digit ("This isn’t a valid routing number") and an account
-  number of 4 to 17 digits ("This account number is invalid");
+  its ABA check digit ("ABA isn’t valid (bad checksum)") and an account number
+  of 4 to 17 digits ("This account number is invalid");
 - ``make_payment`` charges it: a test instrument's outcome by its fingerprint
   (World v2: ``51``, ``05``, ``54``, ``GS02``), a card that lapsed since it was
   saved ``54``, anything else approved (``0``, ``Approved``). A card charge's
@@ -56,11 +55,11 @@ EXCLUDED = frozenset(
 WINDOW_S = 300
 
 # The twin's refusal texts (services/paynearme logic.py, #2056).
-INVALID_CARD_NUMBER = "This card number is invalid."
+INVALID_CARD_CHECKSUM = "Card number isn’t valid (bad checksum)"
+INVALID_ROUTING_CHECKSUM = "ABA isn’t valid (bad checksum)"
 INVALID_EXPIRY = "Invalid expiration date"
 EXPIRED_CARD = "This card is expired."
 INVALID_SECURITY_CODE = "This payment didn't complete because the security code was invalid."
-INVALID_ROUTING_NUMBER = "This isn’t a valid routing number"
 INVALID_ACCOUNT_NUMBER = "This account number is invalid"
 #: Card-network PAN lengths; an unrecognised prefix may be 12 to 19 digits.
 CARD_LENGTHS = {
@@ -127,10 +126,9 @@ def luhn_valid(digits: str) -> bool:
 
 
 def card_number_valid(number: Any) -> bool:
+    """Whether a card number passes the Luhn checksum (all tokenization checks of it)."""
     digits = entered_digits(number)
-    if digits is None or not luhn_valid(digits):
-        return False
-    return len(digits) in CARD_LENGTHS.get(card_brand(digits) or "", set(range(12, 20)))
+    return digits is not None and luhn_valid(digits)
 
 
 def security_code_valid(code: Any, brand: str | None) -> bool:
@@ -251,7 +249,7 @@ class FakePayNearMe:
             if not number or not raw_expiry:
                 return _error("Card number and expiration are required")
             if not card_number_valid(number):
-                return _error(INVALID_CARD_NUMBER)
+                return _error(INVALID_CARD_CHECKSUM)
             expiry = card_expiry(raw_expiry)
             if expiry is None:
                 return _error(INVALID_EXPIRY)
@@ -273,7 +271,7 @@ class FakePayNearMe:
             if not number or not aba:
                 return _error("Routing and account numbers are required")
             if not routing_number_valid(aba):
-                return _error(INVALID_ROUTING_NUMBER)
+                return _error(INVALID_ROUTING_CHECKSUM)
             if not account_number_valid(number):
                 return _error(INVALID_ACCOUNT_NUMBER)
             fingerprint, expiry, brand = instrument_fingerprint("ach", aba, number), None, None

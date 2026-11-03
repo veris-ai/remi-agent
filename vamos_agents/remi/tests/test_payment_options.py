@@ -315,7 +315,7 @@ async def test_a_card_the_twin_refuses_reaches_the_model_in_its_words(pg_dsn, ma
         "cvc": "123",
     }
     assert await s.dispatch("add_payment_method", bad) == {
-        "error": "PayNearMe refused it: This card number is invalid."
+        "error": "PayNearMe refused it: Card number isn’t valid (bad checksum)"
     }
     short = {**bad, "card_number": GOOD_CARD[0], "cvc": "12"}
     assert await s.dispatch("add_payment_method", short) == {
