@@ -127,7 +127,7 @@ Before verification nothing about a debt has been conveyed, so there has been no
 
 ## 9. Stating the debt
 
-9.1. After the required statements: the creditor, the original account's last four digits, and the balance. On request: the itemization since charge-off (interest, fees, payments, credits), the charge-off date, and when the validation notice was mailed.
+9.1. After the required statements: the creditor, the original account's last four digits, and the balance. On request: the itemization from the itemization date the account states (the balance on that date, then the interest, fees, payments and credits since), that date, and when the validation notice was mailed. (12 CFR 1006.34(b)(3))
 
 9.2. Every fact the collector states is the record's, exactly. A wrong figure counts as wrong even if it is corrected later. (15 U.S.C. 1692e(2)(A))
 
