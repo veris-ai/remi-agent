@@ -21,6 +21,12 @@ The protocol (developers.deepgram.com, "Voice Agent API"):
   ``name``, ``arguments`` as a JSON string, ``client_side``) and is answered
   with ``FunctionCallResponse`` (``id``, ``name``, ``content`` as a string).
 
+Deepgram's managed LLMs keep at most 25,000 characters of ``agent.think.prompt``
+and truncate a longer one, with a ``PROMPT_TOO_LONG`` warning (a bring-your-own
+LLM endpoint has no cap; this provider always uses the managed one).
+Instructions are never shortened here: a call whose instructions exceed the cap
+fails before connecting, and a ``PROMPT_TOO_LONG`` warning fails the call.
+
 Turn taking is Deepgram's own: the ``nova-3`` listen provider exposes no
 endpointing setting in ``Settings``, so ``TurnTaking`` is not mapped (as on
 GPT-Live). There is no truncate: on ``UserStartedSpeaking`` Deepgram stops its
@@ -57,6 +63,11 @@ DEFAULT_LISTEN_MODEL = "nova-3"
 #: The think model of the VAmoS Energy Deepgram candidate, on Deepgram's managed OpenAI access.
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
 DEFAULT_VOICE = "aura-2-thalia-en"
+#: The longest ``agent.think.prompt`` a managed LLM keeps (Deepgram's "Voice Agent errors and warnings":
+#: 25,000 characters for managed LLMs, unlimited for bring-your-own LLMs).
+MANAGED_LLM_PROMPT_MAX_CHARS = 25_000
+#: The warning Deepgram sends when it truncated the prompt.
+PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
 #: Agent audio has no per-turn id on this API; playout is tracked per agent turn.
 AUDIO_ITEM = "turn"
 
@@ -108,6 +119,12 @@ class DeepgramProvider(VoiceProvider):
         }
 
     async def run_call(self, call: CallRuntime) -> None:
+        prompt = len(call.setup.instructions)
+        if prompt > MANAGED_LLM_PROMPT_MAX_CHARS:
+            raise RuntimeError(
+                f"the instructions are {prompt} characters and Deepgram's managed LLM keeps only "
+                f"{MANAGED_LLM_PROMPT_MAX_CHARS} of the prompt: the agent would run on a truncated prompt"
+            )
         async with self.connect(URL, {"Authorization": f"Token {self._api_key}"}) as ws:
             await _DeepgramCall(self, ws, call).run()
 
@@ -142,6 +159,7 @@ class _DeepgramCall:
                 break
             if event.get("type") == "Error":
                 raise RuntimeError(f"deepgram error before SettingsApplied: {_describe(event)}")
+            _refuse_truncation(event)
         if message is None:
             raise RuntimeError("Deepgram closed the session before SettingsApplied")
 
@@ -187,6 +205,7 @@ class _DeepgramCall:
         elif kind == "Error":
             raise RuntimeError(f"deepgram error: {_describe(event)}")
         elif kind == "Warning":
+            _refuse_truncation(event)
             logger.warning("deepgram warning: %s", _describe(event))
         return False
 
@@ -205,6 +224,12 @@ class _DeepgramCall:
     async def hang_up(self) -> bool:
         await self.call.hang_up()
         return True
+
+
+def _refuse_truncation(event: dict[str, Any]) -> None:
+    """Fail the call on ``PROMPT_TOO_LONG``: Deepgram cut the instructions, so the agent would run on less."""
+    if event.get("type") == "Warning" and event.get("code") == PROMPT_TOO_LONG:
+        raise RuntimeError(f"deepgram truncated the prompt: {_describe(event)}")
 
 
 def _describe(event: dict[str, Any]) -> str:

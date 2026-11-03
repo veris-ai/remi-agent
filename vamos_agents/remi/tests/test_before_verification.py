@@ -8,6 +8,7 @@ collections_bench/generated/manifest.json at the commit collections_world.sql na
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -241,67 +242,118 @@ def rendered_prompt() -> str:
 
 
 def section(text: str, heading: str) -> str:
-    return text.split(f"# {heading}\n")[1].split("\n# ")[0]
+    """The text under the heading line ``heading`` (e.g. "## 6. Verification"), up to the next heading."""
+    return f"\n{text}".split(f"\n{heading}\n")[1].split("\n#")[0]
 
 
 def test_the_greeting_uses_a_given_name_and_never_re_asks_it() -> None:
-    stages = section(rendered_prompt(), "The call, stage by stage")
-    greet = stages.split("1. **Greet.**")[1].split("2. **Timing.**")[0]
-    assert "If they said their name, use it and\n   never ask for it again" in greet
+    text = rendered_prompt()
+    opening = section(text, "## 4. Opening")
     assert (
-        "an automated assistant calling from\n   Tallmere Account Services, about a personal business matter."
-        in greet
+        "A person who has already given the consumer's name as their own is not asked for it again."
+        in opening
     )
-    assert "Is this <first name>?" in greet  # only when they gave no name
-    assert "full name" not in stages.split("6. **After verification**")[0]
+    assert (
+        "opens with the collector's name, the agency's name (Tallmere Account Services) and the fact "
+        "that the collector is an automated assistant" in opening
+    )
+    assert (
+        "If the call may continue, the collector then asks for the consumer by name; the first name is enough."
+        in opening
+    )
+    # a call that may not continue never asks for the consumer
+    assert "does not ask for the consumer" in section(text, "## 3. Whether a call may continue")
+    # the manual lets the consumer be named by first or full name before verification
+    before = section(text, "## 5. Before the right person is confirmed")
+    assert "calling about a personal business matter for the consumer, named by first or full name" in before
 
 
-def test_the_stages_explain_the_check_and_verify_one_fact_at_a_time() -> None:
-    stages = section(rendered_prompt(), "The call, stage by stage")
-    for line in (
-        'never "regarding your\naccount"',
-        "Is now an okay time?",
-        "for their privacy",
-        "one at\n   a time; they choose",
-        "a first name is enough",
-        "Three wrong answers end the call",
-        "by their second push-back at\n   the latest",
-        "2 1 2, 5 5 5, 0 1 0 0, where a person answers",
-        "verify_right_party's result lists the disclosures due",
-        "before anything about the account",
-        "one per turn",
-        "Keep the exact wording",
-        "itemization only if asked",
+def test_the_manual_explains_the_check_and_what_follows_verification() -> None:
+    text = rendered_prompt()
+    for heading, line in (
+        ("# The call", "The agency's callback number, answered by a person, is 2 1 2, 5 5 5, 0 1 0 0;"),
+        (
+            "## 5. Before the right person is confirmed",
+            "says nothing about a debt, the creditor, an amount, or that the call is about money, in any words",
+        ),
+        ("## 5. Before the right person is confirmed", "whether now is a good time"),
+        (
+            "## 5. Before the right person is confirmed",
+            "why verification details are needed, said before or when it first asks for them",
+        ),
+        (
+            "## 5. Before the right person is confirmed",
+            "A wary person is offered a way out no later than their second push-back.",
+        ),
+        (
+            "## 6. Verification",
+            "verified by their name, said by them or confirmed when asked for, plus any two of date of birth, "
+            "ZIP code and the last four digits of their Social Security number",
+        ),
+        ("## 6. Verification", "The person chooses which two."),
+        ("## 6. Verification", "Three wrong answers end the call with nothing disclosed."),
+        (
+            "## 8. Required statements, once verified",
+            "these come in this order, before the creditor, the account or any amount, in one turn or several",
+        ),
+        (
+            "## 8. Required statements, once verified",
+            "that the call is recorded, and the recording may be used in connection with collecting a debt",
+        ),
+        (
+            "## 8. Required statements, once verified",
+            "that the agency is a debt collector, this is an attempt to collect a debt, and any information "
+            "obtained will be used for that purpose",
+        ),
+        (
+            "## 9. Stating the debt",
+            "On request: the itemization from the itemization date the account states",
+        ),
+        ("## 9. Stating the debt", "(12 CFR 1006.34(b)(3))"),
     ):
-        assert line in stages, line
+        assert line in section(text, heading), line
+
+
+def test_the_prompt_never_says_the_accounts_are_charged_off() -> None:
+    """Not every account is charged off: a hospital account is itemized from its last statement."""
+    text = rendered_prompt()
+    assert "Creditors place past-due consumer accounts with the agency" in text
+    assert re.search(r"charge[d -]*off", text, re.IGNORECASE) is None
 
 
 def test_push_back_gets_a_reason_and_a_way_out() -> None:
     text = rendered_prompt()
-    pushback = section(text, "Push-back before verification")
+    before = section(text, "## 5. Before the right person is confirmed")
     for line in (
-        '"Why do you need my details?": so their private business isn\'t shared with the wrong person',
-        '"Is this a scam?"',
-        '"Are you a robot?": yes, an automated assistant',
-        "the number the agency has on file",
-        "record_verification_refused",
-        "stop_calling_this_number",
+        "why verification details are needed, said before or when it first asks for them",
+        "that this is the number the agency has on file for the consumer",
+        "A way out is the callback number answered by a person, an offer to call back later or for them to "
+        "call that number, or that anything in writing goes to their address on file.",
+        "A wary person is offered a way out no later than their second push-back.",
     ):
-        assert line in pushback, line
-    refusal = pushback.split("- They decline to verify")[1].split('- "Stop calling"')[0]
-    assert "give the callback number" in refusal and "never argue" in refusal
+        assert line in before, line
+    opening = section(text, "## 4. Opening")
+    assert (
+        "Asked whether it is a person, the collector says truthfully that it is an automated assistant."
+        in opening
+    )
+    assert (
+        "The callback number is stated during every call, including calls that end before verification."
+        in opening
+    )
+    verification = section(text, "## 6. Verification")
+    refusal = verification.split("6.5. ")[1].split("\n6.6. ")[0]
+    assert "offers a way out" in refusal and "doesn't argue" in refusal and "records the refusal" in refusal
     # smoke v8: ~30 calls ended when a wary consumer asked for a number or a letter; those are questions
     assert "send me a letter" not in refusal.lower() and "not giving you that" not in refusal
-    question = pushback.split("- A question or a condition is not a refusal")[1].split("\n- ")[0]
-    assert "for a number, for a" in question and "ask for the verification detail again" in question
+    stop = verification.split("6.6. ")[1]
+    assert "calls to this number stop" in stop and "consent on this number is revoked" in stop
 
 
-def test_no_leaked_example_amount_or_name_and_no_narration() -> None:
+def test_no_leaked_example_amount_or_name() -> None:
     text = rendered_prompt()
     for leaked in ("185", "hundred", "Marisol", "May I speak with"):
         assert leaked not in text, leaked
-    talk = section(text, "How you talk")
-    assert "No narration" in talk and "Never ask again for something they answered" in talk
 
 
 # --- the bench's cases, scripted, on the whole World ---------------------------------------------

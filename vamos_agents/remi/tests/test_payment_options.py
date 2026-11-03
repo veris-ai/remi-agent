@@ -10,6 +10,7 @@ the disclosures.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date
 from importlib.resources import files
 from typing import Any
@@ -539,22 +540,36 @@ async def test_a_down_payment_that_did_not_post_sets_up_no_plan(
 # --- the prompt and the shared registry ------------------------------------------------------------
 
 
-def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_tool() -> None:
+def test_the_prompt_takes_the_creditors_policy_from_its_tool_and_has_a_rule_for_every_intent() -> None:
     text = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
     names = {t.name for t in REGISTRY.specs()}
     assert "negotiate" not in text and "judge best" not in text and "counter-offer" not in text
-    payments = " ".join(text.split("# Payments and arrangements")[1].split("# Never")[0].split())
+    # the prompt states rules; any tool name it carries (get_payment_options, manual 8.3) must be a real tool
+    assert set(re.findall(r"(?<![$\w])[a-z]+(?:_[a-z]+)+\b", text)) <= names
+    flat = " ".join(text.split())
+    money = flat.split("## 11. Money")[1].split(" ## ")[0]
     for line in (
-        "The creditor's policy decides the money.",
-        "get_payment_options returns the creditor's options and the creditor's rules: follow those rules exactly.",
-        "Offer nothing that is not on the list.",
-        # smoke v8: a plan's first date is agreed before it is created (how the tools are used, not policy)
-        "get their agreement to that date before you create it",
+        "The creditor's policy (8.3) decides what may be offered, and nothing else is offered.",
+        # smoke v8: a plan's first date is agreed before it is created
+        "Before a charge or an arrangement, its exact terms are stated (the amount; for a plan, each "
+        "payment's amount and date) and the consumer agrees to them.",
+        "A payment plan is a schedule of two or more monthly payments",
+        "A promise to pay is an exact amount, on an exact date no more than 14 days from today",
+        "The payment gateway decides whether a charge goes through",
     ):
-        assert line in payments, line
+        assert line in money, line
+    # the account's creditor policy comes from get_payment_options after the required statements; the
+    # prompt itself carries no creditor's policy
+    statements = flat.split("## 8. Required statements, once verified")[1].split(" ## ")[0]
+    assert (
+        "8.3. After these statements and before stating the debt, the collector calls get_payment_options. "
+        "It returns this account's creditor policy" in statements
+    )
+    assert "# Part 3" not in text and "Every creditor" not in text
+    for creditor in ("Ashcombe", "Pellbrook", "Beckford", "Marlow", "Harlow", "Kessington"):
+        assert creditor not in text, creditor
     # the bench measures how a model follows the creditor's rules it reads at runtime: the prompt never
     # restates what to offer, in what order, what unlocks what, or how to move between options
-    flat = " ".join(text.split())
     for policy in (
         "lowest discount",
         "smallest discount",
@@ -581,27 +596,31 @@ def test_the_prompt_runs_the_creditors_ladder_and_routes_every_intent_to_its_too
         "pay-by date",
     ):
         assert policy not in flat, policy
-    during = text.split("# During the conversation")[1].split("# Payments")[0]
-    for intent, tool in (
-        ("Dispute", "log_dispute"),
-        ("Stop contacting me", 'record_flag "cease"'),
-        ("Attorney", 'record_flag "attorney"'),
-        ("Bankruptcy", 'record_flag "bankruptcy"'),
-        ("Hardship", 'record_flag "hardship"'),
-        ("Active military duty", "transfer_to_human"),
-        ("Asked for a person", "transfer_to_human"),
+    said = " ".join(text.split("## 10. What the consumer says")[1].split("\n## ")[0].split())
+    for intent, rule in (
+        ("Dispute", "Collection stops for the call and the dispute is recorded."),
+        ("Stop contacting me", "The request is acknowledged and recorded"),
+        ("Attorney", "asks for the attorney's name and phone number, records them, and says nothing more"),
+        ("Bankruptcy", "asks for the chapter, case number, court and filing date, records them, and stops"),
+        ("Hardship", "It is acknowledged and recorded as they stated it."),
+        ("Active military duty", "records it, and transfers the call to a person"),
+        ("Asked for a person", "A request to speak with a person is transferred on the first request."),
     ):
-        entry = during.split(f"- {intent}")[1].split("\n- ")[0]
-        assert tool in entry, (intent, tool)
-        assert tool.split()[0] in names
-    cease = " ".join(during.split("- Stop contacting me")[1].split("\n- ")[0].split())
-    assert "a written confirmation will follow" in cease  # the RULES require saying it (smoke v8, REMI-066)
+        assert rule in said, intent
+    for tool in ("log_dispute", "record_flag", "transfer_to_human"):  # the tools that record and transfer
+        assert tool in names, tool
+    assert "after a cease the consumer gets at most one written confirmation" in said
     # smoke v8: a creditor and balance invented before get_debt_details was called
-    assert "never say a creditor, account number or amount before it, and say only what it returns" in flat
-    for tool in ("get_payment_options", "take_payment", "create_arrangement", "record_promise"):
-        assert tool in names and tool in text
-    # when to ask for approval is the creditor's rule (and the option's status), not the prompt's
-    assert "request_approval" in names
+    assert "before the creditor, the account or any amount" in flat
+    assert "Every fact the collector states is the record's, exactly." in flat
+    for tool in (
+        "get_payment_options",
+        "take_payment",
+        "create_arrangement",
+        "record_promise",
+        "request_approval",
+    ):
+        assert tool in names, tool
 
 
 def test_the_money_tools_take_an_option_id_never_an_amount() -> None:

@@ -240,7 +240,7 @@ def test_the_summary_is_asked_for_only_what_happened() -> None:
     from vamos_agents.remi.tools.catalog import REGISTRY
 
     prompt = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
-    assert "what actually happened and the outcome; never what you meant or were told to say" in prompt
+    assert "Before the goodbye, the call is logged once: who answered and what happened." in prompt
     (spec,) = [t for t in REGISTRY.specs() if t.name == "log_contact_attempt"]
     described = spec.parameters["properties"]["summary"]["description"]
     assert "never what you meant or were told to say" in described
