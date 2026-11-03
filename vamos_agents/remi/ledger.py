@@ -1,19 +1,23 @@
-"""The agency's ledger: each placed account's money in the World's Fineract (WORLD.md, "Money: the Fineract ledger").
+"""The agency's ledger: each placed account's money in the World's Fineract (World v2 WORLD.md, "Money").
 
-The collections Postgres holds the workflow (who was called, what was flagged,
+The collections Postgres holds the workflow (who was called, what was recorded,
 what was agreed); Fineract holds the books. A placed account ``TAS-NNNNNN`` is the
-Fineract loan whose ``externalId`` is ``TAS-NNNNNN``: its principal is the placed
-balance, its ``tas_itemization`` datatable row the itemization, its repayments
-the payments since charge-off, and its ``totalOutstanding`` the current balance.
-``FineractLedger`` is Remi's one client for it:
+Fineract loan whose ``externalId`` is ``TAS-NNNNNN``: its principal is the itemized
+balance plus interest and fees since, its ``tas_itemization`` datatable row the
+itemization (``itemized_from``: its Reg F itemization date, 12 CFR 1006.34(b)(3); in
+World v2 a hospital account's ``last_statement``, every other account's
+``charge_off``), its repayments the payments since, and its ``totalOutstanding``
+the current balance. ``FineractLedger`` is Remi's one client for it:
 
 - ``debt`` reads an account's money;
-- ``post_payment`` posts a payment the gateway approved, carrying the gateway's
-  ``payment_id`` as the transaction's ``externalId``, so a retried posting lands
-  once (Fineract refuses a repeated external id, and the retry finds the first);
-- ``write_off`` waives what a one-payment settlement left;
-- ``re_age`` puts the balance on a monthly plan and answers the schedule
-  Fineract computed; ``undo_re_age`` takes it back.
+- ``post_payment`` posts a payment PayNearMe approved, carrying PayNearMe's
+  ``pnm_payment_identifier`` as the transaction's ``externalId``, so a retried
+  posting lands once (Fineract refuses a repeated external id, and the retry
+  finds the first);
+- ``write_off`` waives what is left once a discount's payment is posted.
+
+Fineract records only money received: a plan is the agency's ``arrangements``
+row, and nothing here re-ages a loan.
 
 Amounts are cents everywhere in Remi and dollars only on this wire; dates go out
 in the format each request declares and come back as ``[y, m, d]``. Every date
@@ -27,7 +31,7 @@ model can act on, with Fineract's own code); an unreachable or failing ledger is
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Protocol
@@ -81,17 +85,14 @@ def to_dollars(cents: int) -> str:
 
 @dataclass(frozen=True)
 class Itemization:
-    charge_off_on: date
-    charge_off_balance_cents: int
-    interest_since_charge_off_cents: int
-    fees_since_charge_off_cents: int
+    """The balance's itemization from its Reg F itemization date (12 CFR 1006.34(b)(3)): ``itemized_from`` is
+    ``last_statement``, ``charge_off``, ``last_payment``, ``transaction`` or ``judgment``."""
 
-
-@dataclass(frozen=True)
-class Instalment:
-    due_on: date
-    amount_cents: int
-    paid_cents: int
+    itemized_from: str
+    itemized_on: date
+    itemized_balance_cents: int
+    interest_since_cents: int
+    fees_since_cents: int
 
 
 @dataclass(frozen=True)
@@ -102,10 +103,9 @@ class Debt:
     loan_id: int
     status: int
     itemization: Itemization
-    paid_cents: int  # since charge-off: every repayment
+    paid_cents: int  # since the itemization date: every repayment
     balance_cents: int  # what is outstanding
     last_payment_on: date | None
-    schedule: tuple[Instalment, ...] = field(default=())
 
     @property
     def open(self) -> bool:
@@ -149,11 +149,8 @@ class Ledger(Protocol):
         on: date,
         kind: Literal["card", "ach"],
         payment_id: str,
-        processor_ref: str,
     ) -> Posting: ...
     async def write_off(self, debt: Debt, *, on: date, external_id: str, note: str) -> None: ...
-    async def re_age(self, debt: Debt, *, instalments: int, first_due_on: date, external_id: str) -> Debt: ...
-    async def undo_re_age(self, debt: Debt) -> None: ...
 
 
 class FineractLedger:
@@ -215,7 +212,7 @@ class FineractLedger:
         loan = await self._call(
             "GET",
             f"/loans/external-id/{account_id}",
-            params={"associations": "repaymentSchedule,transactions"},
+            params={"associations": "transactions"},
         )
         rows = await self._call("GET", f"/datatables/{DATATABLE}/{loan['id']}") or []
         if not rows:
@@ -242,16 +239,14 @@ class FineractLedger:
         on: date,
         kind: Literal["card", "ach"],
         payment_id: str,
-        processor_ref: str,
     ) -> Posting:
-        """A repayment of an approved charge, once: a retry after a lost answer finds the first posting."""
+        """A repayment of an approved PayNearMe payment, once: a retry after a lost answer finds the first."""
         body = {
             "transactionDate": fmt(on),
             "transactionAmount": to_dollars(amount_cents),
             "paymentTypeId": self.payment_types[kind],
             "externalId": payment_id,
-            "receiptNumber": processor_ref,
-            "note": f"Gateway payment {payment_id}",
+            "note": f"PayNearMe payment {payment_id}",
             **FORMAT,
         }
         try:
@@ -275,28 +270,6 @@ class FineractLedger:
             json={"transactionDate": fmt(on), "externalId": external_id, "note": note, **FORMAT},
         )
 
-    async def re_age(self, debt: Debt, *, instalments: int, first_due_on: date, external_id: str) -> Debt:
-        """Spread the balance into ``instalments`` monthly payments from ``first_due_on``; the debt re-read."""
-        await self._call(
-            "POST",
-            f"/loans/{debt.loan_id}/transactions",
-            params={"command": "reAge"},
-            json={
-                "frequencyNumber": 1,
-                "frequencyType": "MONTHS",
-                "startDate": fmt(first_due_on),
-                "numberOfInstallments": instalments,
-                "externalId": external_id,
-                **FORMAT,
-            },
-        )
-        return await self.debt(debt.account_id)
-
-    async def undo_re_age(self, debt: Debt) -> None:
-        await self._call(
-            "POST", f"/loans/{debt.loan_id}/transactions", params={"command": "undoReAge"}, json=dict(FORMAT)
-        )
-
 
 def _debt(account_id: str, loan: dict[str, Any], item: dict[str, Any]) -> Debt:
     summary = loan.get("summary") or {}
@@ -305,31 +278,21 @@ def _debt(account_id: str, loan: dict[str, Any], item: dict[str, Any]) -> Debt:
         for t in loan.get("transactions") or []
         if (t.get("type") or {}).get("repayment") and not t.get("manuallyReversed")
     ]
-    periods = (loan.get("repaymentSchedule") or {}).get("periods") or []
-    schedule = tuple(
-        Instalment(
-            parse_date(p["dueDate"]) or date.min,
-            to_cents(p.get("totalDueForPeriod")),
-            to_cents(p.get("totalPaidForPeriod")),
-        )
-        for p in periods
-        if p.get("period") and to_cents(p.get("totalDueForPeriod")) > 0
-    )
-    charge_off_on = parse_date(item.get("charge_off_on"))
-    if charge_off_on is None:
-        raise LedgerUnavailable(f"loan {account_id}: no charge-off date in its itemization")
+    itemized_on = parse_date(item.get("itemized_on"))
+    if itemized_on is None or not item.get("itemized_from"):
+        raise LedgerUnavailable(f"loan {account_id}: its itemization names no itemization date")
     return Debt(
         account_id=account_id,
         loan_id=int(loan["id"]),
         status=int((loan.get("status") or {}).get("id") or 0),
         itemization=Itemization(
-            charge_off_on,
-            to_cents(item.get("charge_off_balance")),
-            to_cents(item.get("interest_since_charge_off")),
-            to_cents(item.get("fees_since_charge_off")),
+            str(item["itemized_from"]),
+            itemized_on,
+            to_cents(item.get("itemized_balance")),
+            to_cents(item.get("interest_since")),
+            to_cents(item.get("fees_since")),
         ),
         paid_cents=to_cents(summary.get("totalRepayment")),
         balance_cents=to_cents(summary.get("totalOutstanding")),
         last_payment_on=max((parse_date(t["date"]) for t in repayments), default=None),
-        schedule=schedule,
     )

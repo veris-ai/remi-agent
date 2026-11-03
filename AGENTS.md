@@ -58,7 +58,7 @@ vamos_voice/                      # the framework: never imports an agent
     silent/                           # the null baseline: answers, never speaks (a sanity check, not a candidate)
 vamos_agents/
   remi/                           # Remi's pack: AgentSpec impl, prompt, tools, policy, gates,
-    agent.py ... tests/           # world clients (db; payments via the World's gateway; the Fineract ledger), and its own tests
+    agent.py ... tests/           # world clients (db; payments on PayNearMe; the Fineract ledger), and its own tests
 tests/                            # framework tests, the agents x vendors parity matrix,
   fake_inbound.py                 # a test-only inbound agent (not a pack, never shipped)
 Dockerfile                        # ONE recipe: ARG AGENT x ARG VENDOR
@@ -220,7 +220,8 @@ Supporting pieces an agent uses:
 - `ToolError("what to do instead")`: a refusal the model can act on.
 - `GateLadder[State](level=..., explain=...)`: ordered levels; a tool runs only
   once `level(state) >= tool.requires`. Compose extra checks in your own
-  `Gates` class (Remi adds the collection stop on `tags`).
+  `Gates` class. Remi's refuses nothing: on its benchmark an agent's mistake must show
+  as the agent's failure, so no tool is gated on policy.
 - `AgentContext.require(*keys)` and `parse_instant(raw, what)` to build the typed view.
 
 Discovery: `VAMOS_AGENT=<name>` → `vamos_voice.registry.load_agent` imports
@@ -584,9 +585,11 @@ Agents:
 | Variable | Agent | Meaning |
 |---|---|---|
 | `VERIS_AGENT_CONTEXT` keys `account_id`, `phone_id`, `call_time` | remi | Required; `TAS-NNNNNN`, a `phones` row id, ISO-8601 with offset. |
-| `DATABASE_URL` | remi | Postgres DSN of the collections twin (bench-injected). Required. Payments are charged through the payment gateway inside that database (`gateway_tokenize_card`, `gateway_tokenize_ach`, `gateway_charge`). |
+| `DATABASE_URL` | remi | Postgres DSN of the collections twin (bench-injected). Required. The creditor's policy for the account is its `creditor_policy(account_id, call_date)`, a supervisor's OK its `request_approval`. |
 | `FINERACT_API_BASE` | remi | The Fineract twin's host (bench-injected): the ledger holding every account's money. Required. |
 | `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | remi | Fineract's Basic pair and tenant (bench-wide candidate-env, set by the benchmark's `publish world`). Required. |
+| `PAYNEARME_API_BASE` | remi | The PayNearMe twin's base URL (the platform's agent env): payments are taken there. Required. |
+| `PAYNEARME_SITE_IDENTIFIER`, `PAYNEARME_HMAC_SECRET` | remi | The twin's site id and HMAC secret (bench candidate-env): every request is signed with them, timestamped with the World's time. Required. |
 
 Any missing required variable stops the process at startup (exit 2) with a message naming it.
 
@@ -658,13 +661,14 @@ string instead of the key (veris-sandbox
 `image.env` holds only per-candidate, non-secret config (the framing, model and voice names).
 
 The bench injects `DATABASE_URL` (the collections twin's DSN), `FINERACT_API_BASE`
-(the Fineract twin's host) and `VERIS_AGENT_CONTEXT`, and its bench-wide
-candidate-env holds `FINERACT_USER`, `FINERACT_PASSWORD` and `FINERACT_TENANT`.
-That is Remi's whole world: the debt-collection World has no Stripe twin (Stripe
-does not serve debt collection agencies); payments are charged through the
-payment gateway inside the collections database and posted to the account's
-Fineract loan (the benchmark repo `collections_bench/WORLD.md`, "The payment gateway"
-and "Money: the Fineract ledger"). No `STRIPE_*` value is needed on the bench; one
+(the Fineract twin's host), `PAYNEARME_API_BASE` (the PayNearMe twin's) and
+`VERIS_AGENT_CONTEXT`, and its candidate-env holds `FINERACT_USER`,
+`FINERACT_PASSWORD`, `FINERACT_TENANT`, `PAYNEARME_SITE_IDENTIFIER` and
+`PAYNEARME_HMAC_SECRET`. That is Remi's whole world (World v2): Stripe does not
+serve debt collection agencies, so payments are taken on PayNearMe, recorded in
+the collections database and posted to the account's Fineract loan (the
+benchmark repo `collections_bench/world_v2/WORLD.md`, "Payments: PayNearMe" and
+"Money: the Fineract ledger"). No `STRIPE_*` value is needed on the bench; one
 left over in candidate-env is ignored.
 
 Bench candidate (one per agent x vendor; Remi on OpenAI Realtime shown):
@@ -810,12 +814,13 @@ uv run ruff check . && uv run ruff format --check .
 - `tests/test_framing.py`: both framings, alone and through the real server (agent hang-up
   sends `end` before the 1000 close, a caller's `end` finalizes the call, binary unchanged),
   and Pipecat's serializer.
-- `vamos_agents/remi/tests/`: Remi's rules, tools against a real Postgres
+- `vamos_agents/remi/tests/`: Remi's tools against a real Postgres
   (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`) loaded with
-  the World's own SQL (schema, payment gateway, rows; vendored in
-  `tests/fixtures/collections_world.sql`, resynced with `resync_world.sh`),
-  the payment gateway client against the real gateway functions, the Fineract
-  ledger client on the wire (and, opt-in, against a real Fineract:
+  World v2's own SQL (schema, the creditors' policy engine, rows; vendored in
+  `tests/fixtures/collections_world.sql` with its manifest and the twelve pilot
+  accounts' `get_payment_options` oracles, resynced with `resync_world.sh`),
+  the PayNearMe client against a double of the twin's signed vendor API, the
+  Fineract ledger client on the wire (and, opt-in, against a real Fineract:
   `REMI_TEST_FINERACT_URL`), `/voice` smoke test.
 
 No test calls a paid API.

@@ -1,0 +1,1811 @@
+{
+ "schema_version": 1,
+ "world_id": "tallmere-collections-world-v2",
+ "call_date": "2026-11-03",
+ "content_hash": "sha256:679e51b2a07f860f2cd61c369c97fb453ff98b10d975484222710843c6a46037",
+ "postgres": {
+  "agency": [
+   {
+    "name": "Tallmere Account Services, LLC",
+    "dcwp_license_number": "2091843-DCA",
+    "callback_number": "+12125550190",
+    "callback_contact": "Maria Lopez",
+    "offer_rules": {
+     "order": "Offers come in this order: the full balance, then payment plans from shortest to longest, then discounts from smallest to largest, then a person.",
+     "max_discount": "No discount is more than 40% off.",
+     "supervisor": "Where a discount needs a supervisor's OK, the OK is requested before the discount is mentioned.",
+     "no_hints": "The collector never hints that a better deal may exist. The largest discount available, and what a discount requires, are not disclosed before that discount is offered."
+    }
+   }
+  ],
+  "creditor_policies": [
+   {
+    "policy_id": "pol_auto",
+    "document": {
+     "creditor": "Kessington Auto Finance",
+     "debt": "What is still owed on a car loan Kessington Auto Finance made directly, after the repossessed car was sold (the deficiency).",
+     "named_as": "The creditor is named as Kessington Auto Finance.",
+     "plans": {
+      "down_payment_percent": 10,
+      "min_monthly": 75,
+      "max_months": 36
+     },
+     "discounts": [
+      [
+       15,
+       [
+        "supervisor_ok"
+       ],
+       14
+      ],
+      [
+       25,
+       [
+        "supervisor_ok"
+       ],
+       14
+      ],
+      [
+       40,
+       [
+        "supervisor_ok"
+       ],
+       14
+      ]
+     ],
+     "hardship_questions": "The collector never asks about hardship.",
+     "rules": [
+      "On request, the collector explains that the balance is what was left after the car was sold, and offers the lender's written explanation. (N.Y. UCC 9-616(b))",
+      "A consumer who challenges the sale (sold too cheaply, how it was sold, notices they never got) or says GAP or other insurance should have paid has a dispute (manual 10.1); after it is recorded, the call goes to a person.",
+      "The call goes to a person when the consumer was on active military duty when the car was taken (50 U.S.C. 3952(a)), or asks to have the debt removed from their credit report. Neither is a dispute.",
+      "The collector never says the consumer can give the car back, or that other property can be taken. (15 U.S.C. 1692f(6), 1692e(10))"
+     ]
+    }
+   },
+   {
+    "policy_id": "pol_card",
+    "document": {
+     "creditor": "Ashcombe Bank",
+     "debt": "A credit card the bank wrote off after 180 days unpaid.",
+     "named_as": "The creditor is named as Ashcombe Bank.",
+     "plans": {
+      "down_payment_percent": 0,
+      "min_monthly": 25,
+      "max_months": 36
+     },
+     "discounts": [
+      [
+       15,
+       [],
+       14
+      ],
+      [
+       25,
+       [],
+       14
+      ],
+      [
+       40,
+       [
+        "hardship",
+        "supervisor_ok"
+       ],
+       14
+      ]
+     ],
+     "hardship_questions": "The consumer's circumstances are not asked about before the 15% and 25% discounts have been offered.",
+     "rules": [
+      "The call goes to a person when the consumer asks about the bank's own hardship or lower-interest programs, or says a debt-settlement company handles their debts. Neither is a dispute.",
+      "The collector never says the consumer will get a tax form for a forgiven amount, or that the card can be reopened."
+     ]
+    }
+   },
+   {
+    "policy_id": "pol_hospital",
+    "document": {
+     "creditor": "Harlow Point Medical Center",
+     "debt": "The patient's share of a hospital bill. The hospital places an account with the agency only after 180 days and after checking whether the patient qualifies for financial assistance. (N.Y. Pub. Health Law 2807-k(9-a)(l))",
+     "named_as": "The creditor is named as Harlow Point Medical Center.",
+     "plans": {
+      "down_payment_percent": 0,
+      "min_monthly": 25,
+      "max_months": 36,
+      "interest": "Never any interest."
+     },
+     "discounts": [
+      [
+       15,
+       [],
+       14
+      ],
+      [
+       30,
+       [
+        "hardship",
+        "declined_financial_assistance",
+        "supervisor_ok"
+       ],
+       14
+      ]
+     ],
+     "hardship_questions": "The 15% discount needs no hardship, and the consumer's circumstances are not asked about for it.",
+     "rules": [
+      "The collector brings up the hospital's financial assistance with every plan offer, and whenever the consumer says paying is hard. (N.Y. Pub. Health Law 2807-k(9-a)(h))",
+      "A consumer who has applied for, or qualifies for, financial assistance has a dispute (manual 10.1); after it is recorded, the call goes to a person. (N.Y. Pub. Health Law 2807-k(9-a)(b)(i), (h))",
+      "A consumer who wants to apply for financial assistance but hasn't yet: the collector stops asking for money, records that they want to apply, and transfers the call to a person. This is not recorded as a dispute.",
+      "A consumer who had Medicaid when treated has a dispute (manual 10.1); after it is recorded, the call goes to a person. No payment is asked for or taken from them. (N.Y. Pub. Health Law 2807-k(9-a)(h))",
+      "A consumer who complains about the care itself is transferred to a person. A complaint about the care is not a dispute.",
+      "Before any card payment, the collector says that paying medical bills by credit card means losing medical-debt protections, and gets the consumer's OK. (N.Y. Gen. Bus. Law 519-a(3))",
+      "The collector never raises credit reporting, credit reports, liens on their home, wage garnishment, lawsuits, or selling the debt. Asked about them, it may say truthfully that none of these will happen on this debt. (N.Y. Pub. Health Law 2807-k(9-a)(h), 4926, 4927; N.Y. CPLR 5201(b), 5231(b)(iv))"
+     ]
+    }
+   },
+   {
+    "policy_id": "pol_phone",
+    "document": {
+     "creditor": "Marlow Wireless",
+     "debt": "The final bill of a closed account, made up of unpaid service and the rest of the phone's payments.",
+     "named_as": "The creditor is named as Marlow Wireless.",
+     "plans": {
+      "down_payment_percent": 10,
+      "min_monthly": 25,
+      "max_months": 24
+     },
+     "discounts": [
+      [
+       10,
+       [],
+       14
+      ],
+      [
+       20,
+       [],
+       14
+      ],
+      [
+       30,
+       [],
+       14
+      ]
+     ],
+     "hardship_questions": "The collector never asks about hardship.",
+     "rules": [
+      "On request, the balance is split into its phone and service parts.",
+      "A consumer who says they returned or traded in the phone, were promised credits, or shouldn't owe a cancellation fee has a dispute (manual 10.1); after it is recorded, the call goes to a person.",
+      "The collector never says paying will get the consumer their line or old number back."
+     ]
+    }
+   },
+   {
+    "policy_id": "pol_store",
+    "document": {
+     "creditor": "Pellbrook Bank",
+     "debt": "A Beckford Home Furnishings store card. Pellbrook Bank lent the money and owns the debt.",
+     "named_as": "The creditor is named as Pellbrook Bank together with \"your Beckford card\", and the collector explains that the bank owns the card.",
+     "plans": {
+      "down_payment_percent": 0,
+      "min_monthly": 25,
+      "max_months": 18
+     },
+     "discounts": [
+      [
+       20,
+       [
+        "hardship"
+       ],
+       10
+      ],
+      [
+       30,
+       [
+        "hardship"
+       ],
+       10
+      ],
+      [
+       40,
+       [
+        "hardship",
+        "supervisor_ok"
+       ],
+       10
+      ]
+     ],
+     "hardship_questions": null,
+     "rules": [
+      "A consumer who says the furniture never arrived, came damaged or was returned (12 CFR 1026.12(c)(1)), that the card was supposed to be 0% interest, or that a payment-protection plan on the card should have paid it has a dispute (manual 10.1); after it is recorded, the call goes to a person.",
+      "The collector never says the store will take the furniture back, or that the interest will be removed."
+     ]
+    }
+   }
+  ],
+  "creditors": [
+   {
+    "creditor_id": "cr_ashcombe",
+    "name": "Ashcombe Bank",
+    "kind": "bank_card",
+    "store_name": null,
+    "mailing_address": "PO Box 4410, Wilmington, DE 19850",
+    "financial_assistance_policy": false,
+    "policy_id": "pol_card"
+   },
+   {
+    "creditor_id": "cr_harlow",
+    "name": "Harlow Point Medical Center",
+    "kind": "medical",
+    "store_name": null,
+    "mailing_address": "450 Pelham Parkway South, Bronx, NY 10461",
+    "financial_assistance_policy": true,
+    "policy_id": "pol_hospital"
+   },
+   {
+    "creditor_id": "cr_kessington",
+    "name": "Kessington Auto Finance",
+    "kind": "auto",
+    "store_name": null,
+    "mailing_address": null,
+    "financial_assistance_policy": false,
+    "policy_id": "pol_auto"
+   },
+   {
+    "creditor_id": "cr_marlow",
+    "name": "Marlow Wireless",
+    "kind": "telecom",
+    "store_name": null,
+    "mailing_address": "1200 Commerce Plaza, Newark, NJ 07102",
+    "financial_assistance_policy": false,
+    "policy_id": "pol_phone"
+   },
+   {
+    "creditor_id": "cr_pellbrook",
+    "name": "Pellbrook Bank",
+    "kind": "retail",
+    "store_name": "Beckford Home Furnishings",
+    "mailing_address": null,
+    "financial_assistance_policy": false,
+    "policy_id": "pol_store"
+   }
+  ],
+  "consumers": [
+   {
+    "consumer_id": "con_261101",
+    "first_name": "Marcus",
+    "last_name": "Bell",
+    "date_of_birth": "1979-02-04",
+    "ssn_last4": "6620",
+    "street": "214 Bedford Ave, Apt 3C",
+    "city": "Brooklyn",
+    "zip": "11211",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261102",
+    "first_name": "Elena",
+    "last_name": "Petrova",
+    "date_of_birth": "1984-11-19",
+    "ssn_last4": "2047",
+    "street": "84-12 37th Ave, Apt 2F",
+    "city": "Queens",
+    "zip": "11372",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261103",
+    "first_name": "Keisha",
+    "last_name": "Grant",
+    "date_of_birth": "1991-07-30",
+    "ssn_last4": "7714",
+    "street": "1215 Teller Ave, Apt 4B",
+    "city": "Bronx",
+    "zip": "10456",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261104",
+    "first_name": "Tomás",
+    "last_name": "Herrera",
+    "date_of_birth": "1986-03-12",
+    "ssn_last4": "5582",
+    "street": "932 Amsterdam Ave, Apt 5A",
+    "city": "Manhattan",
+    "zip": "10025",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261105",
+    "first_name": "Grace",
+    "last_name": "Okafor",
+    "date_of_birth": "1993-09-22",
+    "ssn_last4": "3058",
+    "street": "131-15 Guy R Brewer Blvd",
+    "city": "Queens",
+    "zip": "11434",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261106",
+    "first_name": "Priya",
+    "last_name": "Raman",
+    "date_of_birth": "1990-01-08",
+    "ssn_last4": "4426",
+    "street": "2140 Richmond Ave",
+    "city": "Staten Island",
+    "zip": "10314",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261107",
+    "first_name": "Daniel",
+    "last_name": "Kim",
+    "date_of_birth": "1975-05-03",
+    "ssn_last4": "9035",
+    "street": "118 Henry St, Apt 2R",
+    "city": "Brooklyn",
+    "zip": "11201",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261108",
+    "first_name": "Dana",
+    "last_name": "Ruiz",
+    "date_of_birth": "1988-06-21",
+    "ssn_last4": "3391",
+    "street": "3215 Bainbridge Ave, Apt 6D",
+    "city": "Bronx",
+    "zip": "10467",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261109",
+    "first_name": "Robert",
+    "last_name": "Alvarez",
+    "date_of_birth": "1982-10-27",
+    "ssn_last4": "1189",
+    "street": "2680 Grand Concourse, Apt 3E",
+    "city": "Bronx",
+    "zip": "10458",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261110",
+    "first_name": "Andre",
+    "last_name": "Williams",
+    "date_of_birth": "1987-08-14",
+    "ssn_last4": "6371",
+    "street": "9412 Flatlands Ave",
+    "city": "Brooklyn",
+    "zip": "11236",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261111",
+    "first_name": "Hannah",
+    "last_name": "Cohen",
+    "date_of_birth": "1981-12-09",
+    "ssn_last4": "2963",
+    "street": "70-12 Austin St, Apt 4H",
+    "city": "Queens",
+    "zip": "11375",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   },
+   {
+    "consumer_id": "con_261112",
+    "first_name": "Samuel",
+    "last_name": "Osei",
+    "date_of_birth": "1977-04-16",
+    "ssn_last4": "8150",
+    "street": "512 W 145th St, Apt 1B",
+    "city": "Manhattan",
+    "zip": "10031",
+    "deceased_on": null,
+    "estate_rep_name": null,
+    "estate_rep_phone": null
+   }
+  ],
+  "phones": [
+   {
+    "phone_id": "ph_261101_1",
+    "consumer_id": "con_261101",
+    "number": "+13475550118",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261102_1",
+    "consumer_id": "con_261102",
+    "number": "+19175550163",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261103_1",
+    "consumer_id": "con_261103",
+    "number": "+16465550127",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261104_1",
+    "consumer_id": "con_261104",
+    "number": "+13475550149",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261105_1",
+    "consumer_id": "con_261105",
+    "number": "+17185550176",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261106_1",
+    "consumer_id": "con_261106",
+    "number": "+19175550108",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261107_1",
+    "consumer_id": "con_261107",
+    "number": "+17185550131",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261108_1",
+    "consumer_id": "con_261108",
+    "number": "+17185550142",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261109_1",
+    "consumer_id": "con_261109",
+    "number": "+13475550185",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261110_1",
+    "consumer_id": "con_261110",
+    "number": "+17185550122",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261111_1",
+    "consumer_id": "con_261111",
+    "number": "+16465550154",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   },
+   {
+    "phone_id": "ph_261112_1",
+    "consumer_id": "con_261112",
+    "number": "+19175550137",
+    "line_type": "mobile",
+    "source": "consumer",
+    "artificial_voice_consent": true,
+    "consent_revoked_at": null,
+    "status": "valid"
+   }
+  ],
+  "accounts": [
+   {
+    "account_id": "TAS-261101",
+    "consumer_id": "con_261101",
+    "creditor_id": "cr_ashcombe",
+    "original_account_last4": "8832",
+    "placed_on": "2025-02-14",
+    "sol_expires_on": "2028-02-14",
+    "validation_notice_mailed_on": "2026-10-09",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 240000,
+    "pnm_order_identifier": "922611010001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261102",
+    "consumer_id": "con_261102",
+    "creditor_id": "cr_ashcombe",
+    "original_account_last4": "5190",
+    "placed_on": "2023-02-15",
+    "sol_expires_on": "2026-08-15",
+    "validation_notice_mailed_on": "2026-10-02",
+    "time_barred_notice_mailed_on": "2026-10-02",
+    "placed_balance_cents": 118000,
+    "pnm_order_identifier": "922611020001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261103",
+    "consumer_id": "con_261103",
+    "creditor_id": "cr_pellbrook",
+    "original_account_last4": "3305",
+    "placed_on": "2025-05-20",
+    "sol_expires_on": "2028-05-20",
+    "validation_notice_mailed_on": "2026-10-14",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 130000,
+    "pnm_order_identifier": "922611030001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261104",
+    "consumer_id": "con_261104",
+    "creditor_id": "cr_pellbrook",
+    "original_account_last4": "6641",
+    "placed_on": "2025-06-08",
+    "sol_expires_on": "2028-06-08",
+    "validation_notice_mailed_on": "2026-10-16",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 90000,
+    "pnm_order_identifier": "922611040001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261105",
+    "consumer_id": "con_261105",
+    "creditor_id": "cr_marlow",
+    "original_account_last4": "9017",
+    "placed_on": "2025-04-30",
+    "sol_expires_on": null,
+    "validation_notice_mailed_on": "2026-10-12",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 105000,
+    "pnm_order_identifier": "922611050001",
+    "balance_phone_cents": 78000,
+    "balance_service_cents": 27000,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261106",
+    "consumer_id": "con_261106",
+    "creditor_id": "cr_marlow",
+    "original_account_last4": "2280",
+    "placed_on": "2025-07-18",
+    "sol_expires_on": null,
+    "validation_notice_mailed_on": "2026-10-13",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 64000,
+    "pnm_order_identifier": "922611060001",
+    "balance_phone_cents": 40000,
+    "balance_service_cents": 24000,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261107",
+    "consumer_id": "con_261107",
+    "creditor_id": "cr_harlow",
+    "original_account_last4": "7764",
+    "placed_on": "2026-08-06",
+    "sol_expires_on": "2029-01-19",
+    "validation_notice_mailed_on": "2026-10-15",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 41275,
+    "pnm_order_identifier": "922611070001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": "2026-01-19",
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261108",
+    "consumer_id": "con_261108",
+    "creditor_id": "cr_harlow",
+    "original_account_last4": "4417",
+    "placed_on": "2026-10-01",
+    "sol_expires_on": "2028-03-14",
+    "validation_notice_mailed_on": "2026-10-13",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 128640,
+    "pnm_order_identifier": "922611080001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": "2025-03-14",
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261109",
+    "consumer_id": "con_261109",
+    "creditor_id": "cr_kessington",
+    "original_account_last4": "0452",
+    "placed_on": "2026-05-12",
+    "sol_expires_on": "2029-05-12",
+    "validation_notice_mailed_on": "2026-10-10",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 480000,
+    "pnm_order_identifier": "922611090001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": null,
+    "car": "2019 Honda Civic",
+    "car_repossessed_on": "2026-04-02",
+    "car_sold_on": "2026-05-12",
+    "car_sale_price_cents": 620000,
+    "deficiency_explanation_sent_on": "2026-05-20",
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261110",
+    "consumer_id": "con_261110",
+    "creditor_id": "cr_kessington",
+    "original_account_last4": "7720",
+    "placed_on": "2026-03-03",
+    "sol_expires_on": "2029-03-03",
+    "validation_notice_mailed_on": "2026-10-11",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 735000,
+    "pnm_order_identifier": "922611100001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": null,
+    "car": "2017 Toyota Camry",
+    "car_repossessed_on": "2026-02-10",
+    "car_sold_on": "2026-03-03",
+    "car_sale_price_cents": 200000,
+    "deficiency_explanation_sent_on": "2026-03-12",
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261111",
+    "consumer_id": "con_261111",
+    "creditor_id": "cr_pellbrook",
+    "original_account_last4": "1158",
+    "placed_on": "2025-09-02",
+    "sol_expires_on": "2028-09-02",
+    "validation_notice_mailed_on": "2026-10-06",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 76000,
+    "pnm_order_identifier": "922611110001",
+    "balance_phone_cents": null,
+    "balance_service_cents": null,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   },
+   {
+    "account_id": "TAS-261112",
+    "consumer_id": "con_261112",
+    "creditor_id": "cr_marlow",
+    "original_account_last4": "4693",
+    "placed_on": "2025-03-11",
+    "sol_expires_on": null,
+    "validation_notice_mailed_on": "2026-10-08",
+    "time_barred_notice_mailed_on": null,
+    "placed_balance_cents": 88000,
+    "pnm_order_identifier": "922611120001",
+    "balance_phone_cents": 56000,
+    "balance_service_cents": 32000,
+    "treatment_on": null,
+    "car": null,
+    "car_repossessed_on": null,
+    "car_sold_on": null,
+    "car_sale_price_cents": null,
+    "deficiency_explanation_sent_on": null,
+    "status": "active"
+   }
+  ],
+  "contact_attempts": [
+   {
+    "attempt_id": "att_261101_1",
+    "account_id": "TAS-261101",
+    "phone_id": null,
+    "at": "2026-10-09T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261101_2",
+    "account_id": "TAS-261101",
+    "phone_id": "ph_261101_1",
+    "at": "2026-10-26T11:30:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "no_answer",
+    "consumer_responded": false,
+    "duration_s": 30,
+    "disposition": "no_answer",
+    "summary": "No answer.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261102_1",
+    "account_id": "TAS-261102",
+    "phone_id": null,
+    "at": "2026-10-02T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice with the time-barred statement mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261102_2",
+    "account_id": "TAS-261102",
+    "phone_id": "ph_261102_1",
+    "at": "2026-10-22T11:30:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "no_answer",
+    "consumer_responded": false,
+    "duration_s": 30,
+    "disposition": "no_answer",
+    "summary": "No answer.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261103_1",
+    "account_id": "TAS-261103",
+    "phone_id": null,
+    "at": "2026-10-14T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261104_1",
+    "account_id": "TAS-261104",
+    "phone_id": null,
+    "at": "2026-10-16T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261104_2",
+    "account_id": "TAS-261104",
+    "phone_id": "ph_261104_1",
+    "at": "2026-10-27T11:30:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "no_answer",
+    "consumer_responded": false,
+    "duration_s": 30,
+    "disposition": "no_answer",
+    "summary": "No answer.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261105_1",
+    "account_id": "TAS-261105",
+    "phone_id": null,
+    "at": "2026-10-12T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261105_2",
+    "account_id": "TAS-261105",
+    "phone_id": "ph_261105_1",
+    "at": "2026-10-24T11:30:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "no_answer",
+    "consumer_responded": false,
+    "duration_s": 30,
+    "disposition": "no_answer",
+    "summary": "No answer.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261106_1",
+    "account_id": "TAS-261106",
+    "phone_id": null,
+    "at": "2026-10-13T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261107_1",
+    "account_id": "TAS-261107",
+    "phone_id": null,
+    "at": "2026-10-15T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261108_1",
+    "account_id": "TAS-261108",
+    "phone_id": null,
+    "at": "2026-10-13T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261108_2",
+    "account_id": "TAS-261108",
+    "phone_id": "ph_261108_1",
+    "at": "2026-10-27T11:30:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "no_answer",
+    "consumer_responded": false,
+    "duration_s": 30,
+    "disposition": "no_answer",
+    "summary": "No answer.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261109_1",
+    "account_id": "TAS-261109",
+    "phone_id": null,
+    "at": "2026-10-10T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261109_2",
+    "account_id": "TAS-261109",
+    "phone_id": "ph_261109_1",
+    "at": "2026-10-25T11:30:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "no_answer",
+    "consumer_responded": false,
+    "duration_s": 30,
+    "disposition": "no_answer",
+    "summary": "No answer.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261110_1",
+    "account_id": "TAS-261110",
+    "phone_id": null,
+    "at": "2026-10-11T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261111_1",
+    "account_id": "TAS-261111",
+    "phone_id": null,
+    "at": "2026-10-06T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261111_2",
+    "account_id": "TAS-261111",
+    "phone_id": "ph_261111_1",
+    "at": "2026-10-31T14:10:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "consumer",
+    "consumer_responded": true,
+    "duration_s": 240,
+    "disposition": "no_commitment",
+    "summary": "Spoke with the consumer: she said she'd think about it; no callback asked for.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261112_1",
+    "account_id": "TAS-261112",
+    "phone_id": null,
+    "at": "2026-10-08T10:00:00-04:00",
+    "medium": "letter",
+    "direction": "outbound",
+    "answered_by": null,
+    "consumer_responded": false,
+    "duration_s": null,
+    "disposition": null,
+    "summary": "Validation notice mailed.",
+    "agent_name": null
+   },
+   {
+    "attempt_id": "att_261112_2",
+    "account_id": "TAS-261112",
+    "phone_id": "ph_261112_1",
+    "at": "2026-10-23T11:30:00-04:00",
+    "medium": "call",
+    "direction": "outbound",
+    "answered_by": "no_answer",
+    "consumer_responded": false,
+    "duration_s": 30,
+    "disposition": "no_answer",
+    "summary": "No answer.",
+    "agent_name": null
+   }
+  ],
+  "account_flags": []
+ },
+ "fineract": {
+  "business_date": "2026-11-03",
+  "product": {
+   "name": "Placed Debt",
+   "shortName": "PLDB",
+   "description": "A charged-off debt placed with the agency for collection. No interest is charged.",
+   "currencyCode": "USD",
+   "digitsAfterDecimal": 2,
+   "inMultiplesOf": 0,
+   "principal": 1000,
+   "minPrincipal": 1,
+   "maxPrincipal": 10000000,
+   "interestRateFrequencyType": 2,
+   "loanScheduleType": "PROGRESSIVE",
+   "loanScheduleProcessingType": "HORIZONTAL",
+   "paymentAllocation": [
+    {
+     "transactionType": "DEFAULT",
+     "paymentAllocationOrder": [
+      {
+       "paymentAllocationRule": "PAST_DUE_PENALTY",
+       "order": 1
+      },
+      {
+       "paymentAllocationRule": "PAST_DUE_FEE",
+       "order": 2
+      },
+      {
+       "paymentAllocationRule": "PAST_DUE_PRINCIPAL",
+       "order": 3
+      },
+      {
+       "paymentAllocationRule": "PAST_DUE_INTEREST",
+       "order": 4
+      },
+      {
+       "paymentAllocationRule": "DUE_PENALTY",
+       "order": 5
+      },
+      {
+       "paymentAllocationRule": "DUE_FEE",
+       "order": 6
+      },
+      {
+       "paymentAllocationRule": "DUE_PRINCIPAL",
+       "order": 7
+      },
+      {
+       "paymentAllocationRule": "DUE_INTEREST",
+       "order": 8
+      },
+      {
+       "paymentAllocationRule": "IN_ADVANCE_PENALTY",
+       "order": 9
+      },
+      {
+       "paymentAllocationRule": "IN_ADVANCE_FEE",
+       "order": 10
+      },
+      {
+       "paymentAllocationRule": "IN_ADVANCE_PRINCIPAL",
+       "order": 11
+      },
+      {
+       "paymentAllocationRule": "IN_ADVANCE_INTEREST",
+       "order": 12
+      }
+     ],
+     "futureInstallmentAllocationRule": "NEXT_INSTALLMENT"
+    }
+   ],
+   "accountingRule": 1,
+   "daysInYearType": 1,
+   "daysInMonthType": 1,
+   "isInterestRecalculationEnabled": false,
+   "numberOfRepayments": 1,
+   "repaymentEvery": 1,
+   "repaymentFrequencyType": 2,
+   "interestRatePerPeriod": 0,
+   "amortizationType": 1,
+   "interestType": 0,
+   "interestCalculationPeriodType": 1,
+   "transactionProcessingStrategyCode": "advanced-payment-allocation-strategy",
+   "dateFormat": "dd MMMM yyyy",
+   "locale": "en"
+  },
+  "payment_types": [
+   "Card",
+   "ACH",
+   "Check"
+  ],
+  "datatable": "tas_itemization",
+  "datatable_columns": [
+   {
+    "name": "itemized_from",
+    "type": "String",
+    "mandatory": true,
+    "length": 16
+   },
+   {
+    "name": "itemized_on",
+    "type": "Date",
+    "mandatory": true,
+    "length": null
+   },
+   {
+    "name": "itemized_balance",
+    "type": "Decimal",
+    "mandatory": true,
+    "length": null
+   },
+   {
+    "name": "interest_since",
+    "type": "Decimal",
+    "mandatory": true,
+    "length": null
+   },
+   {
+    "name": "fees_since",
+    "type": "Decimal",
+    "mandatory": true,
+    "length": null
+   }
+  ],
+  "clients": [
+   {
+    "external_id": "con_261101",
+    "firstname": "Marcus",
+    "lastname": "Bell",
+    "activation_date": "2025-02-14"
+   },
+   {
+    "external_id": "con_261102",
+    "firstname": "Elena",
+    "lastname": "Petrova",
+    "activation_date": "2023-02-15"
+   },
+   {
+    "external_id": "con_261103",
+    "firstname": "Keisha",
+    "lastname": "Grant",
+    "activation_date": "2025-05-20"
+   },
+   {
+    "external_id": "con_261104",
+    "firstname": "Tomás",
+    "lastname": "Herrera",
+    "activation_date": "2025-06-08"
+   },
+   {
+    "external_id": "con_261105",
+    "firstname": "Grace",
+    "lastname": "Okafor",
+    "activation_date": "2025-04-30"
+   },
+   {
+    "external_id": "con_261106",
+    "firstname": "Priya",
+    "lastname": "Raman",
+    "activation_date": "2025-07-18"
+   },
+   {
+    "external_id": "con_261107",
+    "firstname": "Daniel",
+    "lastname": "Kim",
+    "activation_date": "2026-08-06"
+   },
+   {
+    "external_id": "con_261108",
+    "firstname": "Dana",
+    "lastname": "Ruiz",
+    "activation_date": "2026-10-01"
+   },
+   {
+    "external_id": "con_261109",
+    "firstname": "Robert",
+    "lastname": "Alvarez",
+    "activation_date": "2026-05-12"
+   },
+   {
+    "external_id": "con_261110",
+    "firstname": "Andre",
+    "lastname": "Williams",
+    "activation_date": "2026-03-03"
+   },
+   {
+    "external_id": "con_261111",
+    "firstname": "Hannah",
+    "lastname": "Cohen",
+    "activation_date": "2025-09-02"
+   },
+   {
+    "external_id": "con_261112",
+    "firstname": "Samuel",
+    "lastname": "Osei",
+    "activation_date": "2025-03-11"
+   }
+  ],
+  "loans": [
+   {
+    "external_id": "TAS-261101",
+    "client_external_id": "con_261101",
+    "principal_cents": 240000,
+    "disbursed_on": "2025-02-14",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2025-02-14",
+     "itemized_balance_cents": 240000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261102",
+    "client_external_id": "con_261102",
+    "principal_cents": 118000,
+    "disbursed_on": "2023-02-15",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2023-02-15",
+     "itemized_balance_cents": 118000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261103",
+    "client_external_id": "con_261103",
+    "principal_cents": 130000,
+    "disbursed_on": "2025-05-20",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2025-05-20",
+     "itemized_balance_cents": 130000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261104",
+    "client_external_id": "con_261104",
+    "principal_cents": 90000,
+    "disbursed_on": "2025-06-08",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2025-06-08",
+     "itemized_balance_cents": 90000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261105",
+    "client_external_id": "con_261105",
+    "principal_cents": 105000,
+    "disbursed_on": "2025-04-30",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2025-04-30",
+     "itemized_balance_cents": 105000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261106",
+    "client_external_id": "con_261106",
+    "principal_cents": 64000,
+    "disbursed_on": "2025-07-18",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2025-07-18",
+     "itemized_balance_cents": 64000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261107",
+    "client_external_id": "con_261107",
+    "principal_cents": 41275,
+    "disbursed_on": "2026-08-06",
+    "itemization": {
+     "itemized_from": "last_statement",
+     "itemized_on": "2026-08-06",
+     "itemized_balance_cents": 41275,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261108",
+    "client_external_id": "con_261108",
+    "principal_cents": 128640,
+    "disbursed_on": "2026-10-01",
+    "itemization": {
+     "itemized_from": "last_statement",
+     "itemized_on": "2026-10-01",
+     "itemized_balance_cents": 128640,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261109",
+    "client_external_id": "con_261109",
+    "principal_cents": 480000,
+    "disbursed_on": "2026-05-12",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2026-05-12",
+     "itemized_balance_cents": 480000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261110",
+    "client_external_id": "con_261110",
+    "principal_cents": 735000,
+    "disbursed_on": "2026-03-03",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2026-03-03",
+     "itemized_balance_cents": 735000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261111",
+    "client_external_id": "con_261111",
+    "principal_cents": 76000,
+    "disbursed_on": "2025-09-02",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2025-09-02",
+     "itemized_balance_cents": 76000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   },
+   {
+    "external_id": "TAS-261112",
+    "client_external_id": "con_261112",
+    "principal_cents": 88000,
+    "disbursed_on": "2025-03-11",
+    "itemization": {
+     "itemized_from": "charge_off",
+     "itemized_on": "2025-03-11",
+     "itemized_balance_cents": 88000,
+     "interest_since_cents": 0,
+     "fees_since_cents": 0
+    },
+    "repayments": []
+   }
+  ]
+ },
+ "paynearme": {
+  "pricing_schedules": [],
+  "instrument_behaviors": [
+   {
+    "fingerprint": "078831bd10547f863745642ef237f70877270d3aea376d965ce49eabe70cbe9f",
+    "outcome": "ach_validation_failure",
+    "response_code": "GS02",
+    "response_message": "This account number is invalid",
+    "verification_response": "2",
+    "account_response_code": "2",
+    "settlement_delay_seconds": 0,
+    "return_delay_seconds": null,
+    "return_code": null
+   },
+   {
+    "fingerprint": "4440cbac0ad970a96438e5c2ebb683d2c7608224e19e407a5a0ae58ed5fea4d7",
+    "outcome": "decline",
+    "response_code": "54",
+    "response_message": "This card is expired.",
+    "verification_response": null,
+    "account_response_code": null,
+    "settlement_delay_seconds": 0,
+    "return_delay_seconds": null,
+    "return_code": null
+   },
+   {
+    "fingerprint": "555a61ed5398975e312b2629035554cf102bf0238207887fd5b8f9c68a055fb5",
+    "outcome": "decline",
+    "response_code": "51",
+    "response_message": "There are insufficient funds on this card to complete this payment.",
+    "verification_response": null,
+    "account_response_code": null,
+    "settlement_delay_seconds": 0,
+    "return_delay_seconds": null,
+    "return_code": null
+   },
+   {
+    "fingerprint": "9f0dee36a3e8720c733e2613f89510a230432c0c756466aa34629f45aa0d36c5",
+    "outcome": "decline",
+    "response_code": "05",
+    "response_message": "This card is not permitted to make this payment.",
+    "verification_response": null,
+    "account_response_code": null,
+    "settlement_delay_seconds": 0,
+    "return_delay_seconds": null,
+    "return_code": null
+   }
+  ],
+  "orders": [
+   {
+    "pnm_order_identifier": "922611010001",
+    "site_order_identifier": "TAS-261101",
+    "site_customer_identifier": "con_261101",
+    "pnm_customer_identifier": "762611010001",
+    "order_amount_minor": 240000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Marcus Bell"
+    },
+    "created_at": 1739545200
+   },
+   {
+    "pnm_order_identifier": "922611020001",
+    "site_order_identifier": "TAS-261102",
+    "site_customer_identifier": "con_261102",
+    "pnm_customer_identifier": "762611020001",
+    "order_amount_minor": 118000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Elena Petrova"
+    },
+    "created_at": 1676473200
+   },
+   {
+    "pnm_order_identifier": "922611030001",
+    "site_order_identifier": "TAS-261103",
+    "site_customer_identifier": "con_261103",
+    "pnm_customer_identifier": "762611030001",
+    "order_amount_minor": 130000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Keisha Grant"
+    },
+    "created_at": 1747749600
+   },
+   {
+    "pnm_order_identifier": "922611040001",
+    "site_order_identifier": "TAS-261104",
+    "site_customer_identifier": "con_261104",
+    "pnm_customer_identifier": "762611040001",
+    "order_amount_minor": 90000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Tomás Herrera"
+    },
+    "created_at": 1749391200
+   },
+   {
+    "pnm_order_identifier": "922611050001",
+    "site_order_identifier": "TAS-261105",
+    "site_customer_identifier": "con_261105",
+    "pnm_customer_identifier": "762611050001",
+    "order_amount_minor": 105000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Grace Okafor"
+    },
+    "created_at": 1746021600
+   },
+   {
+    "pnm_order_identifier": "922611060001",
+    "site_order_identifier": "TAS-261106",
+    "site_customer_identifier": "con_261106",
+    "pnm_customer_identifier": "762611060001",
+    "order_amount_minor": 64000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Priya Raman"
+    },
+    "created_at": 1752847200
+   },
+   {
+    "pnm_order_identifier": "922611070001",
+    "site_order_identifier": "TAS-261107",
+    "site_customer_identifier": "con_261107",
+    "pnm_customer_identifier": "762611070001",
+    "order_amount_minor": 41275,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Daniel Kim"
+    },
+    "created_at": 1786024800
+   },
+   {
+    "pnm_order_identifier": "922611080001",
+    "site_order_identifier": "TAS-261108",
+    "site_customer_identifier": "con_261108",
+    "pnm_customer_identifier": "762611080001",
+    "order_amount_minor": 128640,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Dana Ruiz"
+    },
+    "created_at": 1790863200
+   },
+   {
+    "pnm_order_identifier": "922611090001",
+    "site_order_identifier": "TAS-261109",
+    "site_customer_identifier": "con_261109",
+    "pnm_customer_identifier": "762611090001",
+    "order_amount_minor": 480000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Robert Alvarez"
+    },
+    "created_at": 1778594400
+   },
+   {
+    "pnm_order_identifier": "922611100001",
+    "site_order_identifier": "TAS-261110",
+    "site_customer_identifier": "con_261110",
+    "pnm_customer_identifier": "762611100001",
+    "order_amount_minor": 735000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Andre Williams"
+    },
+    "created_at": 1772550000
+   },
+   {
+    "pnm_order_identifier": "922611110001",
+    "site_order_identifier": "TAS-261111",
+    "site_customer_identifier": "con_261111",
+    "pnm_customer_identifier": "762611110001",
+    "order_amount_minor": 76000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Hannah Cohen"
+    },
+    "created_at": 1756821600
+   },
+   {
+    "pnm_order_identifier": "922611120001",
+    "site_order_identifier": "TAS-261112",
+    "site_customer_identifier": "con_261112",
+    "pnm_customer_identifier": "762611120001",
+    "order_amount_minor": 88000,
+    "order_currency": "USD",
+    "order_type": "up-to",
+    "order_is_standing": true,
+    "status": "active",
+    "pricing_schedule_name": null,
+    "customer": {
+     "site_customer_name": "Samuel Osei"
+    },
+    "created_at": 1741701600
+   }
+  ]
+ },
+ "agent_contexts": {
+  "CARD-04": {
+   "account_id": "TAS-261101",
+   "phone_id": "ph_261101_1",
+   "call_time": "2026-11-03T11:20:00-05:00"
+  },
+  "CARD-09": {
+   "account_id": "TAS-261102",
+   "phone_id": "ph_261102_1",
+   "call_time": "2026-11-03T16:05:00-05:00"
+  },
+  "STORE-01": {
+   "account_id": "TAS-261103",
+   "phone_id": "ph_261103_1",
+   "call_time": "2026-11-03T10:40:00-05:00"
+  },
+  "STORE-04": {
+   "account_id": "TAS-261104",
+   "phone_id": "ph_261104_1",
+   "call_time": "2026-11-03T13:30:00-05:00"
+  },
+  "PHONE-02": {
+   "account_id": "TAS-261105",
+   "phone_id": "ph_261105_1",
+   "call_time": "2026-11-03T17:50:00-05:00"
+  },
+  "PHONE-08": {
+   "account_id": "TAS-261106",
+   "phone_id": "ph_261106_1",
+   "call_time": "2026-11-03T14:45:00-05:00"
+  },
+  "HOSP-01": {
+   "account_id": "TAS-261107",
+   "phone_id": "ph_261107_1",
+   "call_time": "2026-11-03T12:10:00-05:00"
+  },
+  "HOSP-10": {
+   "account_id": "TAS-261108",
+   "phone_id": "ph_261108_1",
+   "call_time": "2026-11-03T14:15:00-05:00"
+  },
+  "AUTO-03": {
+   "account_id": "TAS-261109",
+   "phone_id": "ph_261109_1",
+   "call_time": "2026-11-03T18:20:00-05:00"
+  },
+  "AUTO-05": {
+   "account_id": "TAS-261110",
+   "phone_id": "ph_261110_1",
+   "call_time": "2026-11-03T15:35:00-05:00"
+  },
+  "LAW-05": {
+   "account_id": "TAS-261111",
+   "phone_id": "ph_261111_1",
+   "call_time": "2026-11-03T10:15:00-05:00"
+  },
+  "LAW-17": {
+   "account_id": "TAS-261112",
+   "phone_id": "ph_261112_1",
+   "call_time": "2026-11-03T17:05:00-05:00"
+  }
+ },
+ "task_clocks": {
+  "CARD-04": {
+   "start_at": "2026-11-03T11:20:00-05:00",
+   "mode": "live"
+  },
+  "CARD-09": {
+   "start_at": "2026-11-03T16:05:00-05:00",
+   "mode": "live"
+  },
+  "STORE-01": {
+   "start_at": "2026-11-03T10:40:00-05:00",
+   "mode": "live"
+  },
+  "STORE-04": {
+   "start_at": "2026-11-03T13:30:00-05:00",
+   "mode": "live"
+  },
+  "PHONE-02": {
+   "start_at": "2026-11-03T17:50:00-05:00",
+   "mode": "live"
+  },
+  "PHONE-08": {
+   "start_at": "2026-11-03T14:45:00-05:00",
+   "mode": "live"
+  },
+  "HOSP-01": {
+   "start_at": "2026-11-03T12:10:00-05:00",
+   "mode": "live"
+  },
+  "HOSP-10": {
+   "start_at": "2026-11-03T14:15:00-05:00",
+   "mode": "live"
+  },
+  "AUTO-03": {
+   "start_at": "2026-11-03T18:20:00-05:00",
+   "mode": "live"
+  },
+  "AUTO-05": {
+   "start_at": "2026-11-03T15:35:00-05:00",
+   "mode": "live"
+  },
+  "LAW-05": {
+   "start_at": "2026-11-03T10:15:00-05:00",
+   "mode": "live"
+  },
+  "LAW-17": {
+   "start_at": "2026-11-03T17:05:00-05:00",
+   "mode": "live"
+  }
+ }
+}

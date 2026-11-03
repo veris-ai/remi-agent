@@ -22,17 +22,24 @@ from starlette.websockets import WebSocketDisconnect
 from vamos_agents.remi import RemiAgent
 from vamos_agents.remi.context import CallContext
 from vamos_agents.remi.db import Database
+from vamos_agents.remi.payments import PayNearMe
 from vamos_voice.framing import Framing
 from vamos_voice.providers.base import CallRuntime, VoiceProvider
 from vamos_voice.server import ConfigError, build_app_from_env, create_app
 
 from . import support
-from .support import CONTEXT_JSON, app_dsn, changes, seed_full_world, snapshot
+from .conftest import paynearme_client
+from .support import CONTEXT_JSON, app_dsn, changes, seed_world, snapshot
 
 
 async def _ledger() -> support.FakeLedger:
-    """The World's ledger as the last seed left it (the calls here never reach the debt)."""
+    """The World's ledger as the last seed left it (the screen pop reads the debt from it)."""
     return support.LEDGER
+
+
+async def _payments() -> PayNearMe:
+    """Remi's client for the World's PayNearMe, as the last seed left it (the calls here take no payment)."""
+    return paynearme_client()
 
 
 HELLO = b"\x01\x00" * 4800  # 200 ms of PCM16 at 24 kHz: stands in for "Hello?"
@@ -66,7 +73,8 @@ class FakeProvider(VoiceProvider):
         call.start.mark_callee_spoke()  # the vendor's VAD heard "Hello?"
         await call.outbound.send(GREETING, "greeting")
         await call.session.dispatch(
-            "log_contact_attempt", {"answered_by": "none", "summary": "Smoke call: greeted and hung up."}
+            "log_contact_attempt",
+            {"answered_by": "third_party", "summary": "Smoke call: greeted and hung up."},
         )
         await call.session.dispatch("end_call", {})
         await call.hang_up()
@@ -77,7 +85,6 @@ def assert_screen_popped(call: CallRuntime) -> None:
     """The screen pop ran before the provider: the account is in the instructions, the reads are done."""
     assert "# Account on screen" in call.setup.instructions
     assert call.session.state.missing_reads == []
-    assert call.session.state.assessment is not None and call.session.state.assessment.proceed
     assert call.session.tool_log == [], "the screen pop is not a model tool call"
 
 
@@ -101,11 +108,12 @@ class ListeningProvider(FakeProvider):
 
 @pytest.fixture
 def app(pg_dsn: str):
-    seed_full_world(pg_dsn)
+    seed_world(pg_dsn)
     agent = RemiAgent(
         CallContext.from_json(CONTEXT_JSON),
         connect_db=lambda: Database.connect(app_dsn(pg_dsn)),
         connect_ledger=_ledger,
+        connect_payments=_payments,
     )
     return create_app(agent, FakeProvider())
 
@@ -128,9 +136,10 @@ def test_voice_call_end_to_end(app, pg_dsn: str) -> None:
     assert (change["op"], change["table"], attempt["account_id"]) == (
         "insert",
         "contact_attempts",
-        "TAS-420101",
+        "TAS-261101",
     )
-    assert attempt["disposition"] == "failed_verification" and attempt["duration_s"] >= 1
+    assert (attempt["answered_by"], attempt["disposition"]) == ("third_party", "third_party")
+    assert attempt["duration_s"] >= 1
 
 
 def test_startup_fails_loudly_on_missing_config() -> None:
@@ -141,11 +150,16 @@ def test_startup_fails_loudly_on_missing_config() -> None:
         "FINERACT_PASSWORD": "p",
         "FINERACT_TENANT": "default",
     }
-    world = {"DATABASE_URL": "postgresql://x", **ledger}
+    payments = {
+        "PAYNEARME_API_BASE": "https://paynearme.example",
+        "PAYNEARME_SITE_IDENTIFIER": "S1",
+        "PAYNEARME_HMAC_SECRET": "secret",
+    }
+    world = {"DATABASE_URL": "postgresql://x", **ledger, **payments}
     with pytest.raises(ConfigError, match="DATABASE_URL") as missing:
         build_app_from_env(names)
-    assert "STRIPE" not in str(missing.value)  # payments go through the World's database now
-    for name in ledger:  # the money is the ledger's: no Fineract, no Remi
+    assert "STRIPE" not in str(missing.value)  # payments go through PayNearMe
+    for name in [*ledger, *payments]:  # the money is the ledger's and PayNearMe's: without them, no Remi
         assert name in str(missing.value)
     with pytest.raises(ConfigError, match="FINERACT_PASSWORD"):
         build_app_from_env(
@@ -153,6 +167,16 @@ def test_startup_fails_loudly_on_missing_config() -> None:
                 **names,
                 "DATABASE_URL": "postgresql://x",
                 **{k: v for k, v in ledger.items() if k != "FINERACT_PASSWORD"},
+                **payments,
+            }
+        )
+    with pytest.raises(ConfigError, match="PAYNEARME_HMAC_SECRET"):
+        build_app_from_env(
+            {
+                **names,
+                "DATABASE_URL": "postgresql://x",
+                **ledger,
+                **{k: v for k, v in payments.items() if k != "PAYNEARME_HMAC_SECRET"},
             }
         )
     with pytest.raises(ConfigError, match="VERIS_AGENT_CONTEXT"):
@@ -176,11 +200,12 @@ def _audio(pcm: bytes) -> str:
 def test_json_framing_agent_hang_up_sends_end(pg_dsn: str) -> None:
     """The bench's json framing: the agent's end_call reaches the actor as {"type": "end"}, then a 1000 close,
     so the actor records a normal end (client_end) rather than a dropped socket."""
-    seed_full_world(pg_dsn)
+    seed_world(pg_dsn)
     agent = RemiAgent(
         CallContext.from_json(CONTEXT_JSON),
         connect_db=lambda: Database.connect(app_dsn(pg_dsn)),
         connect_ledger=_ledger,
+        connect_payments=_payments,
     )
     app = create_app(agent, FakeProvider(), framing=Framing.JSON)
     with TestClient(app) as client, client.websocket_connect("/voice") as ws:
@@ -194,11 +219,12 @@ def test_json_framing_agent_hang_up_sends_end(pg_dsn: str) -> None:
 @pytest.mark.postgres
 def test_json_framing_callee_end_still_logs_the_contact_attempt(pg_dsn: str) -> None:
     """The callee hangs up in-band before Remi logs the call: finalize() writes the fallback row, as on a drop."""
-    seed_full_world(pg_dsn)
+    seed_world(pg_dsn)
     agent = RemiAgent(
         CallContext.from_json(CONTEXT_JSON),
         connect_db=lambda: Database.connect(app_dsn(pg_dsn)),
         connect_ledger=_ledger,
+        connect_payments=_payments,
     )
     before = snapshot(pg_dsn)
     with (

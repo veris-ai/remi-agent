@@ -4,7 +4,7 @@ Importing this package registers every tool into ``REGISTRY`` in a fixed
 order (connect reads, identity, flags, the creditor's payment options, payments, wrap-up). Vendors never see
 handlers; they get ``REGISTRY.specs()`` converted by their ``ToolFormat`` and
 send every call back through the framework's ``CallSession.dispatch``, which
-checks ``vamos_agents.remi.gates.GATES`` and hands the handler the call's ``RemiCall``.
+hands the handler the call's ``RemiCall`` (Remi's gates refuse nothing: ``gates``).
 """
 
 from . import connect, flags, identity, money, options, wrapup  # noqa: F401 - registration side effects

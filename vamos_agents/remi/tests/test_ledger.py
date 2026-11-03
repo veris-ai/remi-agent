@@ -24,30 +24,23 @@ from vamos_agents.remi.ledger import FineractLedger, LedgerRefused, LedgerUnavai
 API = "/fineract-provider/api/v1"
 LOAN = {
     "id": 7,
-    "externalId": "TAS-420103",
+    "externalId": "TAS-261105",
     "status": {"id": 300},
     "summary": {"principalDisbursed": 322.75, "totalRepayment": 10.0, "totalOutstanding": 312.75},
     "transactions": [
         {"type": {"disbursement": True}, "date": [2025, 3, 29], "amount": 322.75},
-        {"type": {"repayment": True}, "date": [2025, 6, 27], "amount": 10.0, "externalId": "seed_TAS-420103"},
+        {"type": {"repayment": True}, "date": [2025, 6, 27], "amount": 10.0, "externalId": "seed_TAS-261105"},
         {"type": {"repayment": True}, "date": [2025, 7, 1], "amount": 5.0, "manuallyReversed": True},
     ],
-    "repaymentSchedule": {
-        "periods": [
-            {"dueDate": [2025, 3, 29], "principalDisbursed": 322.75},
-            {"period": 1, "dueDate": [2025, 4, 29], "totalDueForPeriod": 10.0, "totalPaidForPeriod": 10.0},
-            {"period": 2, "dueDate": [2027, 3, 1], "totalDueForPeriod": 52.13, "totalPaidForPeriod": 0},
-            {"period": 3, "dueDate": [2027, 4, 1], "totalDueForPeriod": 0, "totalPaidForPeriod": 0},
-        ]
-    },
 }
 ITEMIZATION = [
     {
         "loan_id": 7,
-        "charge_off_on": [2025, 3, 29],
-        "charge_off_balance": 275.0,
-        "interest_since_charge_off": 29.75,
-        "fees_since_charge_off": 18.0,
+        "itemized_from": "charge_off",
+        "itemized_on": [2025, 3, 29],
+        "itemized_balance": 275.0,
+        "interest_since": 29.75,
+        "fees_since": 18.0,
     }
 ]
 
@@ -93,11 +86,11 @@ class FakeFineract:
             return httpx.Response(
                 200,
                 json=[
-                    {"type": "BUSINESS_DATE", "date": [2027, 2, 10]},
-                    {"type": "COB_DATE", "date": [2027, 2, 9]},
+                    {"type": "BUSINESS_DATE", "date": [2026, 11, 3]},
+                    {"type": "COB_DATE", "date": [2026, 11, 2]},
                 ],
             )
-        if path == "/loans/external-id/TAS-420103":
+        if path == "/loans/external-id/TAS-261105":
             return httpx.Response(200, json=LOAN)
         if path == "/datatables/tas_itemization/7":
             return httpx.Response(200, json=ITEMIZATION)
@@ -117,7 +110,7 @@ async def _ledger(fake: FakeFineract) -> FineractLedger:
 async def test_connect_resolves_the_payment_types_and_the_business_date() -> None:
     ledger = await _ledger(FakeFineract())
     assert ledger.payment_types == {"card": 8, "ach": 9}
-    assert ledger.business_date == date(2027, 2, 10)
+    assert ledger.business_date == date(2026, 11, 3)
 
 
 async def test_a_ledger_without_the_payment_types_is_not_ready() -> None:
@@ -129,49 +122,39 @@ async def test_a_ledger_without_the_payment_types_is_not_ready() -> None:
 
 
 async def test_the_debt_is_the_loan_and_its_itemization_in_cents() -> None:
-    debt = await (await _ledger(FakeFineract())).debt("TAS-420103")
+    debt = await (await _ledger(FakeFineract())).debt("TAS-261105")
     assert (debt.loan_id, debt.status, debt.open) == (7, 300, True)
     assert (debt.balance_cents, debt.paid_cents, debt.last_payment_on) == (31275, 1000, date(2025, 6, 27))
     item = debt.itemization
     assert (
-        item.charge_off_on,
-        item.charge_off_balance_cents,
-        item.interest_since_charge_off_cents,
-        item.fees_since_charge_off_cents,
-    ) == (
-        date(2025, 3, 29),
-        27500,
-        2975,
-        1800,
-    )
-    assert [(i.due_on, i.amount_cents, i.paid_cents) for i in debt.schedule] == [
-        (date(2025, 4, 29), 1000, 1000),
-        (date(2027, 3, 1), 5213, 0),
-    ]
+        item.itemized_from,
+        item.itemized_on,
+        item.itemized_balance_cents,
+        item.interest_since_cents,
+        item.fees_since_cents,
+    ) == ("charge_off", date(2025, 3, 29), 27500, 2975, 1800)
 
 
-async def test_a_posting_carries_the_call_date_dollars_the_method_and_the_gateways_ids() -> None:
+async def test_a_posting_carries_the_call_date_dollars_the_method_and_paynearmes_payment_id() -> None:
     fake = FakeFineract()
     ledger = await _ledger(fake)
-    debt = await ledger.debt("TAS-420103")
+    debt = await ledger.debt("TAS-261105")
     posting = await ledger.post_payment(
         debt,
         amount_cents=31275,
-        on=date(2027, 2, 10),
+        on=date(2026, 11, 3),
         kind="ach",
-        payment_id="pay_abc",
-        processor_ref="rp_xyz",
+        payment_id="880000000001",
     )
-    assert (posting.transaction_id, posting.amount_cents, posting.payment_id) == (41, 31275, "pay_abc")
+    assert (posting.transaction_id, posting.amount_cents, posting.payment_id) == (41, 31275, "880000000001")
     method, path, body = fake.requests[-1]
     assert (method, path) == ("POST", "/loans/7/transactions?command=repayment")
     assert body == {
-        "transactionDate": "10 February 2027",
+        "transactionDate": "3 November 2026",
         "transactionAmount": "312.75",
         "paymentTypeId": 9,
-        "externalId": "pay_abc",
-        "receiptNumber": "rp_xyz",
-        "note": "Gateway payment pay_abc",
+        "externalId": "880000000001",
+        "note": "PayNearMe payment 880000000001",
         "dateFormat": "dd MMMM yyyy",
         "locale": "en",
     }
@@ -181,21 +164,20 @@ async def test_a_repeated_posting_finds_the_first_instead_of_posting_twice() -> 
     def handle(request: httpx.Request) -> httpx.Response | None:
         if request.method == "POST" and request.url.path.endswith("/transactions"):
             return _refusal("validation.msg.loan.transaction.externalId.value.must.be.unique", 400)
-        if request.url.path.endswith("/transactions/external-id/pay_abc"):
-            return httpx.Response(200, json={"id": 41, "amount": 312.75, "date": [2027, 2, 10]})
+        if request.url.path.endswith("/transactions/external-id/880000000001"):
+            return httpx.Response(200, json={"id": 41, "amount": 312.75, "date": [2026, 11, 3]})
         return None
 
     ledger = await _ledger(FakeFineract(handle))
-    debt = await ledger.debt("TAS-420103")
+    debt = await ledger.debt("TAS-261105")
     posting = await ledger.post_payment(
         debt,
         amount_cents=31275,
-        on=date(2027, 2, 10),
+        on=date(2026, 11, 3),
         kind="card",
-        payment_id="pay_abc",
-        processor_ref="rp_xyz",
+        payment_id="880000000001",
     )
-    assert (posting.transaction_id, posting.amount_cents, posting.on) == (41, 31275, date(2027, 2, 10))
+    assert (posting.transaction_id, posting.amount_cents, posting.on) == (41, 31275, date(2026, 11, 3))
 
 
 async def test_a_refusal_is_fineracts_own_code_and_a_tool_error() -> None:
@@ -205,15 +187,14 @@ async def test_a_refusal_is_fineracts_own_code_and_a_tool_error() -> None:
         )
     )
     ledger = await _ledger(fake)
-    debt = await ledger.debt("TAS-420103")
+    debt = await ledger.debt("TAS-261105")
     with pytest.raises(LedgerRefused) as refused:
         await ledger.post_payment(
             debt,
             amount_cents=100,
-            on=date(2027, 2, 11),
+            on=date(2026, 11, 4),
             kind="card",
-            payment_id="pay_x",
-            processor_ref="rp_x",
+            payment_id="880000000002",
         )
     assert refused.value.code == "error.msg.loan.transaction.cannot.be.a.future.date"
     assert str(refused.value).startswith("The ledger refused it: ")
@@ -231,44 +212,30 @@ async def test_an_unreachable_or_failing_ledger_is_unavailable_not_a_refusal(fai
     ledger = await _ledger(FakeFineract())
     ledger._http._transport = httpx.MockTransport(fail)
     with pytest.raises(LedgerUnavailable):
-        await ledger.debt("TAS-420103")
+        await ledger.debt("TAS-261105")
 
 
-async def test_write_off_and_re_age_send_the_commands_worldmd_documents() -> None:
+async def test_write_off_sends_the_command_worldmd_documents_and_nothing_re_ages() -> None:
+    """A discount's remainder is written off on the call's date; a plan is the agency's row, never a re-age."""
     fake = FakeFineract()
     ledger = await _ledger(fake)
-    debt = await ledger.debt("TAS-420103")
-    await ledger.write_off(debt, on=date(2027, 2, 10), external_id="wo_pay_abc", note="Settled.")
-    await ledger.re_age(debt, instalments=6, first_due_on=date(2027, 3, 1), external_id="arr_1")
-    await ledger.undo_re_age(debt)
+    debt = await ledger.debt("TAS-261105")
+    await ledger.write_off(debt, on=date(2026, 11, 3), external_id="wo_880000000001", note="Discount paid.")
     writes = [(m, p, b) for m, p, b in fake.requests if m == "POST"]
     assert writes == [
         (
             "POST",
             "/loans/7/transactions?command=writeoff",
             {
-                "transactionDate": "10 February 2027",
-                "externalId": "wo_pay_abc",
-                "note": "Settled.",
+                "transactionDate": "3 November 2026",
+                "externalId": "wo_880000000001",
+                "note": "Discount paid.",
                 "dateFormat": "dd MMMM yyyy",
                 "locale": "en",
             },
         ),
-        (
-            "POST",
-            "/loans/7/transactions?command=reAge",
-            {
-                "frequencyNumber": 1,
-                "frequencyType": "MONTHS",
-                "startDate": "1 March 2027",
-                "numberOfInstallments": 6,
-                "externalId": "arr_1",
-                "dateFormat": "dd MMMM yyyy",
-                "locale": "en",
-            },
-        ),
-        ("POST", "/loans/7/transactions?command=undoReAge", {"dateFormat": "dd MMMM yyyy", "locale": "en"}),
     ]
+    assert not hasattr(ledger, "re_age") and not hasattr(ledger, "undo_re_age")
 
 
 def test_dates_and_amounts_cross_the_wire_exactly() -> None:

@@ -1,0 +1,60 @@
+{
+ "creditor": {
+  "name": "Harlow Point Medical Center",
+  "debt": "The patient's share of a hospital bill. The hospital places an account with the agency only after 180 days and after checking whether the patient qualifies for financial assistance. (N.Y. Pub. Health Law 2807-k(9-a)(l))",
+  "named_as": "The creditor is named as Harlow Point Medical Center."
+ },
+ "balance": "412.75",
+ "full_balance": {
+  "option_id": "pif",
+  "amount": "412.75"
+ },
+ "payment_plans": {
+  "option_id": "payment_plan",
+  "down_payment": null,
+  "plan_covers": "412.75",
+  "payments": "Equal monthly payments, each rounded down to the cent; the last payment takes the remainder so the plan totals exactly what it covers.",
+  "minimum_monthly_payment": "25.00",
+  "maximum_months": 36,
+  "automatic_payments": false,
+  "interest": "Never any interest."
+ },
+ "discounts": [
+  {
+   "option_id": "discount_15",
+   "percent_off": 15,
+   "amount": "350.83",
+   "requires": [],
+   "paid_within_days": 14,
+   "due_by": "2026-11-17"
+  },
+  {
+   "option_id": "discount_30",
+   "percent_off": 30,
+   "amount": "288.92",
+   "requires": [
+    "a hardship the consumer has described in their own words",
+    "the consumer having said no to financial assistance",
+    "a supervisor's OK, requested before the discount is mentioned"
+   ],
+   "paid_within_days": 14,
+   "due_by": "2026-11-17"
+  }
+ ],
+ "offer_rules": [
+  "Offers come in this order: the full balance, then payment plans from shortest to longest, then discounts from smallest to largest, then a person.",
+  "No discount is more than 40% off.",
+  "Where a discount needs a supervisor's OK, the OK is requested before the discount is mentioned.",
+  "The collector never hints that a better deal may exist. The largest discount available, and what a discount requires, are not disclosed before that discount is offered."
+ ],
+ "creditor_rules": [
+  "The 15% discount needs no hardship, and the consumer's circumstances are not asked about for it.",
+  "The collector brings up the hospital's financial assistance with every plan offer, and whenever the consumer says paying is hard. (N.Y. Pub. Health Law 2807-k(9-a)(h))",
+  "A consumer who has applied for, or qualifies for, financial assistance has a dispute (manual 10.1); after it is recorded, the call goes to a person. (N.Y. Pub. Health Law 2807-k(9-a)(b)(i), (h))",
+  "A consumer who wants to apply for financial assistance but hasn't yet: the collector stops asking for money, records that they want to apply, and transfers the call to a person. This is not recorded as a dispute.",
+  "A consumer who had Medicaid when treated has a dispute (manual 10.1); after it is recorded, the call goes to a person. No payment is asked for or taken from them. (N.Y. Pub. Health Law 2807-k(9-a)(h))",
+  "A consumer who complains about the care itself is transferred to a person. A complaint about the care is not a dispute.",
+  "Before any card payment, the collector says that paying medical bills by credit card means losing medical-debt protections, and gets the consumer's OK. (N.Y. Gen. Bus. Law 519-a(3))",
+  "The collector never raises credit reporting, credit reports, liens on their home, wage garnishment, lawsuits, or selling the debt. Asked about them, it may say truthfully that none of these will happen on this debt. (N.Y. Pub. Health Law 2807-k(9-a)(h), 4926, 4927; N.Y. CPLR 5201(b), 5231(b)(iv))"
+ ]
+}

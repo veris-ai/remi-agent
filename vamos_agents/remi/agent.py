@@ -1,15 +1,16 @@
 """``RemiAgent``: Remi as an ``AgentSpec`` (outbound debt collection, the callee speaks first).
 
 Remi works for Tallmere Account Services, LLC and places outbound calls to
-consumers in New York City for the VAmoS Debt Collection benchmark. Its world
-is two clients, both opened in ``connect()``: the Postgres collections database
-(``DATABASE_URL``), where the workflow lives and payments are charged through
-the gateway functions inside it (``payments.PaymentGateway``), and the
-Fineract ledger (``FINERACT_API_BASE`` and its credentials), where each
-account's money lives (``ledger.FineractLedger``). When the call connects,
-Remi's screen pop (``screen_pop``) reads the account, the dialed phone and the
-contact history from Postgres before any vendor session opens; the ledger is
-first read once the debt is (``get_debt_details``).
+consumers in New York City for the VAmoS Debt Collection benchmark (World v2).
+Its world is three clients, all opened in ``connect()``: the Postgres
+collections database (``DATABASE_URL``), where the workflow lives and the
+creditor's policy is priced (``creditor_policy``); the Fineract ledger
+(``FINERACT_API_BASE`` and its credentials), where each account's money lives
+(``ledger.FineractLedger``); and PayNearMe (``PAYNEARME_API_BASE``, the site id
+and HMAC secret from the candidate's env), where payments are taken
+(``payments.PayNearMe``). When the call connects, Remi's screen pop
+(``screen_pop``) reads the account, the debt, the dialed phone and the contact
+history before any vendor session opens.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from .context import CallContext
 from .db import Database
 from .gates import GATES
 from .ledger import FineractLedger, Ledger
+from .payments import PayNearMe
 from .prompt import render_instructions
 from .screen_pop import screen_pop
 from .tools import REGISTRY
@@ -41,6 +43,8 @@ DB_CONNECT_ATTEMPTS = 10
 DB_CONNECT_DELAY_S = 3.0
 #: The Fineract credentials and tenant, beside the twin's address the bench injects.
 LEDGER_ENV = ("FINERACT_API_BASE", "FINERACT_USER", "FINERACT_PASSWORD", "FINERACT_TENANT")
+#: PayNearMe's address (the platform's) and the site's credentials (the bench candidate's env, World v2 WORLD.md).
+PAYMENTS_ENV = ("PAYNEARME_API_BASE", "PAYNEARME_SITE_IDENTIFIER", "PAYNEARME_HMAC_SECRET")
 
 #: Outbound: whoever answers speaks first.
 CALLEE_FIRST = callee_first()
@@ -73,25 +77,28 @@ async def open_ledger(env: Mapping[str, str]) -> FineractLedger:
 
 
 class RemiAgent(AgentSpec):
-    """The debt-collection agent: callee first, the RULES.md opening as gates, Postgres and the ledger."""
+    """The debt-collection agent: callee first; Postgres, the ledger and PayNearMe; no tool refused for policy."""
 
     name = "remi"
     call_start = CALLEE_FIRST
     tools = REGISTRY
     gates = GATES
-    required_env = ("DATABASE_URL", *LEDGER_ENV)
+    required_env = ("DATABASE_URL", *LEDGER_ENV, *PAYMENTS_ENV)
 
     def __init__(
         self,
         context: CallContext,
         connect_db: Callable[[], Awaitable[Database]],
         connect_ledger: Callable[[], Awaitable[Ledger]],
+        connect_payments: Callable[[], Awaitable[PayNearMe]],
     ) -> None:
         self.context = context
         self._connect_db = connect_db
         self._connect_ledger = connect_ledger
+        self._connect_payments = connect_payments
         self.db: Database | None = None
         self.ledger: Ledger | None = None
+        self.payments: PayNearMe | None = None
         self.agency: Agency | None = None
 
     @classmethod
@@ -99,10 +106,16 @@ class RemiAgent(AgentSpec):
         call_context = CallContext.parse(context)
         dsn = env["DATABASE_URL"]
         ledger_env = {key: env[key] for key in LEDGER_ENV}
+        base, site, secret = (env[key] for key in PAYMENTS_ENV)
+
+        async def connect_payments() -> PayNearMe:
+            return PayNearMe(base, site, secret)
+
         return cls(
             call_context,
             connect_db=lambda: Database.connect(dsn),
             connect_ledger=lambda: open_ledger(ledger_env),
+            connect_payments=connect_payments,
         )
 
     def call_time(self) -> datetime:
@@ -112,6 +125,7 @@ class RemiAgent(AgentSpec):
         self.db = await connect_with_retry("database", self._connect_db)
         self.agency = await self.db.agency()
         self.ledger = await connect_with_retry("ledger", self._connect_ledger)
+        self.payments = await self._connect_payments()
         today = self.context.call_time.date()
         if self.ledger.business_date != today:
             # Fineract refuses a posting after its business date, which the World holds at the call's day.
@@ -124,6 +138,8 @@ class RemiAgent(AgentSpec):
             await self.db.close()
         if self.ledger is not None:
             await self.ledger.close()
+        if self.payments is not None:
+            await self.payments.close()
 
     def instructions(self, clock: CallClock) -> str:
         if self.agency is None:
@@ -131,9 +147,9 @@ class RemiAgent(AgentSpec):
         return render_instructions(self.context, self.agency)
 
     def open_call(self, clock: CallClock) -> RemiCall:
-        if self.db is None or self.ledger is None:
+        if self.db is None or self.ledger is None or self.payments is None:
             raise RuntimeError("RemiAgent.connect() must run before a call")
-        return RemiCall(self.context, clock, self.db, self.ledger)
+        return RemiCall(self.context, clock, self.db, self.ledger, self.payments)
 
     async def screen_pop(self, call: RemiCall) -> ScreenPop:
         return await screen_pop(call)
