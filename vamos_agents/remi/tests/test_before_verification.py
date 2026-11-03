@@ -83,9 +83,15 @@ def test_the_manual_explains_the_check_and_what_follows_verification() -> None:
             "that the agency is a debt collector, this is an attempt to collect a debt, and any information "
             "obtained will be used for that purpose",
         ),
-        ("## 9. Stating the debt", "On request: the itemization since charge-off"),
+        (
+            "## 9. Stating the debt",
+            "On request: the itemization from the itemization date the account states",
+        ),
+        ("## 9. Stating the debt", "(12 CFR 1006.34(b)(3))"),
     ):
         assert line in section(text, heading), line
+    # hospital and auto accounts are itemized from a placement or a sale, not a charge-off
+    assert "charge-off" not in section(text, "## 9. Stating the debt")
 
 
 def test_push_back_gets_a_reason_and_a_way_out() -> None:
