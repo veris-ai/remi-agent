@@ -210,7 +210,9 @@ exactly once (`CallSession.finalize`), as early as it can:
 
 From `caller_gone` on, `dispatch` refuses new tool calls ("the caller has hung
 up"), and `finalize` waits (up to 10 s) for any tool call already running, so
-the agent's record comes after the call's last effect.
+the agent's record comes after the call's last effect. A tool call that has
+started always finishes: `dispatch` runs it in its own task, so a hang-up that
+cancels the provider loop awaiting it (`run_until_first_done`) does not stop it.
 
 Supporting pieces an agent uses:
 

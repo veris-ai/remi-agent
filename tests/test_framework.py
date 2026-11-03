@@ -203,6 +203,41 @@ async def test_a_caller_hang_up_finalizes_once_after_running_tools_and_refuses_n
     assert state.order == ["slow_write", "finalize"] and state.finalized == 1
 
 
+async def test_a_started_tool_call_finishes_when_the_task_awaiting_it_is_cancelled() -> None:
+    """A hang-up cancels the provider loop awaiting ``dispatch`` (``run_until_first_done``): that loop sees
+    the cancellation, but the tool call (a charge, then its record) runs to the end, and finalize waits."""
+    session, state = tiny_session()
+
+    async def finalize() -> None:
+        state.order.append("finalize")
+        state.finalized += 1
+
+    state.finalize = finalize  # type: ignore[method-assign]
+    awaiting = asyncio.create_task(session.dispatch("slow_write", {}))
+    await asyncio.sleep(0)
+    awaiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await awaiting
+    session.caller_gone()
+    await asyncio.sleep(0.01)
+    assert state.order == [], "finalize waits for the tool call still running"
+    state.release.set()
+    await session.finalize()
+    assert state.order == ["slow_write", "finalize"] and state.finalized == 1
+
+
+async def test_an_unexpected_fault_is_reported_as_what_is_known(caplog: pytest.LogCaptureFixture) -> None:
+    """A fault can come after the effect (a charge approved, its record not written): the model hears
+    that the outcome is not known, and no advice about retrying."""
+    caplog.set_level(logging.ERROR)
+    session, state = tiny_session()
+    state.verified = True
+    assert await session.dispatch("broken", {}) == {
+        "error": "broken failed because of a system problem; whether it took effect is not known."
+    }
+    assert "tool broken failed" in caplog.text and "database fell over" in caplog.text
+
+
 async def test_a_failed_finalize_is_logged_even_if_nobody_awaits_it(caplog: pytest.LogCaptureFixture) -> None:
     session, state = tiny_session()
 

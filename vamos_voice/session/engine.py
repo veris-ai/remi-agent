@@ -1,11 +1,16 @@
 """``CallSession``: the one path every tool call takes, for every agent and vendor.
 
 Providers never run a handler themselves; they call ``dispatch(name, args)``
-and send back the dict it returns. ``dispatch`` never raises. Unknown tools,
-calls after the call ended, gate refusals, argument validation errors,
-``ToolError``s and unexpected faults all come back as ``{"error": ...}`` for
-the model to handle on the call, and are logged with the tool's ``redact``
-fields replaced, so card data never reaches a log line.
+and send back the dict it returns. ``dispatch`` never raises, except to pass on
+the cancellation of the task awaiting it. Unknown tools, calls after the call
+ended, gate refusals, argument validation errors, ``ToolError``s and unexpected
+faults all come back as ``{"error": ...}`` for the model to handle on the call,
+and are logged with the tool's ``redact`` fields replaced, so card data never
+reaches a log line.
+
+A tool call that passes those checks runs in its own task and always finishes:
+a hang-up may cancel the provider loop awaiting ``dispatch`` (the loop gets the
+cancellation) but not the call, so a charge that went through gets its record.
 
 ``finalize`` runs the agent's end-of-call writes exactly once, however many
 paths ask for it. ``caller_gone`` starts it the moment the caller hangs up or
@@ -22,7 +27,9 @@ import asyncio
 import logging
 from typing import Any, Protocol
 
-from ..tools.registry import ToolError, ToolRegistry
+from pydantic import BaseModel
+
+from ..tools.registry import Tool, ToolError, ToolRegistry
 from .gates import Gates
 
 logger = logging.getLogger(__name__)
@@ -53,7 +60,8 @@ class CallSession:
         self.tool_log: list[str] = []
         #: The caller is gone (hung up or dropped): no new tool call runs.
         self.closing = False
-        self._running = 0
+        #: Tool calls started and not finished (held here: the event loop keeps only weak references).
+        self._running: set[asyncio.Task[dict[str, Any]]] = set()
         self._settled = asyncio.Event()
         self._settled.set()
         self._finalizing: asyncio.Future[None] | None = None
@@ -63,15 +71,17 @@ class CallSession:
         return self.state.ended
 
     async def dispatch(self, name: str, raw_args: dict[str, Any] | None) -> dict[str, Any]:
-        """Run one tool call. Always returns a JSON-able dict; refusals are ``{"error": ...}``."""
+        """Run one tool call. Always returns a JSON-able dict; refusals are ``{"error": ...}``.
+
+        Once the checks pass, the handler runs in its own task, awaited through ``asyncio.shield``:
+        if the awaiting task is cancelled, the cancellation is re-raised to it and the tool call
+        still runs to completion, and ``finalize`` waits for it."""
         tool = self.registry.get(name)
         args_for_log = _redacted(raw_args or {}, tool.redact if tool else frozenset())
         if tool is None:
             logger.warning("tool %s does not exist (args %s)", name, args_for_log)
             return {"error": f"There is no tool named {name}."}
         self.tool_log.append(name)
-        self._running += 1
-        self._settled.clear()
         try:
             if self.closing:
                 raise ToolError("The caller has hung up; the call is over.")
@@ -80,20 +90,26 @@ class CallSession:
             if (refusal := self.gates.refusal(self.state, tool)) is not None:
                 raise ToolError(refusal)
             args = tool.parse(raw_args or {})
+        except Exception as err:
+            return _failure(name, err, args_for_log)
+        call = asyncio.create_task(self._run(tool, args, args_for_log), name=f"tool {name}")
+        self._running.add(call)
+        self._settled.clear()
+        call.add_done_callback(self._call_done)
+        return await asyncio.shield(call)
+
+    async def _run(self, tool: Tool, args: BaseModel, args_for_log: dict[str, Any]) -> dict[str, Any]:
+        try:
             result = await tool.handler(self.state, args)
-        except ToolError as err:
-            logger.info("tool %s refused: %s (args %s)", name, err, args_for_log)
-            return {"error": str(err)}
-        except Exception:
-            # Fail loud in the logs, but keep the call alive: the model can apologise and recover.
-            logger.exception("tool %s failed (args %s)", name, args_for_log)
-            return {"error": f"{name} failed because of a system problem. Do not retry it more than once."}
-        finally:
-            self._running -= 1
-            if not self._running:
-                self._settled.set()
-        logger.info("tool %s ok (args %s)", name, args_for_log)
+        except Exception as err:
+            return _failure(tool.name, err, args_for_log)
+        logger.info("tool %s ok (args %s)", tool.name, args_for_log)
         return result
+
+    def _call_done(self, call: asyncio.Task[dict[str, Any]]) -> None:
+        self._running.discard(call)
+        if not self._running:
+            self._settled.set()
 
     def caller_gone(self) -> None:
         """The caller hung up or the line dropped: refuse new tool calls and start finalizing now,
@@ -125,6 +141,16 @@ def _log_failure(task: asyncio.Future[None]) -> None:
     """A finalize started by ``caller_gone`` may fail with nobody awaiting it yet: never silently."""
     if not task.cancelled() and (err := task.exception()) is not None:
         logger.error("the call could not be finalized", exc_info=err)
+
+
+def _failure(name: str, err: Exception, args_for_log: dict[str, Any]) -> dict[str, Any]:
+    """A refusal or a fault as ``{"error": ...}`` for the model, logged with the redacted arguments."""
+    if isinstance(err, ToolError):
+        logger.info("tool %s refused: %s (args %s)", name, err, args_for_log)
+        return {"error": str(err)}
+    # Fail loud in the logs, but keep the call alive: the model can apologise and recover.
+    logger.error("tool %s failed (args %s)", name, args_for_log, exc_info=err)
+    return {"error": f"{name} failed because of a system problem; whether it took effect is not known."}
 
 
 def _redacted(args: dict[str, Any], fields: frozenset[str]) -> dict[str, Any]:
