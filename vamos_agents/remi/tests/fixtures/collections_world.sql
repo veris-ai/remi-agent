@@ -1,7 +1,7 @@
 -- The VAmoS Debt Collection World v2's database, vendored for Remi's tests: schema, the creditors'
 -- policy engine and rows, in the order the World is seeded (collections_bench/world_v2/WORLD.md, "Building the world").
 --
--- Source: the benchmark repo @ 199e43a5b6928350d3dd380686548c0c9a5832a8
+-- Source: the benchmark repo @ 886e74f146c961e75db9a56ba705759ce94559f6
 --   collections_bench/world_v2/generated/world/schema.sql
 --   collections_bench/world_v2/creditor_policy.sql
 --   collections_bench/world_v2/generated/world/rows.sql
