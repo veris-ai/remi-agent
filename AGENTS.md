@@ -390,7 +390,7 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 | Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`); the tool calls pending at the barge-in come back in a `toolCallCancellation`, by then already run and answered: logged (ids, tool names, whether each returned an error), nothing undone, skipped or sent | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
 | Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |
 | `TurnTaking` mapping | **none**: `server_vad` on OpenAI's defaults | **none**: `server_vad` on xAI's defaults | **none**: automatic activity detection on Gemini's defaults | **none**: no VAD settings exist | **none**: Silero `VADParams()`, Pipecat's default start strategies and Smart Turn v3 stop |
-| Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat |
+| Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat, except that an interruption does not cancel a running tool call (Pipecat 1.12 would settle it as `CANCELLED`): its real result replaces `IN_PROGRESS` and, as after Pipecat's cancel, runs no inference |
 | Callee-spoke signal | `input_audio_buffer.committed` | same | first input transcription | first non-empty `session.input_transcript.delta` | first user transcript |
 | Language (every VAmoS call is English) | transcription `language: "en"` | transcription `language_hint: "en"`; no setting for the spoken language (the prompt holds it) | transcription `languageCodes: ["en"]`; native-audio models choose the spoken language themselves and take no `languageCode` (the prompt holds it) | **none** documented (the prompt holds it) | `Language.EN` on Deepgram STT, OpenAI STT and Cartesia TTS (OpenAI's speech endpoint takes none) |
 
@@ -810,6 +810,9 @@ uv run ruff check . && uv run ruff format --check .
   each cascade's own legs (Voxtral frames and flush, Whisper/fal requests on `httpx.MockTransport`,
   xAI STT/TTS frames and `text.clear`, the streamed `openai` round; gradbot via a fake `gradbot.run`:
   re-issued tool calls answered once, the hang-up after the last words).
+- `tests/test_pipecat_tools.py`: Pipecat's LLM service and context aggregators with a scripted OpenAI stream:
+  a tool call the caller talks over runs once, its real result reaches the context (never `CANCELLED`) and
+  forces no inference; `end_call` talked over still hangs up.
 - `tests/test_realtime_turns.py`: the Realtime call flow (nothing but the session at call start,
   vendor-native turn taking, a request refused for an active response).
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.

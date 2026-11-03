@@ -18,6 +18,16 @@ pipeline starts with an empty context and the LLM runs only on a user turn:
 the callee speaks first. For an agent that speaks first, the pipeline's first
 frames (queued when the caller's socket connects) append the policy's opening
 instruction and run the LLM.
+
+Tool calls: one catch-all handler sends every call to ``CallSession.dispatch``,
+shielded, so a call that has started always finishes. Pipecat's turn taking and
+interruptions are its own, but an interruption (in Pipecat 1.12, every user turn
+start, even while a tool runs) does not cancel a running call: Pipecat would
+record it as ``CANCELLED`` though it ran. Its true result replaces Pipecat's
+``IN_PROGRESS`` placeholder when it returns, and, like Pipecat's cancel, a result
+the caller talked over runs no inference: if it lands before the caller's turn is
+answered, the answer sees it; if not, it waits in the context for the next turn
+(as LiveKit Agents commits a tool result that finished despite an interruption).
 """
 
 from __future__ import annotations
@@ -30,7 +40,13 @@ from typing import Any, Self
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import EndFrame, Frame, FunctionCallResultProperties, LLMMessagesAppendFrame
+from pipecat.frames.frames import (
+    EndFrame,
+    Frame,
+    FunctionCallResultProperties,
+    InterruptionFrame,
+    LLMMessagesAppendFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -58,10 +74,23 @@ DEFAULT_LLM_MODEL = "gpt-4.1-mini"
 
 
 class RetryingOpenAILLM(OpenAILLMService):
-    """Pipecat's OpenAI LLM with the shared retry budget (``RETRY_BUDGET_S``); Pipecat leaves the SDK's 2."""
+    """Pipecat's OpenAI LLM with the shared retry budget (``RETRY_BUDGET_S``; Pipecat leaves the SDK's 2),
+    whose running tool calls an interruption does not cancel."""
 
     def create_client(self, *args: Any, **kwargs: Any) -> Any:
         return super().create_client(*args, **kwargs).with_options(max_retries=OPENAI_SDK_MAX_RETRIES)
+
+    async def _handle_interruptions(self, _: InterruptionFrame) -> None:
+        # Pipecat's version cancels the running calls of every tool registered with
+        # cancel_on_interruption (our catch-all) and settles each as "CANCELLED", so a later result
+        # is dropped. Ours cannot be stopped (_dispatcher shields the dispatch): none is cancelled,
+        # and its result arrives through Pipecat's own path. It runs no inference, as Pipecat's
+        # cancel runs none: the caller's turn gets Pipecat's own reply. The interruption itself
+        # (speech stopped, the reply cut) is untouched: the processors handle the frame as before.
+        # Private Pipecat API (_handle_interruptions, _function_call_tasks, the runner item's
+        # run_llm), safe under the pipecat-ai>=1.12,<1.13 pin; tests/test_pipecat_tools.py pins it.
+        for running in self._function_call_tasks.values():
+            running.run_llm = False
 
 
 class PipecatToolFormat:
@@ -177,8 +206,9 @@ class PipecatProvider(VoiceProvider):
 
 def _dispatcher(session: CallSession) -> Callable[[FunctionCallParams], Any]:
     async def handle(params: FunctionCallParams) -> None:
-        # Shielded: a barge-in may cancel the handler, but a payment or a database write
-        # that has started must finish, or the call and the world would disagree.
+        # Shielded: an interruption no longer cancels the handler (RetryingOpenAILLM), but the
+        # pipeline's teardown still does, and a payment or a database write that has started
+        # must finish, or the call and the world would disagree.
         result = await asyncio.shield(session.dispatch(params.function_name, dict(params.arguments)))
         if session.ended:
             await params.result_callback(result, properties=FunctionCallResultProperties(run_llm=False))
