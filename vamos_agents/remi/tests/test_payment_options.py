@@ -540,16 +540,16 @@ async def test_a_down_payment_that_did_not_post_sets_up_no_plan(
 # --- the prompt and the shared registry ------------------------------------------------------------
 
 
-def test_the_prompt_states_the_creditors_policies_and_a_rule_for_every_intent() -> None:
+def test_the_prompt_takes_the_creditors_policy_from_its_tool_and_has_a_rule_for_every_intent() -> None:
     text = files("vamos_agents.remi.prompt").joinpath("instructions.md").read_text(encoding="utf-8")
     names = {t.name for t in REGISTRY.specs()}
     assert "negotiate" not in text and "judge best" not in text and "counter-offer" not in text
-    # the prompt states rules and names no tool; any tool name it ever carries must be a real tool
+    # the prompt states rules; any tool name it carries (get_payment_options, manual 8.3) must be a real tool
     assert set(re.findall(r"(?<![$\w])[a-z]+(?:_[a-z]+)+\b", text)) <= names
     flat = " ".join(text.split())
     money = flat.split("## 11. Money")[1].split(" ## ")[0]
     for line in (
-        "The creditor's policy decides what may be offered, and nothing else is offered.",
+        "The creditor's policy (8.3) decides what may be offered, and nothing else is offered.",
         # smoke v8: a plan's first date is agreed before it is created
         "Before a charge or an arrangement, its exact terms are stated (the amount; for a plan, each "
         "payment's amount and date) and the consumer agrees to them.",
@@ -558,22 +558,16 @@ def test_the_prompt_states_the_creditors_policies_and_a_rule_for_every_intent() 
         "The payment gateway decides whether a charge goes through",
     ):
         assert line in money, line
-    # the prompt states each creditor's policy: what to offer, in what order, and what needs approval
-    policies = " ".join(text.split("# Part 3. Creditor policies\n")[1].split())
-    for line in (
-        "Offers come in this order: the full balance, then payment plans from shortest to longest, then "
-        "discounts from smallest to largest, then a person.",
-        "Where a discount needs a supervisor's OK, the OK is requested before the discount is mentioned.",
-    ):
-        assert line in policies, line
-    for creditor in (
-        "Ashcombe Bank",
-        "Pellbrook Bank",
-        "Marlow Wireless",
-        "Harlow Point Medical Center",
-        "Kessington Auto Finance",
-    ):
-        assert f"## {creditor} (" in policies, creditor
+    # the account's creditor policy comes from get_payment_options after the required statements; the
+    # prompt itself carries no creditor's policy
+    statements = flat.split("## 8. Required statements, once verified")[1].split(" ## ")[0]
+    assert (
+        "8.3. After these statements and before stating the debt, the collector calls get_payment_options. "
+        "It returns this account's creditor policy" in statements
+    )
+    assert "# Part 3" not in text and "Every creditor" not in text
+    for creditor in ("Ashcombe", "Pellbrook", "Beckford", "Marlow", "Harlow", "Kessington"):
+        assert creditor not in text, creditor
     said = " ".join(text.split("## 10. What the consumer says")[1].split("\n## ")[0].split())
     for intent, rule in (
         ("Dispute", "Collection stops for the call and the dispute is recorded."),

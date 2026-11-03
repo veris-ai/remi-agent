@@ -256,7 +256,12 @@ def test_the_greeting_uses_a_given_name_and_never_re_asks_it() -> None:
         "opens with the collector's name, the agency's name (Tallmere Account Services) and the fact "
         "that the collector is an automated assistant" in opening
     )
-    assert "The collector asks for the consumer by name; the first name is enough." in opening
+    assert (
+        "If the call may continue, the collector then asks for the consumer by name; the first name is enough."
+        in opening
+    )
+    # a call that may not continue never asks for the consumer
+    assert "does not ask for the consumer" in section(text, "## 3. Whether a call may continue")
     # the manual lets the consumer be named by first or full name before verification
     before = section(text, "## 5. Before the right person is confirmed")
     assert "calling about a personal business matter for the consumer, named by first or full name" in before
