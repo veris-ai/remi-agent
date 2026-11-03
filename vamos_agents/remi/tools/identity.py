@@ -12,7 +12,7 @@ nothing locks after wrong answers and nothing is disclosed for the agent. The
 disclosures and their wording are the prompt's (manual section 8).
 
 ``get_debt_details`` reads the debt from the ledger: the creditor, the balance,
-its itemization from its basis, and whether the debt is past its time to sue (a
+its itemization from its itemization date, and whether the debt is past its time to sue (a
 fact read from the account's date). Money is returned in dollars
 ("$1,430.00"), never cents.
 """
@@ -166,9 +166,10 @@ async def record_verification_refused(session: RemiCall, _: NoArgs) -> dict[str,
 @REGISTRY.tool(NoArgs)
 async def get_debt_details(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """Reads the debt: the creditor, the original account's last four digits, the current balance, its
-    itemization since its basis (a charge-off, a hospital's placement or a car's sale: the balance then, interest
-    and fees since, payments since), the validation notice's date, and the end of the time to sue. The screen pop
-    read it when the call connected ("Account on screen")."""
+    itemization from its itemization date (itemized_from names it: charge_off, or a hospital account's
+    last_statement; the balance on that date, interest and fees since, payments since), the validation
+    notice's date, and the end of the time to sue. The screen pop read it when the call connected
+    ("Account on screen")."""
     account = await session.ensure_account()
     creditor = session.creditor
     assert creditor is not None

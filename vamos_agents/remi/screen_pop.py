@@ -8,7 +8,7 @@ session opens, so the SELECTs land in the World's SQL log as Remi's before anyon
 speaks. The tools stay available for the model to re-read.
 
 What the model sees is the reads' own results, the same dicts the tools return:
-the time to sue's end, the itemization since its basis, the loan's and the
+the time to sue's end, the itemization from its itemization date, the loan's and the
 notices' dates, a phone account's balance parts, an auto deficiency's car and
 sale. No verdict: nothing here says whether the call may continue. No date of
 birth, ZIP, SSN or street: verification stays server-side in

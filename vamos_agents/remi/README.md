@@ -52,7 +52,7 @@ own code) on the call's `RemiCall`, so:
   the time to sue ends, the loan's date and the notices' dates, a phone
   account's phone and service parts, a hospital account's treatment date, an
   auto deficiency's car, sale date and price, the balance and its itemization
-  since its basis, the dialed phone's consent, and the contact history as
+  from its itemization date, the dialed phone's consent, and the contact history as
   recorded. No verdict (nothing says whether the call may continue), and no
   date of birth, ZIP, SSN or street: verification stays server-side in
   `verify_right_party`.
@@ -66,7 +66,7 @@ registered for re-reads.
 | Tool | What it does |
 |---|---|
 | `get_account`, `get_dialed_phone`, `get_contact_history` | Connect-time reads, already run by the screen pop; facts only: the account (status, creditor and store, dates, the time to sue's end and whether it has passed, balance parts, treatment date, car and sale), the dialed phone (consent and when it was revoked, status), the contact history as recorded (times in Eastern). No counts against a limit, no assessment. |
-| `get_debt_details` | The debt from the ledger, now: creditor, last four, balance, the itemization from its basis (`charge_off`, `placement`, `sale`) with interest, fees and payments since, the validation notice's date, the time to sue's end and whether it has passed. Every amount in dollars (`"$1,430.00"`). |
+| `get_debt_details` | The debt from the ledger, now: creditor, last four, balance, the itemization from its Reg F itemization date (`last_statement` for a hospital account, `charge_off` for the others) with interest, fees and payments since, the validation notice's date, the time to sue's end and whether it has passed. Every amount in dollars (`"$1,430.00"`). |
 | `verify_right_party` | The name the person said or confirmed (a first name is enough) and any of date of birth, ZIP and SSN last four, compared server-side; facts count as they come. Returns whether this answer matched, what is confirmed, how many are needed and how many wrong answers there have been, never which fact failed. `estate_rep`: an executor's full name. Nothing locks. |
 | `record_verification_refused` | The person declined to verify (disposition `refused_verification` when nobody verified). |
 | `log_dispute` | A dispute in the consumer's own words (`details.words`); the account is marked `disputed` and the letter on asking for proof in writing is queued. |

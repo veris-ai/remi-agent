@@ -4,8 +4,9 @@ The collections Postgres holds the workflow (who was called, what was recorded,
 what was agreed); Fineract holds the books. A placed account ``TAS-NNNNNN`` is the
 Fineract loan whose ``externalId`` is ``TAS-NNNNNN``: its principal is the itemized
 balance plus interest and fees since, its ``tas_itemization`` datatable row the
-itemization (``itemized_from``: a charge-off, a hospital's placement or an auto
-deficiency's sale), its repayments the payments since, and its ``totalOutstanding``
+itemization (``itemized_from``: its Reg F itemization date, 12 CFR 1006.34(b)(3); in
+World v2 a hospital account's ``last_statement``, every other account's
+``charge_off``), its repayments the payments since, and its ``totalOutstanding``
 the current balance. ``FineractLedger`` is Remi's one client for it:
 
 - ``debt`` reads an account's money;
@@ -84,7 +85,8 @@ def to_dollars(cents: int) -> str:
 
 @dataclass(frozen=True)
 class Itemization:
-    """The balance's itemization, from its basis: ``charge_off``, ``placement`` or ``sale``."""
+    """The balance's itemization from its Reg F itemization date (12 CFR 1006.34(b)(3)): ``itemized_from`` is
+    ``last_statement``, ``charge_off``, ``last_payment``, ``transaction`` or ``judgment``."""
 
     itemized_from: str
     itemized_on: date
@@ -101,7 +103,7 @@ class Debt:
     loan_id: int
     status: int
     itemization: Itemization
-    paid_cents: int  # since the itemization's basis: every repayment
+    paid_cents: int  # since the itemization date: every repayment
     balance_cents: int  # what is outstanding
     last_payment_on: date | None
 
@@ -278,7 +280,7 @@ def _debt(account_id: str, loan: dict[str, Any], item: dict[str, Any]) -> Debt:
     ]
     itemized_on = parse_date(item.get("itemized_on"))
     if itemized_on is None or not item.get("itemized_from"):
-        raise LedgerUnavailable(f"loan {account_id}: its itemization names no basis and date")
+        raise LedgerUnavailable(f"loan {account_id}: its itemization names no itemization date")
     return Debt(
         account_id=account_id,
         loan_id=int(loan["id"]),

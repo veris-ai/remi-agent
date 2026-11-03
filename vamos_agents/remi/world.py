@@ -89,7 +89,7 @@ class Account:
     consumer_id: str
     creditor_id: str
     original_account_last4: str
-    placed_on: date  # the loan's date: placement (hospital), sale (auto), charge-off (others)
+    placed_on: date  # loan and itemization date: placement (hospital), sale (auto), charge-off (others)
     sol_expires_on: date | None  # None: no time to sue on file (phone accounts)
     validation_notice_mailed_on: date
     time_barred_notice_mailed_on: date | None
