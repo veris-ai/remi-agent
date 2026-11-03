@@ -101,6 +101,9 @@ class RemiCall:
     consent_revoked: set[str] = field(default_factory=set)  # phone ids whose consent this call revoked
     letters_queued: set[str] = field(default_factory=set)
     payment_methods: dict[str, SavedMethod] = field(default_factory=dict)  # tokenized on this call
+    #: What PayNearMe approved on this call, and the balance known before the first of it (None: never known).
+    approved_cents: int = 0
+    balance_before_payments_cents: int | None = None
     #: Charges run one at a time (two at once would race on PayNearMe's order); none is ever refused.
     charge_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     #: log_contact_attempt's note; the row itself is written once, when the call ends.

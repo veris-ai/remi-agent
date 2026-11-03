@@ -33,8 +33,10 @@ from that code (services-sandbox main, 5e14fdfc):
   expired."; an expired card is accepted when saved), a card charge's
   ``cvv_pii`` of the wrong length when sent (``NZ``), then a test instrument's
   outcome by its fingerprint (World v2: ``51``, ``05``, ``54``, ``GS02``);
-  anything else is approved (``0``, ``Approved``). An up-to order refuses a
-  payment that would take its payments above its amount;
+  anything else is approved (``0``, ``Approved``). Before that, a payment
+  amount is whole cents above zero and at most 999,999,999.99 ("Payment amount
+  is invalid"; none sent: "Missing required parameter: payment_amount"), and an
+  up-to order refuses a payment that would take its payments above its amount;
 - a refusal is ``{"status": "error", "errors": [{"description": ...}]}``.
 
 Every request is kept in ``requests`` (operation and body), as the twin's log
@@ -198,6 +200,26 @@ def signature(body: dict[str, Any], secret: str) -> str:
 
 def _error(description: str) -> dict[str, Any]:
     return {"status": "error", "errors": [{"description": description}]}
+
+
+#: The twin takes no amount above 999,999,999.99 (logic.MAX_MINOR).
+MAX_MINOR = 99_999_999_999
+
+
+def _minor(value: Any) -> int | None:
+    """The twin's parse_money: whole cents of a finite, non-negative decimal up to MAX_MINOR; None for anything
+    else."""
+    if isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value).strip())
+        if not amount.is_finite() or amount < 0:
+            return None
+        if amount > Decimal(MAX_MINOR) / 100 or amount != amount.quantize(Decimal("0.01")):
+            return None
+    except InvalidOperation:
+        return None
+    return int(amount * 100)
 
 
 def _money(minor: int) -> str:
@@ -380,11 +402,10 @@ class FakePayNearMe:
         method = self.methods.get(str(body.get("payment_method_identifier")))
         if order is None or method is None or method["order"] != order["pnm_order_identifier"]:
             return _error("Order or payment method not found")
-        try:
-            minor = int((Decimal(str(body.get("payment_amount"))) * 100).to_integral_exact())
-        except (InvalidOperation, ValueError):
-            return _error("Payment amount is invalid")
-        if minor <= 0:
+        if body.get("payment_amount") in (None, ""):
+            return _error("Missing required parameter: payment_amount")
+        minor = _minor(body["payment_amount"])
+        if minor is None or minor <= 0:
             return _error("Payment amount is invalid")
         if str(body.get("payment_currency", "USD")) != "USD":
             return _error("Payment currency does not match the order currency")

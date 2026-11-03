@@ -482,3 +482,38 @@ async def test_skip_ach_verify_skips_the_account_checks_not_the_routing_check() 
         {"description": "ABA isn’t valid (bad checksum)"}
     ]
     await client.close()
+
+
+@pytest.mark.parametrize(
+    ("amount", "words"),
+    [
+        ("-5.00", "Payment amount is invalid"),
+        ("0.00", "Payment amount is invalid"),
+        ("0.001", "Payment amount is invalid"),
+        ("5.001", "Payment amount is invalid"),
+        ("abc", "Payment amount is invalid"),
+        ("NaN", "Payment amount is invalid"),
+        ("Infinity", "Payment amount is invalid"),
+        ("1000000000.00", "Payment amount is invalid"),
+        ("999999999.99", "Payment amount exceeds the amount remaining on the order"),
+        (None, "Missing required parameter: payment_amount"),
+        ("", "Missing required parameter: payment_amount"),
+    ],
+)
+async def test_a_payment_amount_is_whole_cents_above_zero_up_to_the_twins_limit(amount, words) -> None:
+    """The double as the twin's make_payment (logic.parse_money and required_amount): whole cents, above zero, at
+    most $999,999,999.99, else "Payment amount is invalid"; then what the order still accepts."""
+    twin, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number="4111111111111111", exp_month=12, exp_year=2030, cvc="123", **CARD_BILLING, at=AT
+    )
+    charge = {
+        "pnm_order_identifier": ORDER,
+        "payment_method_identifier": card.method_id,
+        "payment_currency": "USD",
+    }
+    if amount is not None:
+        charge["payment_amount"] = amount
+    assert _post(twin, "make_payment", charge) == {"status": "error", "errors": [{"description": words}]}
+    assert twin.payments == []
+    await client.close()

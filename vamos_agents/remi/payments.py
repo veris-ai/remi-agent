@@ -120,8 +120,9 @@ def sign(params: dict[str, str], secret: str) -> str:
 
 
 def dollars(cents: int) -> str:
-    """PayNearMe's amount: major units, two decimals ("1440.00")."""
-    return f"{Decimal(cents) / 100:.2f}"
+    """PayNearMe's amount: major units, two decimals ("1440.00"), exactly, whatever its size."""
+    whole, part = divmod(abs(cents), 100)
+    return f"{'-' if cents < 0 else ''}{whole}.{part:02d}"
 
 
 def to_cents(amount: Any) -> int:

@@ -25,6 +25,7 @@ import pytest
 from vamos_agents.remi import db as remi_db
 from vamos_agents.remi.ledger import STATUS_CLOSED, STATUS_WRITTEN_OFF
 from vamos_agents.remi.payments import PayNearMeRefused
+from vamos_agents.remi.policy import DISPOSITION_PRECEDENCE
 from vamos_agents.remi.tools import REGISTRY
 from vamos_voice.session import CallSession
 
@@ -581,6 +582,265 @@ async def test_a_promise_is_recorded_as_agreed(pg_dsn, make_session) -> None:
     assert promised == {"recorded": "promise", "amount": "$1,180.00", "due_on": far, "method": "check"}
     (row,) = rows(pg_dsn, "promises_to_pay")
     assert (row["amount_cents"], row["due_on"], row["method"]) == (118_000, date.fromisoformat(far), "check")
+
+
+# --- what the call's record says about the money ----------------------------------------------------
+
+
+async def disposition_of_the_call(s: CallSession, pg_dsn: str) -> str:
+    """Log the call as answered by the consumer, end it, and return its contact row's disposition."""
+    logged = await s.dispatch(
+        "log_contact_attempt", {"answered_by": "consumer", "summary": "Took a payment."}
+    )
+    assert logged == {"logged": True}
+    assert await s.dispatch("end_call", {}) == {"ended": True}
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    return attempt["disposition"]
+
+
+@pytest.mark.parametrize("failure", ["the ledger is unreachable", "the read after posting fails"])
+async def test_paid_in_full_is_the_approved_amount_against_the_balance_before_the_charge(
+    pg_dsn, make_session, monkeypatch, failure
+) -> None:
+    """CARD-09 owes $1,180.00, as the screen pop read it: $1,180.00 approved is paid in full whatever the ledger
+    then does with the posting or the read."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-09")
+    assert (await s.dispatch("get_debt_details", {}))["current_balance"] == "$1,180.00"
+    method_id = await card(s)
+    ledger = support.LEDGER
+    if failure == "the ledger is unreachable":
+        ledger.unavailable = True
+    else:
+        post = ledger.post_payment
+
+        async def posted_then_unreachable(*args: Any, **kwargs: Any) -> Any:
+            posting = await post(*args, **kwargs)
+            ledger.unavailable = True
+            return posting
+
+        monkeypatch.setattr(ledger, "post_payment", posted_then_unreachable)
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "amount": "1180.00", "option_id": "pif"})
+    assert paid["status"] == "approved" and "remaining_balance" not in paid
+    assert paid["posted_to_ledger"] is (failure == "the read after posting fails")
+    assert await disposition_of_the_call(s, pg_dsn) == "paid"
+
+
+async def test_the_payments_on_one_call_that_reach_the_balance_are_paid_in_full(pg_dsn, make_session) -> None:
+    """$200.00 approved while the ledger is unreachable (not posted), then $980.00 posted: the call paid $1,180.00,
+    the balance it started with, though the ledger holds only the second payment."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-09")
+    assert (await s.dispatch("get_debt_details", {}))["current_balance"] == "$1,180.00"
+    method_id = await card(s)
+    support.LEDGER.unavailable = True
+    first = await s.dispatch("take_payment", {"method_id": method_id, "amount": "200.00"})
+    support.LEDGER.unavailable = False
+    rest = await s.dispatch("take_payment", {"method_id": method_id, "amount": "980.00"})
+    assert (first["posted_to_ledger"], rest["posted_to_ledger"], rest["remaining_balance"]) == (
+        False,
+        True,
+        "$200.00",
+    )
+    assert await disposition_of_the_call(s, pg_dsn) == "paid"
+
+
+async def test_a_partial_payment_alone_is_no_commitment(pg_dsn, make_session) -> None:
+    """World v1's dispositions, which v2 keeps, have none for a partial payment: a call that only took part of the
+    balance ($200.00 then $800.00 of $1,180.00, both posted) produced none of them, so it is no_commitment, and the
+    call records no outcome outside that list."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-09")
+    method_id = await card(s)
+    first = await s.dispatch("take_payment", {"method_id": method_id, "amount": "200.00"})
+    second = await s.dispatch("take_payment", {"method_id": method_id, "amount": "800.00"})
+    assert (first["status"], first["remaining_balance"]) == ("approved", "$980.00")
+    assert (second["status"], second["remaining_balance"]) == ("approved", "$180.00")
+    assert s.state.outcomes <= set(DISPOSITION_PRECEDENCE), s.state.outcomes
+    assert await disposition_of_the_call(s, pg_dsn) == "no_commitment"
+
+
+async def test_the_balance_never_read_leaves_the_agents_pif_label_to_say_it_was_paid(
+    pg_dsn, make_session
+) -> None:
+    """With the ledger unreachable for the whole call, the balance before the charge is not known: the agent's
+    own label stands."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-09")
+    method_id = await card(s)
+    support.LEDGER.unavailable = True
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "amount": "1180.00", "option_id": "pif"})
+    assert (paid["status"], paid["posted_to_ledger"]) == ("approved", False)
+    assert await disposition_of_the_call(s, pg_dsn) == "paid"
+
+
+# --- the label is a label ------------------------------------------------------------------------------
+
+
+def charged(op: str = "make_payment") -> list[str]:
+    """The amounts that reached PayNearMe, as sent."""
+    return [body["payment_amount"] for operation, body in support.PAYNEARME.requests if operation == op]
+
+
+async def test_a_listed_label_never_replaces_the_amount_stated(pg_dsn, make_session) -> None:
+    """CARD-04's policy lists pif at $2,400.00, discount_25 at $1,800.00, discount_15 at $2,040.00 and a plan
+    covering $2,400.00: what is charged and recorded is the amount the agent states."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    paid = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": "1000.00", "option_id": "pif"}
+    )
+    assert (paid["status"], paid["amount"], charged()) == ("approved", "$1,000.00", ["1000.00"])
+    discount = await s.dispatch(
+        "create_arrangement",
+        {"kind": "discount", "total": "1500.00", "first_due_on": "2026-12-01", "option_id": "discount_25"},
+    )
+    plan = await s.dispatch(
+        "create_arrangement",
+        {"kind": "payment_plan", "total": "1000.00", "months": 4, "first_due_on": "2026-12-01", "option_id": "payment_plan"},
+    )  # fmt: skip
+    promised = await s.dispatch(
+        "record_promise",
+        {"amount": "700.00", "due_on": "2026-12-15", "method": "check", "option_id": "discount_15"},
+    )
+    assert (discount["total"], plan["total"], promised["amount"]) == ("$1,500.00", "$1,000.00", "$700.00")
+    assert sorted(r["total_cents"] for r in rows(pg_dsn, "arrangements")) == [100_000, 150_000]
+    (plan_row,) = rows(pg_dsn, "arrangements", "kind = 'plan'")
+    assert [i["amount_cents"] for i in plan_row["instalments"]] == [25_000] * 4
+    assert [r["amount_cents"] for r in rows(pg_dsn, "payments")] == [100_000]
+    assert [r["amount_cents"] for r in rows(pg_dsn, "promises_to_pay")] == [70_000]
+
+
+async def test_any_label_on_a_promise_is_recorded(pg_dsn, make_session) -> None:
+    """A promise labelled payment_plan, and one labelled discount_50 (a discount CARD-04's policy does not list)."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    plan = await s.dispatch(
+        "record_promise",
+        {"amount": "100.00", "due_on": "2026-12-01", "method": "card", "option_id": "payment_plan"},
+    )
+    half = await s.dispatch(
+        "record_promise",
+        {"amount": "1200.00", "due_on": "2026-11-20", "method": "ach", "option_id": "discount_50"},
+    )
+    assert (plan["recorded"], plan["amount"], half["recorded"], half["amount"]) == (
+        "promise",
+        "$100.00",
+        "promise",
+        "$1,200.00",
+    )
+    assert sorted(r["amount_cents"] for r in rows(pg_dsn, "promises_to_pay")) == [10_000, 120_000]
+
+
+async def test_a_payment_labelled_payment_plan_on_a_policy_with_no_down_payment_is_charged(
+    pg_dsn, make_session
+) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    paid = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": "100.00", "option_id": "payment_plan"}
+    )
+    assert (paid["status"], paid["amount"], paid["remaining_balance"]) == ("approved", "$100.00", "$2,300.00")
+    assert [w[0] for w in support.LEDGER.writes] == ["repayment"]
+
+
+async def test_a_full_balance_agreement_is_recorded_as_pay_in_full(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    agreed = await s.dispatch(
+        "create_arrangement", {"kind": "full_balance", "total": "2400.00", "first_due_on": "2026-11-20"}
+    )
+    assert (agreed["recorded"], agreed["total"]) == ("pay_in_full", "$2,400.00")
+    (row,) = rows(pg_dsn, "arrangements")
+    assert (row["kind"], row["total_cents"]) == ("pay_in_full", 240_000)
+
+
+@pytest.mark.parametrize(("amount", "sent"), [("-5.00", "-5.00"), ("0", "0.00")])
+async def test_a_negative_or_zero_charge_reaches_paynearme_and_is_its_answer(
+    pg_dsn, make_session, amount, sent
+) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    paid = await s.dispatch("take_payment", {"method_id": await card(s), "amount": amount})
+    assert paid == {"error": "PayNearMe refused it: Payment amount is invalid"}
+    assert charged() == [sent] and rows(pg_dsn, "payments") == []
+
+
+# --- amounts as stated -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "amount",
+    ["1.440,00", "1,44.00", "14,40.00", "1440.001", "1E+30", "NaN", "Infinity", "", "$", "1,440.0.0"],
+)
+async def test_an_amount_that_is_not_one_is_a_factual_error_and_nothing_is_charged(
+    pg_dsn, make_session, amount
+) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    paid = await s.dispatch("take_payment", {"method_id": await card(s), "amount": amount})
+    assert paid == {"error": f"amount {amount!r} is not an amount in dollars, such as 1440.00."}
+    assert charged() == []
+
+
+@pytest.mark.parametrize(
+    ("amount", "sent"),
+    [
+        ("1,440.00", "1440.00"),
+        ("$1,440", "1440.00"),
+        ("1440.5", "1440.50"),
+        (1440.0, "1440.00"),
+        (1440, "1440.00"),
+    ],
+)
+async def test_an_amount_is_a_plain_or_grouped_decimal_or_a_json_number(
+    pg_dsn, make_session, amount, sent
+) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    paid = await s.dispatch("take_payment", {"method_id": await card(s), "amount": amount})
+    assert (paid["status"], charged()) == ("approved", [sent])
+
+
+@pytest.mark.parametrize(
+    "amount", ["1000000000.00", "123456789012345678901234567.00", "1234567890123456789012345678901.07"]
+)
+async def test_a_huge_charge_reaches_paynearme_and_is_its_answer(pg_dsn, make_session, amount) -> None:
+    """PayNearMe takes no amount above $999,999,999.99: it says so, in its words."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    paid = await s.dispatch("take_payment", {"method_id": await card(s), "amount": amount})
+    assert paid == {"error": "PayNearMe refused it: Payment amount is invalid"}
+    assert charged() == [amount] and rows(pg_dsn, "payments") == []
+
+
+async def test_an_amount_the_records_cannot_hold_is_a_factual_error(pg_dsn, make_session) -> None:
+    """The World keeps amounts in cents in integer columns: -$21,474,836.48 to $21,474,836.47."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    held = "from -$21,474,836.48 to $21,474,836.47"
+    for tool, args, field in (
+        ("create_arrangement", {"kind": "discount", "first_due_on": "2026-12-01"}, "total"),
+        ("record_promise", {"due_on": "2026-12-01", "method": "check"}, "amount"),
+    ):
+        for value in ("21474836.48", "-21474836.49", "123456789012345678901234567.00"):
+            assert await s.dispatch(tool, {**args, field: value}) == {
+                "error": f"{field} {value!r} is outside what the records hold: amounts {held}."
+            }, (tool, value)
+        assert "error" not in await s.dispatch(tool, {**args, field: "21474836.47"}), tool
+    assert [r["total_cents"] for r in rows(pg_dsn, "arrangements")] == [2_147_483_647]
+    assert [r["amount_cents"] for r in rows(pg_dsn, "promises_to_pay")] == [2_147_483_647]
+
+
+async def test_a_plan_past_the_last_date_is_a_factual_error(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    for months in (1_000_000, 10**12):
+        assert await s.dispatch(
+            "create_arrangement",
+            {"kind": "payment_plan", "total": "2400.00", "months": months, "first_due_on": "2026-12-01"},
+        ) == {"error": f"months {months} puts the last payment after 9999-12-31, the last date there is."}
+    assert rows(pg_dsn, "arrangements") == []
 
 
 async def test_money_tool_results_carry_facts_only(pg_dsn, make_session) -> None:

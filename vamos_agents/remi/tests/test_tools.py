@@ -8,6 +8,7 @@ what it is told (WORLD.md, "Nothing refuses the agent"). Against the real Postgr
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from typing import Any
 
@@ -575,14 +576,18 @@ def test_no_tool_description_instructs_or_names_a_next_step() -> None:
     from vamos_agents.remi.tools.catalog import REGISTRY
 
     hints = (
-        "Refer to", "Call it", "call it", "Pass it", "Pass an", "so it can be charged", "is revoke_consent",
-        "is record_flag", "is create_arrangement", "Use it", "use role", "should ", "must ", "first,",
-        "(take_payment)", "is stop_calling", "Confirm ", "say ", "tell ",
+        "Refer to", "Call it", "call it", "Pass it", "Pass an", "so it can be charged", "Use it", "use role",
+        "should ", "must ", "first,", "Confirm ", "say ", "tell ", "one call per", "One or two", "sentences",
     )  # fmt: skip
-    for spec in REGISTRY.specs():
+    specs = REGISTRY.specs()
+    names = {spec.name for spec in specs}
+    for spec in specs:
         texts = [spec.description] + [
             p.get("description", "") for p in spec.parameters["properties"].values()
         ]
         for text in texts:
             for hint in hints:
                 assert hint not in text, (spec.name, hint, text)
+            # naming another tool says which tool to use when ("log_dispute ... queue their own letter")
+            named = {name for name in names - {spec.name} if re.search(rf"\b{name}\b", text)}
+            assert not named, (spec.name, named, text)

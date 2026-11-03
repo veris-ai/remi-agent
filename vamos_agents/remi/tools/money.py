@@ -7,8 +7,10 @@ states; ``option_id`` is only a label the agent may give (``pif``,
 ``payment_plan``, ``discount_<pct>``, as ``get_payment_options`` names them). What
 the agent chooses is done and recorded, PayNearMe's and the World's answers come
 back as given, and the bench grades the money after the call from what the World
-holds. The only errors are for input that is not one (an unknown ``method_id``,
-an amount that is not an amount).
+holds. The only errors are for input that cannot be done as given: an unknown
+``method_id``, an amount that is not an amount in dollars, an amount the World's
+records cannot hold, a plan without months or one whose last payment falls after
+the last date there is.
 
 - ``add_payment_method`` tokenizes the consumer's card or bank account on the
   account's PayNearMe order, with the billing details the agent passes (PayNearMe
@@ -23,7 +25,9 @@ an amount that is not an amount).
   failure is logged loudly and PayNearMe's answer still stands. An approved
   payment is posted to the account's Fineract loan keyed by PayNearMe's payment
   id, and once a payment labelled as a discount is posted, the rest of the
-  balance is written off.
+  balance is written off. The call is recorded as settled by a payment labelled
+  as a discount, and as paid once its approved payments reach the balance known
+  before the first of them (with no balance ever known, by one labelled ``pif``).
 - ``create_arrangement`` records an agreement: a payment plan of the total and
   months stated, each payment computed by the policy's rule (equal, rounded
   down, the last taking the remainder), with no payment method (no automatic
@@ -41,10 +45,9 @@ import contextlib
 import logging
 import re
 from datetime import date
-from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from vamos_voice.tools import ToolError
 
@@ -57,23 +60,49 @@ from .catalog import REGISTRY
 logger = logging.getLogger(__name__)
 
 OPTION_LABEL = (
-    "Optional: the option of the account's policy this is for, as get_payment_options names it ('pif', "
-    "'payment_plan', 'discount_<pct>'). A label only: the amount and terms are the ones given here."
+    "Optional: the option_id of the account's policy option this is for ('pif', 'payment_plan', "
+    "'discount_<pct>'). A label only: the amount and terms are the ones given here."
 )
 #: The arrangement row's kind for each kind of agreement.
 ARRANGEMENT_KINDS = {"payment_plan": "plan", "discount": "settlement_lump", "full_balance": "pay_in_full"}
 
 
-def _cents(amount: str) -> int:
-    """An amount in dollars as stated ("1440.00", "$1,440", "1440") in cents; a ToolError when it is not one."""
-    text = re.sub(r"[\s$,]", "", str(amount))
-    try:
-        value = Decimal(text)
-    except InvalidOperation:
-        value = Decimal("NaN")
-    if not value.is_finite() or value != value.quantize(Decimal("0.01")):
-        raise ToolError(f"amount {amount!r} is not an amount in dollars, such as 1440.00.")
-    return int(value * 100)
+#: An amount in dollars as stated: an optional minus and dollar sign, the dollars plain (1440) or grouped in
+#: thousands by commas (1,440), and at most two decimals.
+AMOUNT = re.compile(r"(?P<minus>-?)\$?(?P<dollars>\d+|\d{1,3}(?:,\d{3})+)(?:\.(?P<cents>\d{1,2}))?")
+#: The World keeps amounts in cents in integer columns.
+LEAST_CENTS, MOST_CENTS = -(2**31), 2**31 - 1
+
+
+def _number_as_text(value: Any) -> Any:
+    """An amount sent as a JSON number (1440.0, 1440) is read as its text; the schema still says a string."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return repr(value)
+    return value
+
+
+#: An amount in dollars, as text or a JSON number.
+Dollars = Annotated[str, BeforeValidator(_number_as_text)]
+
+
+def _cents(amount: str, field: str = "amount") -> int:
+    """An amount in dollars as stated ("1440.00", "$1,440", "-5.00") in cents; a ToolError when it is not one."""
+    found = AMOUNT.fullmatch(amount.strip())
+    if found is None:
+        raise ToolError(f"{field} {amount!r} is not an amount in dollars, such as 1440.00.")
+    cents = int(found["dollars"].replace(",", "")) * 100 + int((found["cents"] or "0").ljust(2, "0"))
+    return -cents if found["minus"] else cents
+
+
+def _recordable_cents(amount: str, field: str) -> int:
+    """The amount in cents when the World's records can hold it; a ToolError saying what they hold when not."""
+    cents = _cents(amount, field)
+    if not LEAST_CENTS <= cents <= MOST_CENTS:
+        raise ToolError(
+            f"{field} {amount!r} is outside what the records hold: amounts from {policy.dollars(LEAST_CENTS)} "
+            f"to {policy.dollars(MOST_CENTS)}."
+        )
+    return cents
 
 
 class PaymentMethodArgs(BaseModel):
@@ -162,8 +191,8 @@ def _method(session: RemiCall, method_id: str) -> SavedMethod:
 
 
 class PaymentArgs(BaseModel):
-    method_id: str = Field(description="The method_id add_payment_method returned.")
-    amount: str = Field(description="The amount charged, in dollars, e.g. 1440.00.")
+    method_id: str = Field(description="The method_id of a card or bank account saved on this call.")
+    amount: Dollars = Field(description="The amount charged, in dollars, e.g. 1440.00.")
     option_id: str | None = Field(
         None,
         description=f"{OPTION_LABEL} Once a payment labelled 'discount_<pct>' is posted, the rest of the balance is "
@@ -180,6 +209,8 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
     amount = _cents(args.amount)
     discount = bool(args.option_id) and str(args.option_id).startswith("discount_")
     async with session.charge_lock:
+        if not session.approved_cents:
+            session.balance_before_payments_cents = await _balance_now(session)
         try:
             payment = await session.payments.pay(
                 order=account.pnm_order_identifier, method=saved, amount_cents=amount, at=session.clock.now()
@@ -190,6 +221,8 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
                 "PayNearMe did not answer: whether the payment went through is not known."
             ) from err
         await _record_payment(session, payment)
+        if payment.approved:
+            session.approved_cents += payment.amount_cents
     posted = payment.approved and await _post(session, payment, write_off=discount)
     result: dict[str, Any] = {
         "payment_id": payment.payment_id,
@@ -206,9 +239,30 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
         with contextlib.suppress(ToolError):
             result["remaining_balance"] = policy.dollars((await session.read_debt()).balance_cents)
     if payment.approved:
-        settled = discount or result.get("remaining_balance") == "$0.00"
-        session.outcomes.add("settled" if discount else "paid" if settled else "partial_payment")
+        outcome = _payment_outcome(session, discount=discount, option_id=args.option_id)
+        if outcome is not None:
+            session.outcomes.add(outcome)
     return result
+
+
+async def _balance_now(session: RemiCall) -> int | None:
+    """The balance as the call knows it (the screen pop's read), else as the ledger answers now; None when the
+    ledger cannot say (read_debt logs that)."""
+    if session.debt is None:
+        with contextlib.suppress(ToolError):
+            await session.read_debt()
+    return session.debt.balance_cents if session.debt is not None else None
+
+
+def _payment_outcome(session: RemiCall, *, discount: bool, option_id: str | None) -> str | None:
+    """The disposition money paid on the call produces (World v1's, which v2 keeps): ``settled`` for a payment
+    labelled as a discount; ``paid`` once the call's approved payments reach the balance known before the first
+    of them, or, with no balance ever known, for one labelled ``pif``. A partial payment produces none."""
+    if discount:
+        return "settled"
+    before = session.balance_before_payments_cents
+    in_full = session.approved_cents >= before if before is not None else option_id == "pif"
+    return "paid" if in_full else None
 
 
 async def _record_payment(session: RemiCall, payment: Payment) -> None:
@@ -281,7 +335,7 @@ class ArrangementArgs(BaseModel):
     kind: Literal["payment_plan", "discount", "full_balance"] = Field(
         description="What was agreed: a payment plan, a discount, or the full balance."
     )
-    total: str = Field(
+    total: Dollars = Field(
         description="The total agreed, in dollars, e.g. 945.00. A payment plan: what its monthly payments add up to."
     )
     months: int | None = Field(None, ge=1, description="payment_plan: the number of monthly payments.")
@@ -298,12 +352,12 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
     rounded down to the cent, the last taking the remainder; the consumer pays each one, so no payment method is
     attached), or a discount or the full balance as one payment on a date. Queues the agreement's written
     confirmation."""
-    total = _cents(args.total)
+    total = _recordable_cents(args.total, "total")
     if args.kind == "payment_plan":
         if args.months is None:
             raise ToolError("A payment plan is a number of monthly payments: months was not passed.")
+        dates = _plan_dates(args.first_due_on, args.months)
         amounts = policy.plan_instalment_cents(total, args.months)
-        dates = policy.monthly_due_dates(args.first_due_on, args.months)
     else:
         amounts, dates = [total], [args.first_due_on]
     row_kind = ARRANGEMENT_KINDS[args.kind]
@@ -339,8 +393,18 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
     }
 
 
+def _plan_dates(first_due_on: date, months: int) -> list[date]:
+    """One payment in each month from the first's; a ToolError when the last would fall after the last date."""
+    last_month = first_due_on.year * 12 + first_due_on.month - 1 + months - 1
+    if last_month // 12 > date.max.year:
+        raise ToolError(
+            f"months {months} puts the last payment after {date.max.isoformat()}, the last date there is."
+        )
+    return policy.monthly_due_dates(first_due_on, months)
+
+
 class PromiseArgs(BaseModel):
-    amount: str = Field(description="The amount promised, in dollars, e.g. 1180.00.")
+    amount: Dollars = Field(description="The amount promised, in dollars, e.g. 1180.00.")
     due_on: date = Field(description="The date the consumer will pay by, YYYY-MM-DD.")
     method: Literal["card", "ach", "check"]
     option_id: str | None = Field(None, description=OPTION_LABEL)
@@ -349,7 +413,7 @@ class PromiseArgs(BaseModel):
 @REGISTRY.tool(PromiseArgs)
 async def record_promise(session: RemiCall, args: PromiseArgs) -> dict[str, Any]:
     """Records a promise to pay an amount on a date, and how the consumer will pay."""
-    amount = _cents(args.amount)
+    amount = _recordable_cents(args.amount, "amount")
     async with session.db.transaction() as tx:
         await tx.insert(
             "promises_to_pay",
