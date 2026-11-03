@@ -126,8 +126,8 @@ async def test_a_seeded_account_reads_as_the_world_holds_it(ledger) -> None:
     )
     assert (item.interest_since_cents, item.fees_since_cents) == (0, 0)
     assert (debt.paid_cents, debt.balance_cents, debt.last_payment_on, debt.open) == (0, 240_000, None, True)
-    hospital = await ledger.debt("TAS-261107")  # HOSP-01: itemized from its placement
-    assert (hospital.itemization.itemized_from, hospital.balance_cents) == ("placement", 41_275)
+    hospital = await ledger.debt("TAS-261107")  # HOSP-01: itemized from its last statement
+    assert (hospital.itemization.itemized_from, hospital.balance_cents) == ("last_statement", 41_275)
 
 
 async def test_post_once_and_write_off_on_the_real_engine(ledger) -> None:

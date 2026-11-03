@@ -124,7 +124,7 @@ async def test_each_kind_of_account_shows_its_own_facts(pg_dsn, make_session) ->
     barred = await (await make_session("CARD-09")).dispatch("get_debt_details", {})
     assert (barred["time_to_sue_ends"], barred["time_barred"]) == ("2026-08-15", True)
     hospital_debt = await (await make_session("HOSP-10")).dispatch("get_debt_details", {})
-    assert hospital_debt["itemization"]["itemized_from"] == "placement"
+    assert hospital_debt["itemization"]["itemized_from"] == "last_statement"
 
 
 async def test_the_contact_history_is_the_raw_record(pg_dsn, make_session) -> None:
@@ -146,7 +146,7 @@ async def test_the_screen_pop_shows_the_account_and_no_assessment(pg_dsn, make_s
     s = await make_session("AUTO-03")
     pop = await screen_pop(s.state)
     assert pop.heading == "Account on screen"
-    for fact in ('"time_to_sue_ends": "2029-05-12"', '"itemized_from": "sale"', '"validation_notice_mailed_on": "2026-10-10"',
+    for fact in ('"time_to_sue_ends": "2029-05-12"', '"itemized_from": "charge_off"', '"validation_notice_mailed_on": "2026-10-10"',
                  '"sold_on": "2026-05-12"', '"sale_price": "$6,200.00"', "You are calling Robert Alvarez"):  # fmt: skip
         assert fact in pop.body, fact
     for read in ("get_account", "get_debt_details", "get_dialed_phone", "get_contact_history"):

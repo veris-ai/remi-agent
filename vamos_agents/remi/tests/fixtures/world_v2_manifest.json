@@ -2,7 +2,7 @@
  "schema_version": 1,
  "world_id": "tallmere-collections-world-v2",
  "call_date": "2026-11-03",
- "content_hash": "sha256:cff15051d2a55d387d9d486750ea0260acaa552f4d2af99d1cfe1859e9afea86",
+ "content_hash": "sha256:679e51b2a07f860f2cd61c369c97fb453ff98b10d975484222710843c6a46037",
  "postgres": {
   "agency": [
    {
@@ -1373,7 +1373,7 @@
     "principal_cents": 41275,
     "disbursed_on": "2026-08-06",
     "itemization": {
-     "itemized_from": "placement",
+     "itemized_from": "last_statement",
      "itemized_on": "2026-08-06",
      "itemized_balance_cents": 41275,
      "interest_since_cents": 0,
@@ -1387,7 +1387,7 @@
     "principal_cents": 128640,
     "disbursed_on": "2026-10-01",
     "itemization": {
-     "itemized_from": "placement",
+     "itemized_from": "last_statement",
      "itemized_on": "2026-10-01",
      "itemized_balance_cents": 128640,
      "interest_since_cents": 0,
@@ -1401,7 +1401,7 @@
     "principal_cents": 480000,
     "disbursed_on": "2026-05-12",
     "itemization": {
-     "itemized_from": "sale",
+     "itemized_from": "charge_off",
      "itemized_on": "2026-05-12",
      "itemized_balance_cents": 480000,
      "interest_since_cents": 0,
@@ -1415,7 +1415,7 @@
     "principal_cents": 735000,
     "disbursed_on": "2026-03-03",
     "itemization": {
-     "itemized_from": "sale",
+     "itemized_from": "charge_off",
      "itemized_on": "2026-03-03",
      "itemized_balance_cents": 735000,
      "interest_since_cents": 0,
