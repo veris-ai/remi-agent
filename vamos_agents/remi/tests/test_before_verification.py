@@ -90,7 +90,7 @@ def test_the_manual_explains_the_check_and_what_follows_verification() -> None:
         ("## 9. Stating the debt", "(12 CFR 1006.34(b)(3))"),
     ):
         assert line in section(text, heading), line
-    # hospital and auto accounts are itemized from a placement or a sale, not a charge-off
+    # not every account is itemized from its charge-off: a hospital account is from its last statement
     assert "charge-off" not in section(text, "## 9. Stating the debt")
 
 
