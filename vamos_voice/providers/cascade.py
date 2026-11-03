@@ -24,10 +24,13 @@ What the cascade itself owns, the same for every vendor:
   callee-spoke signal. An agent-first agent gets its opening round at once,
   with ``opening_instruction`` appended as a system message (as on Pipecat).
 - **Rounds.** A caller turn is answered by up to ``MAX_TOOL_ROUNDS`` LLM
-  rounds: each round's text is spoken as it streams, then its tool calls run
-  one at a time, in order, through ``CallSession.dispatch``; the next round
-  sees the results. Turns that finish while the agent is answering are
-  answered together, in one user message, next.
+  rounds: each round's text is spoken as it streams, and each of its tool
+  calls runs as soon as the model has made it, while the words play (as on
+  OpenAI Realtime and LiveKit Agents), one at a time, in order, through
+  ``CallSession.dispatch``. Once the words have played (or been cut off) and
+  the calls have returned, the round goes into the history (the reply, then
+  the results) and the next round sees them. Turns that finish while the
+  agent is answering are answered together, in one user message, next.
 - **Barge-in.** None of these vendors detects the caller talking over the
   agent, so the cascade must: Silero VAD on the caller's audio (``silero.py``,
   the detector the VAmoS Energy candidates of these vendors use), under
@@ -44,11 +47,12 @@ What the cascade itself owns, the same for every vendor:
   transcript, never empty) arriving while a turn is being answered interrupts
   it: the audio stops, the vendor's TTS utterance is cleared, and the rest of
   that turn is silenced. No other noise filter: noise is a benchmark
-  condition. The LLM round it lands in
-  still completes and its tool calls still run (a payment that was decided is
-  made and recorded); then the turn ends and the caller's words are the next
-  turn. The interrupted reply is kept in the history as the words the caller
-  can have heard (``OutboundAudio.played_ms``), marked ``INTERRUPTED_MARKER``.
+  condition. The LLM round it lands in still completes, and its tool calls
+  are neither cancelled nor delayed: each runs when the model makes it (a
+  payment that was decided is made and recorded); then the turn ends and the
+  caller's words are the next turn. The interrupted reply is kept in the
+  history as the words the caller can have heard
+  (``OutboundAudio.played_ms``), marked ``INTERRUPTED_MARKER``.
 - **Playout.** TTS audio goes out in ``PLAYBACK_SLICE_MS`` slices, at most
   ``PLAYBACK_LEAD_MS`` ahead of real time: the vendors stream faster than
   speech plays, and audio already at the caller cannot be cut.
@@ -420,27 +424,47 @@ class _CascadeCall:
             self.n_items += 1
             item = self.item = f"reply-{self.n_items}"
             calls: list[ToolCall] = []
-            said = await self.say(self.round_text(calls), item)
+            made: asyncio.Queue[ToolCall | None] = asyncio.Queue()
+            # Runs each tool call as the stream yields it; a barge-in cancels only the player, never this.
+            running = asyncio.create_task(self.run_tools(made), name="round tools")
+            try:
+                said = await self.say(self.round_text(calls, made), item)
+                content = self.heard(said, item) if self.cut else said
+                made.put_nowait(None)
+                results = await running
+            finally:
+                if not running.done():  # the call is ending: a tool already started still finishes
+                    running.cancel()
+                    await asyncio.gather(running, return_exceptions=True)
             message: Message = {"role": "assistant"}
-            content = self.heard(said, item) if self.cut else said
             if content:
                 message["content"] = content
             if calls:
                 message["tool_calls"] = [c.message() for c in calls]
             if len(message) > 1:
                 self.messages.append(message)
-            for tool_call in calls:
-                self.messages.append(await self.run_tool(tool_call))
+            self.messages.extend(results)
             if self.call.session.ended or self.cut or not calls:
                 return
         logger.warning("the model still wanted tools after %d rounds; the turn ends", MAX_TOOL_ROUNDS)
 
-    async def round_text(self, calls: list[ToolCall]) -> AsyncIterator[str]:
+    async def round_text(
+        self, calls: list[ToolCall], made: asyncio.Queue[ToolCall | None]
+    ) -> AsyncIterator[str]:
         async for part in self.provider.llm.reply(self.messages, self.tools):
             if isinstance(part, ToolCall):
                 calls.append(part)
+                made.put_nowait(part)  # to run now, while the round's words play
             elif part:
                 yield part
+
+    async def run_tools(self, made: asyncio.Queue[ToolCall | None]) -> list[Message]:
+        """A round's tool calls, one at a time and in order, each as soon as the model has made it;
+        their results, for the history once the round's words have played."""
+        results: list[Message] = []
+        while (tool_call := await made.get()) is not None:
+            results.append(await self.run_tool(tool_call))
+        return results
 
     async def run_tool(self, tool_call: ToolCall) -> Message:
         # Shielded: a hang-up may cancel the turn, but a payment or a write that has started must finish.

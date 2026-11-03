@@ -2,9 +2,10 @@
 
 What every cascade vendor (Mistral, Hugging Face, Grok STT + TTS) inherits:
 the model runs only on a caller turn (callee first) or opens at once (agent
-first); each round is spoken, then its tools run through the session; a tool
-that ends the call hangs up after the last words; a barge-in silences the turn
-but lets the round's tool calls run, and trims the history to what was heard;
+first); each round is spoken while its tool calls run through the session, as
+the model makes them, and the next round follows both; a tool that ends the
+call hangs up after the last words; a barge-in silences the turn but neither
+cancels nor delays the round's tool calls, and trims the history to what was heard;
 playout runs at most a second ahead of real time. Plus Silero and the local
 silence endpoint the legs without vendor endpointing use.
 """
@@ -31,7 +32,7 @@ from vamos_voice.providers.cascade import (
     Utterance,
 )
 
-from .cascade_fakes import SILENCE, FakeLLM, FakeTTS, ScriptedCascade, tool, wait_until
+from .cascade_fakes import SILENCE, WORD_MS, FakeLLM, FakeTTS, ScriptedCascade, tool, wait_until
 from .fakes import FAKE_INBOUND, HELLO, REMI, FakeLine, ScriptedSession, runtime
 
 SPEECH = Path(__file__).parent / "fixtures" / "caller_speech_24k.pcm"
@@ -91,10 +92,23 @@ async def test_agent_first_the_opening_round_runs_before_the_caller_says_anythin
     await stop(task)
 
 
-async def test_a_round_is_spoken_then_its_tools_run_and_the_next_round_sees_the_results() -> None:
+async def test_a_rounds_tools_run_as_it_is_spoken_and_the_next_round_follows_its_words() -> None:
+    words = asyncio.Event()
+
+    class HeldTTS(FakeTTS):
+        async def speak(self, text):
+            async for pcm in super().speak(text):
+                await words.wait()  # the round's words are not out yet
+                yield pcm
+
     llm = FakeLLM(["Let me check.", tool("get_account")], ["You owe nothing."])
-    provider = ScriptedCascade(llm)
-    _, _, session, task = await start(provider, FAKE_INBOUND)
+    provider = ScriptedCascade(llm, tts=HeldTTS())
+    _, line, session, task = await start(provider, FAKE_INBOUND)
+    await wait_until(lambda: session.calls)
+    await asyncio.sleep(0.05)
+    assert session.calls == [("get_account", {})] and not line.sent, "the tool ran before the words played"
+    assert len(llm.requests) == 1, "the next round waits for the words"
+    words.set()
     await wait_until(lambda: len(llm.requests) == 2)
     await wait_until(lambda: len(provider.tts.spoken) == 2)
     assert session.calls == [("get_account", {})]
@@ -140,6 +154,32 @@ async def test_a_tool_that_ends_the_call_hangs_up_after_the_last_words_and_asks_
     assert line.closed and call.hung_up
     assert len(llm.requests) == 1
     assert provider.tts.spoken == ["Goodbye."]
+    assert call.outbound.sent_ms("reply-1") == WORD_MS, "the last words went out before the line closed"
+
+
+async def test_a_tool_call_under_way_when_the_call_ends_still_finishes() -> None:
+    release, finished = asyncio.Event(), []
+
+    class SlowSession(ScriptedSession):
+        async def dispatch(self, name, args):
+            self.calls.append((name, args))
+            await release.wait()  # a charge at the processor
+            finished.append(name)
+            return {"ok": name}
+
+    llm = FakeLLM([" ".join(["word"] * 40), tool("get_account"), tool("verify_caller")])
+    provider = ScriptedCascade(llm, tts=FakeTTS(chunk_delay_s=0.01))
+    line, session = FakeLine(), SlowSession()
+    task = asyncio.create_task(provider.run_call(runtime(FAKE_INBOUND, line, session)))
+    await wait_until(lambda: session.calls)
+    task.cancel()  # the call ends (the caller hung up) mid-reply, the first call under way
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled(), "the call's end is not swallowed"
+    release.set()
+    await wait_until(lambda: finished)
+    await asyncio.sleep(0.05)
+    assert finished == ["get_account"], "the call under way finishes"
+    assert [name for name, _ in session.calls] == ["get_account"], "the next one never starts"
 
 
 async def test_turns_that_finish_while_the_agent_answers_are_answered_together() -> None:
@@ -175,6 +215,7 @@ async def test_caller_speech_pauses_the_reply_and_a_caller_turn_interrupts_it(
     provider = ScriptedCascade(llm, tts=FakeTTS(chunk_delay_s=0.01))
     call, line, session, task = await start(provider, FAKE_INBOUND)
     await wait_until(lambda: line.sent)
+    assert session.calls == [("get_account", {})], "the round's tool call runs as its words play"
     await asyncio.sleep(0.3)  # the caller hears ~0.3 s of the reply...
     for _ in range(3):  # ...and talks over it for 0.6 s: the reply pauses
         await line.incoming.put(HELLO)
@@ -182,12 +223,12 @@ async def test_caller_speech_pauses_the_reply_and_a_caller_turn_interrupts_it(
     held = call.outbound.sent_ms("reply-1")
     await asyncio.sleep(0.2)
     assert call.outbound.sent_ms("reply-1") == held, "nothing more goes out while paused"
-    assert not session.calls and provider.tts.clears == 0, "a pause is not an interruption"
+    assert provider.tts.clears == 0, "a pause is not an interruption"
 
     await provider.stt.turns.put("Wait, what?")  # the STT's final transcript: the interruption
-    await wait_until(lambda: session.calls)
+    await wait_until(lambda: provider.tts.clears)
     await asyncio.sleep(0.1)
-    assert session.calls == [("get_account", {})], "the round's tool call still runs"
+    assert session.calls == [("get_account", {})], "the round's tool call ran once, not again"
     assert provider.tts.clears == 1
     assert call.outbound.sent_ms("reply-1") < 4000, "the rest of the reply never went out"
     await wait_until(lambda: len(llm.requests) == 2)
@@ -199,6 +240,50 @@ async def test_caller_speech_pauses_the_reply_and_a_caller_turn_interrupts_it(
     assert assistant["content"].endswith(INTERRUPTED_MARKER)
     kept = assistant["content"].removesuffix(INTERRUPTED_MARKER).split()
     assert 1 <= len(kept) < 15, kept
+    await stop(task)
+
+
+async def test_a_decided_charge_runs_when_the_model_makes_it_not_after_the_callers_objection() -> None:
+    """The regression: a round's tool calls waited for its words to play, so a caller who objected
+    while the agent said it was charging got the charge first, and the model heard the objection
+    only after it. The call runs when the model makes it, as on every other stack."""
+    events: list[str] = []
+    reply_out_at_dispatch: list[int] = []
+
+    class OrderedSession(ScriptedSession):
+        async def dispatch(self, name, args):
+            events.append(name)
+            reply_out_at_dispatch.append(call.outbound.sent_ms("reply-1"))
+            return await super().dispatch(name, args)
+
+    reply = "Okay, I will charge three hundred fifty dollars to your card ending 4242 now, one moment please."
+    llm = FakeLLM([reply, tool("take_payment", '{"method_id": "pm_1", "amount": "350.00"}')])
+    provider = ScriptedCascade(llm, tts=FakeTTS(chunk_delay_s=0.01))
+    line, session = FakeLine(), OrderedSession()
+    call = runtime(REMI, line, session)
+    task = asyncio.create_task(provider.run_call(call))
+    await provider.stt.turns.put("Yes.")  # the caller's answer the round replies to
+    await wait_until(lambda: line.sent)
+    await asyncio.sleep(0.4)  # the caller hears "...three hundred fifty..."
+    for _ in range(3):  # ...talks over it...
+        await line.incoming.put(HELLO)
+    events.append("the caller objects")  # ...and the STT's final transcript reaches the cascade
+    await provider.stt.turns.put("No, I said I can only do 200.")
+    await wait_until(lambda: len(llm.requests) == 2)
+
+    assert events == ["take_payment", "the caller objects"], "charged when decided, once, not after"
+    assert reply_out_at_dispatch[0] < len(reply.split()) * WORD_MS, "while the reply was still going out"
+    assert session.calls == [("take_payment", {"method_id": "pm_1", "amount": "350.00"})]
+    assistant, result, objection = llm.requests[1][0][-3:]
+    assert assistant["role"] == "assistant" and assistant["content"].endswith(INTERRUPTED_MARKER)
+    assert [c["function"]["name"] for c in assistant["tool_calls"]] == ["take_payment"]
+    assert result == {
+        "role": "tool",
+        "tool_call_id": "call_take_payment",
+        "name": "take_payment",
+        "content": json.dumps({"ok": "take_payment"}),
+    }
+    assert objection == {"role": "user", "content": "No, I said I can only do 200."}
     await stop(task)
 
 
