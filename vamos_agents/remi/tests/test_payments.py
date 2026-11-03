@@ -30,7 +30,7 @@ from .fake_paynearme import (
     FakePayNearMe,
     signature,
 )
-from .support import MANIFEST
+from .support import BANK_BILLING, CARD_BILLING, MANIFEST
 
 AT = datetime.fromisoformat("2026-11-03T11:20:00-05:00")
 ORDER = MANIFEST["paynearme"]["orders"][0]["pnm_order_identifier"]  # TAS-261101's, $2,400.00 up to
@@ -53,7 +53,7 @@ async def test_a_request_is_version_3_signed_and_timestamped_with_the_time_given
         exp_month=8,
         exp_year=2028,
         cvc="123",
-        holder="Marcus Bell",
+        **CARD_BILLING,
         at=later,
     )
     assert saved == SavedMethod(saved.method_id, "card", "1111", "Visa")
@@ -77,7 +77,7 @@ async def test_a_request_is_version_3_signed_and_timestamped_with_the_time_given
 async def test_a_bank_account_is_tokenized_with_its_routing_number() -> None:
     twin, client = twin_and_client()
     saved = await client.add_bank_account(
-        order=ORDER, routing="110000000", account="000123456789", holder="Marcus Bell", at=AT
+        order=ORDER, routing="110000000", account="000123456789", **BANK_BILLING, at=AT
     )
     assert saved == SavedMethod(saved.method_id, "ach", "6789", None)
     _, body = twin.requests[0]
@@ -90,7 +90,7 @@ async def test_a_bank_account_is_tokenized_with_its_routing_number() -> None:
 async def test_a_payment_is_paynearmes_answer() -> None:
     twin, client = twin_and_client()
     card = await client.add_card(
-        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", **CARD_BILLING, at=AT
     )
     paid = await client.pay(order=ORDER, method=card, amount_cents=144_000, at=AT)
     assert paid == Payment(
@@ -108,7 +108,7 @@ async def test_a_payment_is_paynearmes_answer() -> None:
 async def test_a_decline_is_an_answer_not_an_error() -> None:
     _, client = twin_and_client()
     card = await client.add_card(
-        order=ORDER, number="4000000000009995", exp_month=11, exp_year=2029, cvc="123", holder="M B", at=AT
+        order=ORDER, number="4000000000009995", exp_month=11, exp_year=2029, cvc="123", **CARD_BILLING, at=AT
     )
     paid = await client.pay(order=ORDER, method=card, amount_cents=240_000, at=AT)
     assert (paid.status, paid.response_code, paid.amount_cents) == ("rejected", "51", 240_000)
@@ -125,13 +125,19 @@ async def test_a_refusal_is_paynearmes_own_words() -> None:
             exp_month=8,
             exp_year=2028,
             cvc="123",
-            holder="M B",
+            **CARD_BILLING,
             at=AT,
         )
     _, wrong_secret = twin_and_client(secret="not-the-secret")
     with pytest.raises(PayNearMeRefused, match="Authentication failed"):
         await wrong_secret.add_card(
-            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+            order=ORDER,
+            number="4111111111111111",
+            exp_month=8,
+            exp_year=2028,
+            cvc="123",
+            **CARD_BILLING,
+            at=AT,
         )
     with pytest.raises(
         PayNearMeRefused, match="Authentication failed"
@@ -142,7 +148,7 @@ async def test_a_refusal_is_paynearmes_own_words() -> None:
             exp_month=8,
             exp_year=2028,
             cvc="123",
-            holder="M B",
+            **CARD_BILLING,
             at=AT + timedelta(seconds=301),
         )
     await client.close()
@@ -154,7 +160,13 @@ async def test_an_unreachable_or_failing_twin_is_unavailable() -> None:
     twin.unreachable = True
     with pytest.raises(PaymentsUnavailable, match="could not be reached"):
         await client.add_card(
-            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+            order=ORDER,
+            number="4111111111111111",
+            exp_month=8,
+            exp_year=2028,
+            cvc="123",
+            **CARD_BILLING,
+            at=AT,
         )
     await client.close()
     failing = PayNearMe(
@@ -165,7 +177,13 @@ async def test_an_unreachable_or_failing_twin_is_unavailable() -> None:
     )
     with pytest.raises(PaymentsUnavailable, match="502"):
         await failing.add_card(
-            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+            order=ORDER,
+            number="4111111111111111",
+            exp_month=8,
+            exp_year=2028,
+            cvc="123",
+            **CARD_BILLING,
+            at=AT,
         )
     await failing.close()
 
@@ -184,7 +202,7 @@ async def test_the_base_may_end_in_json_api_or_not(base: str) -> None:
 
     client = PayNearMe(base, SITE_IDENTIFIER, HMAC_SECRET, transport=httpx.MockTransport(handle))
     await client.add_card(
-        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", **CARD_BILLING, at=AT
     )
     assert seen == ["https://twin.example/json-api/create_payment_method"]
     await client.close()
@@ -194,7 +212,7 @@ async def test_card_details_are_never_logged_or_kept(caplog) -> None:
     caplog.set_level(logging.DEBUG)
     _, client = twin_and_client()
     card = await client.add_card(
-        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="987", holder="M B", at=AT
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="987", **CARD_BILLING, at=AT
     )
     await client.pay(order=ORDER, method=card, amount_cents=100, at=AT)
     for text in (caplog.text, repr(card), repr(client.__dict__)):
@@ -227,11 +245,11 @@ BAD_SECURITY_CODE = "This payment didn't complete because the security code was 
 async def test_the_twins_card_validation_is_reported_in_its_words(details: dict, words: str) -> None:
     twin, client = twin_and_client()
     with pytest.raises(PayNearMeRefused) as refused:
-        await client.add_card(order=ORDER, holder="M B", at=AT, **details)
+        await client.add_card(order=ORDER, **CARD_BILLING, at=AT, **details)
     assert str(refused.value) == f"PayNearMe refused it: {words}"
     assert twin.methods == {}
     amex = await client.add_card(
-        order=ORDER, number="378282246310005", exp_month=8, exp_year=2028, cvc="1234", holder="M B", at=AT
+        order=ORDER, number="378282246310005", exp_month=8, exp_year=2028, cvc="1234", **CARD_BILLING, at=AT
     )
     assert (amex.brand, amex.last4) == ("American Express", "0005")
     await client.close()
@@ -246,7 +264,7 @@ async def test_the_twins_bank_validation_is_reported_in_its_words(
 ) -> None:
     _, client = twin_and_client()
     with pytest.raises(PayNearMeRefused) as refused:
-        await client.add_bank_account(order=ORDER, routing=routing, account=account, holder="M B", at=AT)
+        await client.add_bank_account(order=ORDER, routing=routing, account=account, **BANK_BILLING, at=AT)
     assert str(refused.value) == f"PayNearMe refused it: {words}"
     await client.close()
 
@@ -270,7 +288,7 @@ async def test_the_world_v2_test_cards_decline_as_the_twin_answers(
 ) -> None:
     _, client = twin_and_client()
     card = await client.add_card(
-        order=ORDER, number=number, exp_month=exp_month, exp_year=exp_year, cvc="123", holder="M B", at=AT
+        order=ORDER, number=number, exp_month=exp_month, exp_year=exp_year, cvc="123", **CARD_BILLING, at=AT
     )
     paid = await client.pay(order=ORDER, method=card, amount_cents=10_000, at=AT)
     assert (paid.status, paid.response_code, paid.response_message) == ("rejected", code, words)
@@ -295,7 +313,7 @@ async def test_a_card_the_twin_saves_can_still_decline_at_charge(
 ) -> None:
     twin, client = twin_and_client()
     card = await client.add_card(
-        order=ORDER, number=number, exp_month=exp_month, exp_year=exp_year, cvc="123", holder="M B", at=AT
+        order=ORDER, number=number, exp_month=exp_month, exp_year=exp_year, cvc="123", **CARD_BILLING, at=AT
     )
     paid = await client.pay(order=ORDER, method=card, amount_cents=10_000, at=AT)
     assert (paid.status, paid.response_code, paid.response_message) == ("rejected", code, words)
@@ -308,7 +326,7 @@ async def test_a_bad_security_code_sent_at_charge_is_a_rejected_payment_nz() -> 
     card (Remi sends the security code only when the card is saved)."""
     twin, client = twin_and_client()
     card = await client.add_card(
-        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", **CARD_BILLING, at=AT
     )
     body = {
         "version": "3.0",
@@ -328,5 +346,60 @@ async def test_a_bad_security_code_sent_at_charge_is_a_rejected_payment_nz() -> 
     assert (
         answer["payment"]["response_message"]
         == "This payment didn't complete because the security code was invalid."
+    )
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("missing", "field"),
+    [
+        ("cvc", "payment_method_cvv_pii"),
+        ("billing_name", "payment_method_billing_name"),
+        ("billing_address", "payment_method_billing_address"),
+        ("billing_zip", "payment_method_billing_zipcode"),
+    ],
+)
+async def test_a_card_needs_what_paynearme_requires(missing: str, field: str) -> None:
+    _, client = twin_and_client()
+    details = {"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "123", **CARD_BILLING}
+    del details[missing]
+    with pytest.raises(PayNearMeRefused) as refused:
+        await client.add_card(order=ORDER, at=AT, **details)
+    assert str(refused.value) == f"PayNearMe refused it: Missing required parameter: {field}"
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("missing", "field"),
+    [("billing_name", "payment_method_billing_name"), ("billing_zip", "payment_method_billing_zipcode")],
+)
+async def test_a_bank_account_needs_what_paynearme_requires(missing: str, field: str) -> None:
+    _, client = twin_and_client()
+    details = {"routing": "110000000", "account": "000123456789", **BANK_BILLING}
+    del details[missing]
+    with pytest.raises(PayNearMeRefused) as refused:
+        await client.add_bank_account(order=ORDER, at=AT, **details)
+    assert str(refused.value) == f"PayNearMe refused it: Missing required parameter: {field}"
+    await client.close()
+
+
+async def test_the_billing_zip_is_5_or_9_digits_and_the_phone_is_optional() -> None:
+    twin, client = twin_and_client()
+    card = {"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "123", **CARD_BILLING}
+    with pytest.raises(PayNearMeRefused, match=r"^PayNearMe refused it: Billing ZIP code is invalid$"):
+        await client.add_card(order=ORDER, at=AT, **{**card, "billing_zip": "1121"})
+    await client.add_card(order=ORDER, at=AT, **card)
+    assert "payment_method_billing_phone" not in twin.requests[-1][1]
+    await client.add_card(
+        order=ORDER, at=AT, **{**card, "billing_zip": "11211-1234", "billing_phone": "3475550118"}
+    )
+    _, body = twin.requests[-1]
+    assert (body["payment_method_billing_zipcode"], body["payment_method_billing_phone"]) == (
+        "11211-1234",
+        "3475550118",
+    )
+    assert (body["payment_method_billing_name"], body["payment_method_billing_address"]) == (
+        CARD_BILLING["billing_name"],
+        CARD_BILLING["billing_address"],
     )
     await client.close()

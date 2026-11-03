@@ -13,8 +13,12 @@ from that code (the stack's head, aec8fdba):
   sorted by name, the twin's excluded names left out. A wrong signature or site
   id, or a ``timestamp`` more than 300 seconds from the twin's **virtual**
   clock, answers ``Authentication failed``;
-- ``create_payment_method`` validates what a debtor reads out, then tokenizes
-  it on the order and answers only the new method. A card: the number's Luhn
+- ``create_payment_method`` requires, for a card, the security code and the
+  billing name, address and ZIP, and for a bank account the billing name and
+  ZIP ("Missing required parameter: <name>"; the billing phone is optional; a
+  ZIP is 5 or 9 digits, "Billing ZIP code is invalid"); then it validates what a
+  debtor reads out, tokenizes it on the order and answers only the new method.
+  A card: the number's Luhn
   checksum only ("Card number isn’t valid (bad checksum)"), an expiry of MM/YY,
   MM/YYYY, MMYY or MMYYYY ("Invalid expiration date"), and a security code of 3
   digits, 4 for American Express ("This payment didn't complete because the
@@ -67,6 +71,16 @@ CARD_NUMBER_DECLINE = ("14", "This card number is invalid.")
 EXPIRED_CARD_DECLINE = ("54", EXPIRED_CARD)
 INVALID_SECURITY_CODE = "This payment didn't complete because the security code was invalid."
 INVALID_ACCOUNT_NUMBER = "This account number is invalid"
+INVALID_BILLING_ZIP = "Billing ZIP code is invalid"
+#: What create_payment_method requires (#2058): a card, the security code and the billing name, address and ZIP;
+#: a bank account, the billing name and ZIP. The billing phone is optional.
+CARD_REQUIRED_FIELDS = (
+    "payment_method_cvv_pii",
+    "payment_method_billing_name",
+    "payment_method_billing_address",
+    "payment_method_billing_zipcode",
+)
+ACH_REQUIRED_FIELDS = ("payment_method_billing_name", "payment_method_billing_zipcode")
 #: Card-network PAN lengths; an unrecognised prefix may be 12 to 19 digits.
 CARD_LENGTHS = {
     "Visa": {13, 16, 19},
@@ -101,6 +115,16 @@ def entered_digits(value: Any) -> str | None:
     """The digits of a number typed with optional spaces or hyphens; None if anything else is in it."""
     text = re.sub(r"[ -]", "", str(value or ""))
     return text if text.isdigit() else None
+
+
+def missing_field(body: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """The first of the keys the body leaves out or blank; None when every one is sent."""
+    return next((key for key in keys if body.get(key) is None or str(body[key]).strip() == ""), None)
+
+
+def billing_zip_valid(value: Any) -> bool:
+    """A 5- or 9-digit billing ZIP code, a hyphen allowed before the last four."""
+    return re.fullmatch(r"[0-9]{5}(-?[0-9]{4})?", str(value).strip()) is not None
 
 
 def card_brand(number: Any) -> str | None:
@@ -277,15 +301,19 @@ class FakePayNearMe:
             )
             if not number or not raw_expiry:
                 return _error("Card number and expiration are required")
+            missing = missing_field(body, CARD_REQUIRED_FIELDS)
+            if missing is not None:
+                return _error(f"Missing required parameter: {missing}")
             if not card_number_valid(number):
                 return _error(INVALID_CARD_CHECKSUM)
             expiry = card_expiry(raw_expiry)
             if expiry is None:
                 return _error(INVALID_EXPIRY)
             brand = card_brand(number)
-            cvv = body.get("payment_method_cvv_pii")
-            if cvv not in (None, "") and not security_code_valid(cvv, brand):
+            if not security_code_valid(body["payment_method_cvv_pii"], brand):
                 return _error(INVALID_SECURITY_CODE)
+            if not billing_zip_valid(body["payment_method_billing_zipcode"]):
+                return _error(INVALID_BILLING_ZIP)
             fingerprint = instrument_fingerprint("card", number, expiry)
             account = {
                 "description": "Card",
@@ -297,10 +325,15 @@ class FakePayNearMe:
             number, aba = body.get("payment_method_ach_account_pii"), body.get("payment_method_ach_aba_pii")
             if not number or not aba:
                 return _error("Routing and account numbers are required")
+            missing = missing_field(body, ACH_REQUIRED_FIELDS)
+            if missing is not None:
+                return _error(f"Missing required parameter: {missing}")
             if not routing_number_valid(aba):
                 return _error(INVALID_ROUTING_CHECKSUM)
             if not account_number_valid(number):
                 return _error(INVALID_ACCOUNT_NUMBER)
+            if not billing_zip_valid(body["payment_method_billing_zipcode"]):
+                return _error(INVALID_BILLING_ZIP)
             fingerprint, expiry, brand = instrument_fingerprint("ach", aba, number), None, None
             account = {"description": "Bank Account", "account_type": "Personal Checking"}
         method_id = self._next_id("31")
@@ -308,7 +341,7 @@ class FakePayNearMe:
         account = {
             "payment_method_identifier": method_id,
             "status": "active",
-            "name": body.get("payment_method_billing_name", "Account Holder"),
+            "name": body["payment_method_billing_name"],
             **{k: v for k, v in account.items() if k not in ("expiration_date", "card_brand")},
             "number": last4,
             **({"expiration_date": expiry, "card_brand": brand} if kind == "card" else {}),

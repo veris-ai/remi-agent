@@ -9,9 +9,12 @@ the agent chooses is done and recorded, and the bench grades it after the call
 from what the World holds.
 
 - ``add_payment_method`` tokenizes the consumer's card or bank account on the
-  account's PayNearMe order. Card and bank numbers are declared ``redact`` (never
-  logged), go only to PayNearMe, and are never stored or echoed: the result is
-  PayNearMe's ``payment_method_identifier`` and the last four digits.
+  account's PayNearMe order, with the billing details the agent passes (PayNearMe
+  requires a card's billing name, address and ZIP, a bank account's name and
+  ZIP; Remi never fills them in from the account record). Card and bank numbers
+  and the billing details are declared ``redact`` (never logged), go only to
+  PayNearMe, and are never stored or echoed: the result is PayNearMe's
+  ``payment_method_identifier`` and the last four digits.
 - ``take_payment`` charges an option's amount on PayNearMe (the full balance, a
   discount, or a plan's down payment) and reports PayNearMe's answer as given. The
   agent's record of it is the ``payments`` row (PayNearMe's payment id, its net
@@ -58,28 +61,53 @@ class PaymentMethodArgs(BaseModel):
     card_number: str | None = Field(None, description="card: the full card number, digits only.")
     exp_month: int | None = Field(None, ge=1, le=12, description="card: expiry month, 1-12.")
     exp_year: int | None = Field(None, description="card: expiry year, four digits.")
-    cvc: str | None = Field(None, description="card: the security code, digits only.")
+    cvc: str | None = Field(
+        None,
+        description="card: the security code, digits only (3 digits; 4 for American Express). PayNearMe requires it "
+        "for a card.",
+    )
     routing_number: str | None = Field(None, description="ach: the 9-digit routing number.")
     account_number: str | None = Field(None, description="ach: the bank account number, digits only.")
+    billing_name: str | None = Field(
+        None,
+        description="The name on the card or bank account. PayNearMe requires it for a card and a bank account.",
+    )
+    billing_address: str | None = Field(
+        None, description="card: the card's billing street address. PayNearMe requires it for a card."
+    )
+    billing_zip: str | None = Field(
+        None,
+        description="The billing ZIP code, 5 or 9 digits (12345 or 12345-6789). PayNearMe requires it for a card and "
+        "a bank account.",
+    )
+    billing_phone: str | None = Field(
+        None, description="The billing phone number. PayNearMe does not require it."
+    )
 
 
 @REGISTRY.tool(
     PaymentMethodArgs,
-    redact=("card_number", "exp_month", "exp_year", "cvc", "routing_number", "account_number"),
-)
+    redact=(
+        "card_number", "exp_month", "exp_year", "cvc", "routing_number", "account_number",
+        "billing_name", "billing_address", "billing_zip", "billing_phone",
+    ),
+)  # fmt: skip
 async def add_payment_method(session: RemiCall, args: PaymentMethodArgs) -> dict[str, Any]:
     """Save the card or bank account the consumer reads out with PayNearMe, so it can be charged (take_payment).
-    Card details go only to PayNearMe. Refer to the method by its last four digits."""
+    PayNearMe requires, for a card, its number, expiry, security code and billing name, address and ZIP; for a
+    bank account, its routing and account numbers and billing name and ZIP. What is passed goes to PayNearMe as
+    given, and PayNearMe's answer comes back. Card details go only to PayNearMe. Refer to the method by its last
+    four digits."""
     account = await session.ensure_account()
-    consumer = session.consumer
-    assert consumer is not None
-    common = {"order": account.pnm_order_identifier, "holder": consumer.full_name, "at": session.clock.now()}
+    billing = {
+        "billing_name": args.billing_name,
+        "billing_address": args.billing_address,
+        "billing_zip": args.billing_zip,
+        "billing_phone": args.billing_phone,
+    }
+    common = {"order": account.pnm_order_identifier, "at": session.clock.now(), **billing}
     try:
         if args.method == "card":
-            if not args.card_number or not args.cvc or args.exp_month is None or args.exp_year is None:
-                raise ToolError(
-                    "A card is its number, expiry month and year, and security code; one was not passed."
-                )
             saved = await session.payments.add_card(
                 number=args.card_number,
                 exp_month=args.exp_month,
@@ -88,10 +116,6 @@ async def add_payment_method(session: RemiCall, args: PaymentMethodArgs) -> dict
                 **common,
             )
         else:
-            if not args.routing_number or not args.account_number:
-                raise ToolError(
-                    "A bank account is its 9-digit routing number and account number; one was not passed."
-                )
             saved = await session.payments.add_bank_account(
                 routing=args.routing_number, account=args.account_number, **common
             )

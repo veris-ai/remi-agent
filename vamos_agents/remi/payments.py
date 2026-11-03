@@ -25,7 +25,9 @@ call's clock (``CallClock``: the World's time), never wall time.
 
 Card numbers, expiry dates, security codes and bank account numbers pass
 through here only as PayNearMe's ``_pii`` parameters: never logged, never kept,
-never returned. The HMAC secret is never in a repr.
+never returned. The billing details (name, address, ZIP, phone) are what the
+agent gave, passed as given and never filled in from the account record. The
+HMAC secret is never in a repr.
 """
 
 from __future__ import annotations
@@ -126,8 +128,26 @@ def to_cents(amount: Any) -> int:
     return int((Decimal(str(amount)) * 100).to_integral_value())
 
 
-def _digits(value: str) -> str:
-    return re.sub(r"\D", "", value)
+def _digits(value: str | None) -> str | None:
+    return re.sub(r"\D", "", value) if value is not None else None
+
+
+def _billing(
+    name: str | None, address: str | None, zipcode: str | None, phone: str | None
+) -> dict[str, str | None]:
+    """PayNearMe's billing parameters, as given (a card needs the name, address and ZIP; a bank account the name
+    and ZIP; the phone is optional)."""
+    return {
+        "payment_method_billing_name": name,
+        "payment_method_billing_address": address,
+        "payment_method_billing_zipcode": zipcode,
+        "payment_method_billing_phone": phone,
+    }
+
+
+def _given(params: dict[str, str | None]) -> dict[str, str]:
+    """The parameters that were given: one not given is not sent, so PayNearMe names it if it requires it."""
+    return {name: value for name, value in params.items() if value is not None}
 
 
 class PayNearMe:
@@ -173,37 +193,52 @@ class PayNearMe:
         return answer
 
     async def add_card(
-        self, *, order: str, number: str, exp_month: int, exp_year: int, cvc: str, holder: str, at: datetime
+        self,
+        *,
+        order: str,
+        number: str | None = None,
+        exp_month: int | None = None,
+        exp_year: int | None = None,
+        cvc: str | None = None,
+        billing_name: str | None = None,
+        billing_address: str | None = None,
+        billing_zip: str | None = None,
+        billing_phone: str | None = None,
+        at: datetime,
     ) -> SavedMethod:
-        answer = await self._call(
-            "create_payment_method",
-            {
-                "pnm_order_identifier": order,
-                "payment_method_type": "card",
-                "payment_method_card_number_pii": _digits(number),
-                "payment_method_card_expiry_pii": f"{exp_month:02d}/{exp_year}",
-                "payment_method_cvv_pii": _digits(cvc),
-                "payment_method_billing_name": holder,
-            },
-            at,
-        )
-        return _saved(answer, "card")
+        """Tokenize a card with what was given; PayNearMe names anything it requires that is missing."""
+        expiry = f"{exp_month:02d}/{exp_year}" if exp_month is not None and exp_year is not None else None
+        params = {
+            "pnm_order_identifier": order,
+            "payment_method_type": "card",
+            "payment_method_card_number_pii": _digits(number),
+            "payment_method_card_expiry_pii": expiry,
+            "payment_method_cvv_pii": _digits(cvc),
+            **_billing(billing_name, billing_address, billing_zip, billing_phone),
+        }
+        return _saved(await self._call("create_payment_method", _given(params), at), "card")
 
     async def add_bank_account(
-        self, *, order: str, routing: str, account: str, holder: str, at: datetime
+        self,
+        *,
+        order: str,
+        routing: str | None = None,
+        account: str | None = None,
+        billing_name: str | None = None,
+        billing_address: str | None = None,
+        billing_zip: str | None = None,
+        billing_phone: str | None = None,
+        at: datetime,
     ) -> SavedMethod:
-        answer = await self._call(
-            "create_payment_method",
-            {
-                "pnm_order_identifier": order,
-                "payment_method_type": "ach",
-                "payment_method_ach_aba_pii": _digits(routing),
-                "payment_method_ach_account_pii": _digits(account),
-                "payment_method_billing_name": holder,
-            },
-            at,
-        )
-        return _saved(answer, "ach")
+        """Tokenize a bank account with what was given; PayNearMe names anything it requires that is missing."""
+        params = {
+            "pnm_order_identifier": order,
+            "payment_method_type": "ach",
+            "payment_method_ach_aba_pii": _digits(routing),
+            "payment_method_ach_account_pii": _digits(account),
+            **_billing(billing_name, billing_address, billing_zip, billing_phone),
+        }
+        return _saved(await self._call("create_payment_method", _given(params), at), "ach")
 
     async def pay(self, *, order: str, method: SavedMethod, amount_cents: int, at: datetime) -> Payment:
         answer = await self._call(

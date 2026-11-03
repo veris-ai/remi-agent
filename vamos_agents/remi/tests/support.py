@@ -64,6 +64,14 @@ DECLINED_CARD = ("4000000000000002", 10, 2028, "123")
 EXPIRED_CARD = ("4000000000000069", 11, 2031, "123")
 GOOD_BANK = ("110000000", "000123456789")
 INVALID_BANK = ("110000000", "000222222227")
+#: The billing details PayNearMe requires (services-sandbox #2058): a card, the name, address and ZIP; a bank
+#: account, the name and ZIP. What a consumer reads out; here, the CARD-04 consumer's.
+CARD_BILLING = {
+    "billing_name": "Marcus Bell",
+    "billing_address": "214 Bedford Ave, Apt 3C, Brooklyn, NY",
+    "billing_zip": "11211",
+}
+BANK_BILLING = {"billing_name": "Marcus Bell", "billing_zip": "11211"}
 
 
 def clock_start(task: str) -> datetime:

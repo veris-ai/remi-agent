@@ -29,7 +29,9 @@ from vamos_voice.session import CallSession
 
 from . import support
 from .support import (
+    BANK_BILLING,
     CALL_DATE,
+    CARD_BILLING,
     GOOD_BANK,
     GOOD_CARD,
     INSUFFICIENT_FUNDS_CARD,
@@ -51,7 +53,14 @@ async def card(s: CallSession, details: tuple[str, int, int, str] = GOOD_CARD) -
     number, month, year, cvc = details
     saved = await s.dispatch(
         "add_payment_method",
-        {"method": "card", "card_number": number, "exp_month": month, "exp_year": year, "cvc": cvc},
+        {
+            "method": "card",
+            "card_number": number,
+            "exp_month": month,
+            "exp_year": year,
+            "cvc": cvc,
+            **CARD_BILLING,
+        },
     )
     assert "error" not in saved, saved
     return saved["method_id"]
@@ -215,7 +224,8 @@ async def test_the_test_bank_account_fails_validation(pg_dsn, make_session) -> N
     s = await make_session("STORE-01")
     routing, number = INVALID_BANK
     saved = await s.dispatch(
-        "add_payment_method", {"method": "ach", "routing_number": routing, "account_number": number}
+        "add_payment_method",
+        {"method": "ach", "routing_number": routing, "account_number": number, **BANK_BILLING},
     )
     assert saved == {"method_id": saved["method_id"], "method": "ach", "last4": "2227"}
     paid = await s.dispatch("take_payment", {"method_id": saved["method_id"], "option_id": "pif"})
@@ -226,7 +236,8 @@ async def test_the_test_bank_account_fails_validation(pg_dsn, make_session) -> N
     )
     routing, number = GOOD_BANK
     bank = await s.dispatch(
-        "add_payment_method", {"method": "ach", "routing_number": routing, "account_number": number}
+        "add_payment_method",
+        {"method": "ach", "routing_number": routing, "account_number": number, **BANK_BILLING},
     )
     again = await s.dispatch("take_payment", {"method_id": bank["method_id"], "option_id": "pif"})
     assert again["status"] == "approved" and support.LEDGER.writes[0][1]["kind"] == "ach"
@@ -272,7 +283,7 @@ async def test_requests_are_signed_with_the_call_clock_and_another_time_is_refus
                 exp_month=8,
                 exp_year=2028,
                 cvc="123",
-                holder="D K",
+                **CARD_BILLING,
                 at=other,
             )
 
@@ -289,6 +300,7 @@ async def test_card_numbers_go_only_to_paynearme(pg_dsn, make_session, caplog) -
             "exp_month": 8,
             "exp_year": 2028,
             "cvc": "321",
+            **CARD_BILLING,
         },
     )
     assert saved == {"method_id": saved["method_id"], "method": "card", "last4": "1111", "brand": "Visa"}
@@ -313,6 +325,7 @@ async def test_a_card_the_twin_refuses_reaches_the_model_in_its_words(pg_dsn, ma
         "exp_month": 8,
         "exp_year": 2028,
         "cvc": "123",
+        **CARD_BILLING,
     }
     assert await s.dispatch("add_payment_method", bad) == {
         "error": "PayNearMe refused it: Card number isn’t valid (bad checksum)"
@@ -322,6 +335,31 @@ async def test_a_card_the_twin_refuses_reaches_the_model_in_its_words(pg_dsn, ma
         "error": "PayNearMe refused it: This payment didn't complete because the security code was invalid."
     }
     assert support.PAYNEARME.methods == {} and s.state.payment_methods == {}
+
+
+async def test_the_billing_details_are_the_agents_never_the_account_record(pg_dsn, make_session) -> None:
+    """PayNearMe requires a card's billing name, address and ZIP (a bank account's name and ZIP): Remi passes what
+    the agent gives and never fills them in from the account."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    bare = {"method": "card", "card_number": GOOD_CARD[0], "exp_month": 8, "exp_year": 2028, "cvc": "123"}
+    assert await s.dispatch("add_payment_method", bare) == {
+        "error": "PayNearMe refused it: Missing required parameter: payment_method_billing_name"
+    }
+    saved = await s.dispatch("add_payment_method", {**bare, **CARD_BILLING, "billing_phone": "3475550118"})
+    assert "error" not in saved, saved
+    _, body = support.PAYNEARME.requests[-1]
+    sent = {k: body[f"payment_method_billing_{k}"] for k in ("name", "address", "zipcode", "phone")}
+    assert sent == {
+        "name": CARD_BILLING["billing_name"],
+        "address": CARD_BILLING["billing_address"],
+        "zipcode": CARD_BILLING["billing_zip"],
+        "phone": "3475550118",
+    }
+    (spec,) = [t for t in REGISTRY.specs() if t.name == "add_payment_method"]
+    for field in ("billing_name", "billing_address", "billing_zip", "billing_phone"):
+        described = spec.parameters["properties"][field]["description"]
+        assert "PayNearMe" in described and "ask" not in described.lower(), (field, described)
 
 
 async def test_an_approved_payment_the_ledger_cannot_post_is_recorded_and_reported(
