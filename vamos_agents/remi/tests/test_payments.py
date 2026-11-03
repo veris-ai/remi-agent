@@ -4,7 +4,8 @@ World v2 takes payments on PayNearMe (WORLD.md, "Payments: PayNearMe"): every re
 ``POST /json-api/<operation>`` with ``version`` 3.0, the site id, a ``timestamp`` within 300 seconds of the
 twin's virtual clock and an HMAC-SHA256 ``signature`` over the sorted parameters. A decline is PayNearMe's
 answer, not an error; a refusal (its error envelope) is PayNearMe's words; an unreachable twin is
-``PaymentsUnavailable``. Card and bank numbers go to PayNearMe and nowhere else.
+``PaymentsUnavailable``; an answer that cannot be read is ``UnreadableAnswer``. Card and bank numbers go to
+PayNearMe and nowhere else.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from vamos_agents.remi.payments import (
     PayNearMe,
     PayNearMeRefused,
     SavedMethod,
+    UnreadableAnswer,
     sign,
 )
 
@@ -186,6 +188,81 @@ async def test_an_unreachable_or_failing_twin_is_unavailable() -> None:
             at=AT,
         )
     await failing.close()
+
+
+def _payment_changed(answer: dict, **changed) -> httpx.Response:
+    payment = {k: v for k, v in {**answer["payment"], **changed}.items() if v is not None}
+    return httpx.Response(200, json={**answer, "payment": payment})
+
+
+@pytest.mark.parametrize(
+    ("reshape", "why"),
+    [
+        (lambda answer: httpx.Response(200, text="<html>504</html>"), "not JSON"),
+        (lambda answer: httpx.Response(200, json=["ok"]), "not a JSON object"),
+        (lambda answer: httpx.Response(200, json={"payment": answer["payment"]}), "status"),
+        (lambda answer: httpx.Response(200, json={"status": "ok"}), "payment"),
+        (lambda answer: _payment_changed(answer, pnm_payment_identifier=None), "pnm_payment_identifier"),
+        (lambda answer: _payment_changed(answer, payment_status=""), "payment_status"),
+        (lambda answer: _payment_changed(answer, net_payment_amount=None), "net_payment_amount"),
+        (lambda answer: _payment_changed(answer, net_payment_amount="12 dollars"), "net_payment_amount"),
+        (lambda answer: _payment_changed(answer, net_payment_amount="Infinity"), "net_payment_amount"),
+    ],
+    ids=[
+        "not JSON",
+        "not a JSON object",
+        "no envelope status",
+        "no payment",
+        "no payment id",
+        "blank payment status",
+        "no net amount",
+        "an amount that is not one",
+        "an infinite amount",
+    ],
+)
+async def test_a_charge_answered_unreadably_is_unreadable_not_unavailable(reshape, why, caplog) -> None:
+    """PayNearMe answered 2xx and took the charge, but the answer cannot be read: ``UnreadableAnswer`` naming what
+    could not be read, logged loudly without the answer itself or any card data."""
+    caplog.set_level(logging.DEBUG)
+    twin, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="987", **CARD_BILLING, at=AT
+    )
+    twin.reshape = lambda operation, answer: reshape(answer)
+    with pytest.raises(
+        UnreadableAnswer, match=f"PayNearMe's answer to make_payment could not be read: .*{why}"
+    ):
+        await client.pay(order=ORDER, method=card, amount_cents=10_000, at=AT)
+    assert [p["status"] for p in twin.payments] == ["approved"]
+    assert any(r.levelno >= logging.ERROR and why in r.getMessage() for r in caplog.records)
+    assert "4111111111111111" not in caplog.text and "987" not in caplog.text
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    "reshape",
+    [
+        lambda answer: httpx.Response(200, content=b"\xff\xfe not json"),
+        lambda answer: httpx.Response(200, json={"status": "ok", "order": {"electronic_payments": {}}}),
+    ],
+    ids=["not JSON", "no method"],
+)
+async def test_a_saved_method_answered_unreadably_is_unreadable(reshape) -> None:
+    twin, client = twin_and_client()
+    twin.reshape = lambda operation, answer: reshape(answer)
+    with pytest.raises(
+        UnreadableAnswer, match="PayNearMe's answer to create_payment_method could not be read"
+    ):
+        await client.add_card(
+            order=ORDER,
+            number="4111111111111111",
+            exp_month=8,
+            exp_year=2028,
+            cvc="123",
+            **CARD_BILLING,
+            at=AT,
+        )
+    await client.close()
 
 
 @pytest.mark.parametrize(
