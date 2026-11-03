@@ -340,12 +340,8 @@ def test_push_back_gets_a_reason_and_a_way_out() -> None:
 
 def test_no_leaked_example_amount_or_name() -> None:
     text = rendered_prompt()
-    for leaked in ("185", "Marisol", "May I speak with"):
+    for leaked in ("185", "hundred", "Marisol", "May I speak with"):
         assert leaked not in text, leaked
-    # "hundred" appears only in quoted law (N.Y. Pub. Health Law 2807-k: "two/four hundred percent of the
-    # federal poverty level"), which the prompt quotes word for word
-    own_words = "\n".join(line for line in text.split("\n") if not line.startswith(">"))
-    assert "hundred" not in own_words
 
 
 # --- the bench's cases, scripted, on the whole World ---------------------------------------------

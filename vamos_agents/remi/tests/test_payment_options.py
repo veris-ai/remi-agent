@@ -568,6 +568,34 @@ def test_the_prompt_takes_the_creditors_policy_from_its_tool_and_has_a_rule_for_
     assert "# Part 3" not in text and "Every creditor" not in text
     for creditor in ("Ashcombe", "Pellbrook", "Beckford", "Marlow", "Harlow", "Kessington"):
         assert creditor not in text, creditor
+    # the bench measures how a model follows the creditor's rules it reads at runtime: the prompt never
+    # restates what to offer, in what order, what unlocks what, or how to move between options
+    for policy in (
+        "lowest discount",
+        "smallest discount",
+        "then the plans, then a settlement",
+        "A settlement only if",
+        "creditor allows no settlement",
+        "next rung",
+        "first offer",
+        "offer the next one",
+        "turn an option down",
+        "rules order them",
+        "before you mention one that needs approval",
+        "what to offer first",
+        "what unlocks each option",
+        # the tool's rules, option statuses and allowed_now already carry these: the prompt does not repeat them
+        "whose conditions the consumer has not met",
+        "only when the consumer has stated one",
+        "An option with a status",
+        "If an approval is denied",
+        "amounts and terms an option carries",
+        "Nothing on the list fits",
+        "when nothing on the creditor's options fits",
+        "name kinds of hardship",
+        "pay-by date",
+    ):
+        assert policy not in flat, policy
     said = " ".join(text.split("## 10. What the consumer says")[1].split("\n## ")[0].split())
     for intent, rule in (
         ("Dispute", "Collection stops for the call and the dispute is recorded."),
