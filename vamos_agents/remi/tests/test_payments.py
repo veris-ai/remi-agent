@@ -24,7 +24,17 @@ from vamos_agents.remi.payments import (
     sign,
 )
 
-from .fake_paynearme import HMAC_SECRET, SITE_IDENTIFIER, FakePayNearMe, signature
+from .fake_paynearme import (
+    EXPIRED_CARD,
+    HMAC_SECRET,
+    INVALID_ACCOUNT_NUMBER,
+    INVALID_CARD_NUMBER,
+    INVALID_ROUTING_NUMBER,
+    INVALID_SECURITY_CODE,
+    SITE_IDENTIFIER,
+    FakePayNearMe,
+    signature,
+)
 from .support import MANIFEST
 
 AT = datetime.fromisoformat("2026-11-03T11:20:00-05:00")
@@ -119,14 +129,14 @@ async def test_a_refusal_is_paynearmes_own_words() -> None:
             number="4111111111111111",
             exp_month=8,
             exp_year=2028,
-            cvc="1",
+            cvc="123",
             holder="M B",
             at=AT,
         )
     _, wrong_secret = twin_and_client(secret="not-the-secret")
     with pytest.raises(PayNearMeRefused, match="Authentication failed"):
         await wrong_secret.add_card(
-            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
         )
     with pytest.raises(
         PayNearMeRefused, match="Authentication failed"
@@ -136,7 +146,7 @@ async def test_a_refusal_is_paynearmes_own_words() -> None:
             number="4111111111111111",
             exp_month=8,
             exp_year=2028,
-            cvc="1",
+            cvc="123",
             holder="M B",
             at=AT + timedelta(seconds=301),
         )
@@ -149,7 +159,7 @@ async def test_an_unreachable_or_failing_twin_is_unavailable() -> None:
     twin.unreachable = True
     with pytest.raises(PaymentsUnavailable, match="could not be reached"):
         await client.add_card(
-            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
         )
     await client.close()
     failing = PayNearMe(
@@ -160,7 +170,7 @@ async def test_an_unreachable_or_failing_twin_is_unavailable() -> None:
     )
     with pytest.raises(PaymentsUnavailable, match="502"):
         await failing.add_card(
-            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
         )
     await failing.close()
 
@@ -179,7 +189,7 @@ async def test_the_base_may_end_in_json_api_or_not(base: str) -> None:
 
     client = PayNearMe(base, SITE_IDENTIFIER, HMAC_SECRET, transport=httpx.MockTransport(handle))
     await client.add_card(
-        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
     )
     assert seen == ["https://twin.example/json-api/create_payment_method"]
     await client.close()
@@ -194,4 +204,83 @@ async def test_card_details_are_never_logged_or_kept(caplog) -> None:
     await client.pay(order=ORDER, method=card, amount_cents=100, at=AT)
     for text in (caplog.text, repr(card), repr(client.__dict__)):
         assert "4111111111111111" not in text and "987" not in text and HMAC_SECRET not in text
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("details", "words"),
+    [
+        (
+            {"number": "4111111111111112", "exp_month": 8, "exp_year": 2028, "cvc": "123"},
+            INVALID_CARD_NUMBER,
+        ),  # Luhn
+        (
+            {"number": "411111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "123"},
+            INVALID_CARD_NUMBER,
+        ),  # 15-digit Visa
+        ({"number": "4111111111111111", "exp_month": 10, "exp_year": 2026, "cvc": "123"}, EXPIRED_CARD),
+        (
+            {"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "12"},
+            INVALID_SECURITY_CODE,
+        ),
+        (
+            {"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "1234"},
+            INVALID_SECURITY_CODE,
+        ),
+        (
+            {"number": "378282246310005", "exp_month": 8, "exp_year": 2028, "cvc": "123"},
+            INVALID_SECURITY_CODE,
+        ),  # Amex: 4
+    ],
+)
+async def test_the_twins_card_validation_is_reported_in_its_words(details: dict, words: str) -> None:
+    twin, client = twin_and_client()
+    with pytest.raises(PayNearMeRefused) as refused:
+        await client.add_card(order=ORDER, holder="M B", at=AT, **details)
+    assert str(refused.value) == f"PayNearMe refused it: {words}"
+    assert twin.methods == {}
+    amex = await client.add_card(
+        order=ORDER, number="378282246310005", exp_month=8, exp_year=2028, cvc="1234", holder="M B", at=AT
+    )
+    assert (amex.brand, amex.last4) == ("American Express", "0005")
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("routing", "account", "words"),
+    [("110000001", "000123456789", INVALID_ROUTING_NUMBER), ("110000000", "123", INVALID_ACCOUNT_NUMBER)],
+)
+async def test_the_twins_bank_validation_is_reported_in_its_words(
+    routing: str, account: str, words: str
+) -> None:
+    _, client = twin_and_client()
+    with pytest.raises(PayNearMeRefused) as refused:
+        await client.add_bank_account(order=ORDER, routing=routing, account=account, holder="M B", at=AT)
+    assert str(refused.value) == f"PayNearMe refused it: {words}"
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("number", "exp_month", "exp_year", "code", "words"),
+    [
+        ("4000000000000002", 10, 2028, "05", "This card is not permitted to make this payment."),
+        (
+            "4000000000009995",
+            11,
+            2029,
+            "51",
+            "There are insufficient funds on this card to complete this payment.",
+        ),
+        ("4000000000000069", 11, 2031, "54", "This card is expired."),
+    ],
+)
+async def test_the_world_v2_test_cards_decline_as_the_twin_answers(
+    number: str, exp_month: int, exp_year: int, code: str, words: str
+) -> None:
+    _, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number=number, exp_month=exp_month, exp_year=exp_year, cvc="123", holder="M B", at=AT
+    )
+    paid = await client.pay(order=ORDER, method=card, amount_cents=10_000, at=AT)
+    assert (paid.status, paid.response_code, paid.response_message) == ("rejected", code, words)
     await client.close()
