@@ -456,14 +456,18 @@ vendors are compared under the same plumbing on both benches.
   filter: noise is a benchmark condition. The interruption
   stops the audio (`OutboundAudio.interrupted`), clears the vendor's
   TTS utterance (xAI `text.clear`), and silences the rest of the turn. The LLM
-  round it lands in still completes and its tool calls still run; the reply is
+  round it lands in still completes, and its tool calls are neither cancelled
+  nor delayed (each runs when the model makes it); the reply is
   kept in the history as the words the caller can have heard
   (`OutboundAudio.played_ms`), marked `… [interrupted by the caller]`.
 - **Playout.** TTS audio leaves in 0.5 s slices, at most 1 s ahead of real
   time (vendors synthesize faster than speech plays; audio already at the
   caller cannot be cut).
-- **Rounds.** Up to `MAX_TOOL_ROUNDS` (10, shared with LiveKit) per turn: a round's text is spoken as it streams, then
-  its tool calls run in order through `CallSession.dispatch`; a call whose
+- **Rounds.** Up to `MAX_TOOL_ROUNDS` (10, shared with LiveKit) per turn: a round's text is spoken as it streams, and
+  each of its tool calls runs as soon as the model makes it, while the words
+  play (as on OpenAI Realtime and LiveKit Agents), one at a time, in order,
+  through `CallSession.dispatch`; the next round starts once the words have
+  played and the calls have returned, and sees the results. A call whose
   arguments are not JSON is answered with an error, not run. When a tool ends
   the call, no round follows: the last words play and the line closes.
 
@@ -797,7 +801,8 @@ uv run ruff check . && uv run ruff format --check .
   ElevenLabs' per-call agent, always deleted, and its parameter descriptions; Fluxions' soul
   cap, full voice id, 16 kHz uplink and playback buffer), each with its hang-up timing.
 - `tests/test_cascade.py`: the shared in-pod cascade with scripted legs (`tests/cascade_fakes.py`):
-  callee first / agent first, rounds and tools, hang-up, barge-in (tools still run, history trimmed;
+  callee first / agent first, rounds and tools (each run when the model makes it, as the words play),
+  hang-up, barge-in (tools still run, history trimmed;
   `BargeInRule`: a blip does not pause, 0.5 s of speech pauses, a false interruption resumes, a turn interrupts),
   playout pacing; `SilenceEndpoint`; Silero on recorded speech (`tests/fixtures/caller_speech_24k.pcm`).
 - `tests/test_mistral.py`, `tests/test_huggingface.py`, `tests/test_grok_cascade.py`, `tests/test_gradium.py`:
