@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -168,7 +169,9 @@ class FakePayNearMe:
 
     def __init__(self, orders: list[dict[str, Any]], behaviors: list[dict[str, Any]], now: int) -> None:
         self.site_identifier, self.hmac_secret = SITE_IDENTIFIER, HMAC_SECRET
-        self.now = now  # the twin's virtual clock, epoch seconds
+        self.now = now  # the twin's virtual clock, epoch seconds, while it is frozen
+        #: A running clock instead (epoch seconds): a task's sandbox clock starts at its call_time and runs.
+        self.clock: Callable[[], int] | None = None
         self.orders = {o["pnm_order_identifier"]: o for o in orders}
         self.behaviors = {b["fingerprint"]: b for b in behaviors}
         self.methods: dict[str, dict[str, Any]] = {}
@@ -209,7 +212,7 @@ class FakePayNearMe:
 
     def _authentic(self, body: dict[str, Any]) -> bool:
         try:
-            timestamp_ok = abs(int(body.get("timestamp", 0)) - self.now) <= WINDOW_S
+            timestamp_ok = abs(int(body.get("timestamp", 0)) - self.virtual_now()) <= WINDOW_S
         except (TypeError, ValueError):
             timestamp_ok = False
         signed = hmac.compare_digest(str(body.get("signature", "")), signature(body, self.hmac_secret))
@@ -224,9 +227,13 @@ class FakePayNearMe:
         self._ids += 1
         return f"{prefix}{self._ids:010d}"
 
+    def virtual_now(self) -> int:
+        """The twin's clock now: running when a clock is set, else frozen at ``now``."""
+        return self.clock() if self.clock is not None else self.now
+
     def _expired(self, expiry: str) -> bool:
         month, year = (int(part) for part in expiry.split("/"))
-        today = datetime.fromtimestamp(self.now, UTC)
+        today = datetime.fromtimestamp(self.virtual_now(), UTC)
         return (year, month) < (today.year, today.month)
 
     def _create_payment_method(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -339,7 +346,7 @@ class FakePayNearMe:
         return {
             "status": "ok",
             "payment": {  # the twin's payment_json, field for field
-                "payment_made": str(self.now),
+                "payment_made": str(self.virtual_now()),
                 "payment_amount": _money(minor),
                 "payment_currency": "USD",
                 "payment_status": status,

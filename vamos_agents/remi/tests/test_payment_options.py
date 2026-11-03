@@ -19,9 +19,12 @@ from datetime import date, timedelta
 from importlib.resources import files
 from typing import Any
 
+import psycopg
 import pytest
 
+from vamos_agents.remi import db as remi_db
 from vamos_agents.remi.ledger import STATUS_WRITTEN_OFF
+from vamos_agents.remi.payments import PayNearMeRefused
 from vamos_agents.remi.tools import REGISTRY
 from vamos_voice.session import CallSession
 
@@ -35,6 +38,7 @@ from .support import (
     PAYMENT_OPTIONS,
     account_id,
     all_text,
+    app_dsn,
     compliance,
     rows,
     seed_world,
@@ -182,6 +186,31 @@ async def test_a_discount_paid_without_its_requirements_is_taken_and_the_world_r
     }
 
 
+async def test_the_agents_role_owns_nothing_the_world_protects(pg_dsn, make_session) -> None:
+    """Seeded as app_owner, the World gives Remi's role (app, in app_users) its tables and nothing of the policy
+    engine's: it reads no row of the compliance record and cannot run the engine's private functions. Remi needs
+    none of them: it calls only creditor_policy and request_approval."""
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    paid = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "discount_40"})
+    assert paid["status"] == "approved" and compliance(pg_dsn, "payment"), (
+        "the owner's view holds the verdicts"
+    )
+    with psycopg.connect(app_dsn(pg_dsn), autocommit=True) as app:
+        assert app.execute("select count(*) from policy_compliance").fetchone()[0] == 0
+        owners = app.execute(
+            "select distinct tableowner from pg_tables where schemaname = 'public'"
+        ).fetchall()
+        assert owners == [("app_owner",)]
+        for private in (
+            "select policy_settle('TAS-261101')",
+            "select policy_check('TAS-261101', 'payment', 'x', 'amount_on_policy', true, 'made up')",
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                app.execute(private)
+    assert {"creditor_policy", "request_approval"} == remi_db.POLICY_FUNCTIONS
+
+
 async def test_a_payment_before_verification_or_after_a_dispute_is_not_refused(pg_dsn, make_session) -> None:
     seed_world(pg_dsn)
     s = await make_session("STORE-04")
@@ -248,22 +277,34 @@ async def test_paynearmes_refusal_is_reported_and_nothing_is_recorded(pg_dsn, ma
     assert len(rows(pg_dsn, "payments")) == 1 and len(support.PAYNEARME.payments) == 1
 
 
-async def test_requests_are_signed_with_the_worlds_clock(pg_dsn, make_session, ticks) -> None:
-    """The twin refuses a timestamp more than 300 s from its virtual clock: Remi signs with the call's."""
+async def test_requests_are_signed_with_the_call_clock_and_another_time_is_refused(
+    pg_dsn, make_session, ticks
+) -> None:
+    """The task's sandbox clock starts at its call_time and runs; the twin refuses a timestamp more than 300 s from
+    it. Remi signs with the call's clock (call_time plus the time elapsed), so it stays in step however long the
+    call runs, and a request signed with any other time is refused."""
     seed_world(pg_dsn)
     s = await make_session("HOSP-01")
     call_time = support.context("HOSP-01").call_time
-    ticks.t += 42
-    await card(s)
-    operation, body = support.PAYNEARME.requests[-1]
-    assert operation == "create_payment_method"
-    assert int(body["timestamp"]) == int(call_time.timestamp()) + 42 and body["version"] == "3.0"
-    ticks.t += 300
-    late = await s.dispatch(
-        "add_payment_method",
-        {"method": "card", "card_number": GOOD_CARD[0], "exp_month": 8, "exp_year": 2028, "cvc": "123"},
-    )
-    assert late == {"error": "PayNearMe refused it: Authentication failed"}
+    assert support.TASK_CLOCKS["HOSP-01"] == {"start_at": call_time.isoformat(), "mode": "live"}
+    ticks.t += 1000  # both clocks run: 16 minutes into the call
+    method_id = await card(s)
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
+    assert paid["status"] == "approved"
+    signed = [int(body["timestamp"]) for _, body in support.PAYNEARME.requests]
+    assert signed == [int(call_time.timestamp()) + 1000] * 2
+    client = s.state.payments
+    for other in (call_time, call_time + timedelta(seconds=1000 + 301)):  # the call's start; 301 s ahead
+        with pytest.raises(PayNearMeRefused, match="Authentication failed"):
+            await client.add_card(
+                order="922611070001",
+                number=GOOD_CARD[0],
+                exp_month=8,
+                exp_year=2028,
+                cvc="123",
+                holder="D K",
+                at=other,
+            )
 
 
 async def test_card_numbers_go_only_to_paynearme(pg_dsn, make_session, caplog) -> None:

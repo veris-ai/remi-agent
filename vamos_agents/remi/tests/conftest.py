@@ -57,20 +57,24 @@ def paynearme_client() -> PayNearMe:
 @pytest.fixture
 async def make_session(pg_dsn: str, ticks: ManualClock) -> AsyncIterator[Callable[..., CallSession]]:
     """Build the framework's CallSession around a RemiCall on a pilot task's hand-off (seed first with
-    ``support.seed_world``): the exact dispatch path a real call takes. The twin's virtual clock is the
-    call's time, as the World freezes it."""
+    ``support.seed_world``): the exact dispatch path a real call takes, as the app login, which owns
+    nothing. The PayNearMe twin's clock is the task's sandbox clock: it starts at the task's start_at (its
+    call_time) and runs, here with the test's monotonic clock, as the call's own clock does."""
     opened: list[Database] = []
     clients: list[PayNearMe] = []
 
     async def build(task: str = "CARD-04") -> CallSession:
-        db = await Database.connect(app_dsn(pg_dsn))  # as the app login, which owns nothing
+        db = await Database.connect(app_dsn(pg_dsn))
         opened.append(db)
         ctx = support.context(task)
-        support.PAYNEARME.now = int(ctx.call_time.timestamp())
-        payments = paynearme_client()
-        clients.append(payments)
+        start = support.clock_start(task)
+        assert start == ctx.call_time, (task, start, ctx.call_time)
         clock = CallClock(ctx.call_time, monotonic=ticks)
         clock.start()
+        started = ticks.t
+        support.PAYNEARME.clock = lambda: int(start.timestamp() + (ticks.t - started))
+        payments = paynearme_client()
+        clients.append(payments)
         call = RemiCall(ctx, clock, db, support.LEDGER, payments)
         return CallSession(call, RemiAgent.tools, RemiAgent.gates)
 

@@ -2,7 +2,7 @@
  "schema_version": 1,
  "world_id": "tallmere-collections-world-v2",
  "call_date": "2026-11-03",
- "content_hash": "sha256:67c541e4ba4b8b54bebc84f8da4367c17c05fb65a76d744342bd9c6319f16875",
+ "content_hash": "sha256:cff15051d2a55d387d9d486750ea0260acaa552f4d2af99d1cfe1859e9afea86",
  "postgres": {
   "agency": [
    {
@@ -1756,6 +1756,56 @@
    "account_id": "TAS-261112",
    "phone_id": "ph_261112_1",
    "call_time": "2026-11-03T17:05:00-05:00"
+  }
+ },
+ "task_clocks": {
+  "CARD-04": {
+   "start_at": "2026-11-03T11:20:00-05:00",
+   "mode": "live"
+  },
+  "CARD-09": {
+   "start_at": "2026-11-03T16:05:00-05:00",
+   "mode": "live"
+  },
+  "STORE-01": {
+   "start_at": "2026-11-03T10:40:00-05:00",
+   "mode": "live"
+  },
+  "STORE-04": {
+   "start_at": "2026-11-03T13:30:00-05:00",
+   "mode": "live"
+  },
+  "PHONE-02": {
+   "start_at": "2026-11-03T17:50:00-05:00",
+   "mode": "live"
+  },
+  "PHONE-08": {
+   "start_at": "2026-11-03T14:45:00-05:00",
+   "mode": "live"
+  },
+  "HOSP-01": {
+   "start_at": "2026-11-03T12:10:00-05:00",
+   "mode": "live"
+  },
+  "HOSP-10": {
+   "start_at": "2026-11-03T14:15:00-05:00",
+   "mode": "live"
+  },
+  "AUTO-03": {
+   "start_at": "2026-11-03T18:20:00-05:00",
+   "mode": "live"
+  },
+  "AUTO-05": {
+   "start_at": "2026-11-03T15:35:00-05:00",
+   "mode": "live"
+  },
+  "LAW-05": {
+   "start_at": "2026-11-03T10:15:00-05:00",
+   "mode": "live"
+  },
+  "LAW-17": {
+   "start_at": "2026-11-03T17:05:00-05:00",
+   "mode": "live"
   }
  }
 }

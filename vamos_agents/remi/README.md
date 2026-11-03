@@ -239,8 +239,10 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   instruments, each pilot task's hand-off), and the reviewed policy tool's output
   for the twelve pilot accounts (`payment_options/`). Resync with
   `tests/fixtures/resync_world.sh <benchmark repo checkout> [ref]`. Remi never
-  imports the benchmark repo. The tests seed as the owner and connect Remi as a
-  login that owns nothing.
+  imports the benchmark repo. The tests seed the World as the Postgres twin's seed
+  door does (as `app_owner`, then every table granted to `app_users`) and connect
+  Remi as `app`, which owns nothing the World protects; PayNearMe's clock starts at
+  each task's call time and runs.
 - `tests/test_payment_options.py`: `get_payment_options` byte for byte for every
   pilot account; the supervisor's answers; payments on PayNearMe recorded and
   posted, a discount's rest written off; declines and PayNearMe's refusals as

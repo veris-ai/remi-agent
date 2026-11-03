@@ -8,13 +8,16 @@ no fake database (the World's SQL, its policy engine included, is under test).
 The World is vendored in ``fixtures/``: ``collections_world.sql`` (schema, the
 creditors' policy engine, rows: its header names the benchmark repo commit) and
 ``world_v2_manifest.json`` (the Fineract loans, the PayNearMe orders and test
-instruments, each pilot task's hand-off). ``seed_world`` loads the whole World
-and rebuilds ``LEDGER`` (``fake_ledger.FakeLedger``, the World's Fineract as
-Remi relies on it) and ``PAYNEARME`` (``fake_paynearme.FakePayNearMe``, the
-twin's vendor API) from the manifest. The DSN the fixtures hand out is the
-owner's, for seeding and inspecting; Remi itself connects as ``APP_ROLE``, a
-login that owns nothing, as the deployed agent role does not own the policy
-engine's record either.
+instruments, each pilot task's hand-off and clock). ``seed_world`` loads the
+whole World as the Postgres twin's seed door does (WORLD.md, "Who can touch
+it"): the SQL runs as ``OWNER_ROLE`` (``app_owner``), then the candidate's group
+(``app_users``) gets every privilege on every table, and Remi connects as
+``APP_ROLE`` (``app``, in that group), which owns nothing the World protects:
+it reads no row of the policy engine's record and cannot run its private
+functions. Seeding also rebuilds ``LEDGER`` (``fake_ledger.FakeLedger``, the
+World's Fineract as Remi relies on it) and ``PAYNEARME``
+(``fake_paynearme.FakePayNearMe``, the twin's vendor API) from the manifest. The
+DSN the fixtures hand out is a superuser's, for seeding and inspecting.
 """
 
 from __future__ import annotations
@@ -49,10 +52,13 @@ PAYMENT_OPTIONS = {p.stem: p.read_text() for p in sorted((FIXTURES / "payment_op
 CALL_DATE = date.fromisoformat(MANIFEST["call_date"])
 #: Each pilot task's hand-off, as the bench stamps it.
 CONTEXTS: dict[str, dict[str, str]] = MANIFEST["agent_contexts"]
+#: Each pilot task's sandbox clock: it starts at the task's call_time and runs (the platform's start_at).
+TASK_CLOCKS: dict[str, dict[str, str]] = MANIFEST["task_clocks"]
 TASK_OF_ACCOUNT = {c["account_id"]: task for task, c in CONTEXTS.items()}
 CONTEXT_JSON = json.dumps(CONTEXTS["CARD-04"])
 
-APP_ROLE, APP_PASSWORD = "remi_app", "remi_app"
+#: The World's owner, the candidate's group, and Remi's own login in it (the Postgres twin's roles).
+OWNER_ROLE, GROUP_ROLE, APP_ROLE, APP_PASSWORD = "app_owner", "app_users", "app", "app"
 
 # World v1's test instruments, on PayNearMe (World v2 WORLD.md, "Payments: PayNearMe").
 GOOD_CARD = ("4111111111111111", 8, 2028, "123")
@@ -61,6 +67,13 @@ DECLINED_CARD = ("4000000000000002", 10, 2028, "123")
 EXPIRED_CARD = ("4000000000000069", 11, 2031, "123")
 GOOD_BANK = ("110000000", "000123456789")
 INVALID_BANK = ("110000000", "000222222227")
+
+
+def clock_start(task: str) -> datetime:
+    """When the task's sandbox clock starts (it then runs): the platform's start_at."""
+    clock = TASK_CLOCKS[task]
+    assert clock["mode"] == "live", clock
+    return datetime.fromisoformat(clock["start_at"])
 
 
 def context(task: str) -> CallContext:
@@ -136,31 +149,43 @@ PAYNEARME = FakePayNearMe.from_manifest(MANIFEST)
 
 
 def seed_world(dsn: str, *, sql: str = "") -> None:
-    """Reset the database and load World v2 as the bench seeds it (schema, policy engine, rows), then
-    ``sql`` (a test's own change to the World, run as the owner); rebuild the ledger and PayNearMe."""
+    """Reset the database and load World v2 as the twin's seed door does: the schema, the policy engine and the
+    rows run as the owner, then ``sql`` (a test's own change to the World, also as the owner), then the
+    candidate's group gets every privilege on every table. Rebuild the ledger and PayNearMe."""
     global LEDGER, PAYNEARME
     LEDGER = FakeLedger.from_manifest(MANIFEST)
     PAYNEARME = FakePayNearMe.from_manifest(MANIFEST)
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("drop schema public cascade; create schema public;")
+        _roles(conn)
+        conn.execute("drop schema public cascade")
+        conn.execute(f"create schema public authorization {OWNER_ROLE}")
+        conn.execute(f"set role {OWNER_ROLE}")
         conn.execute(DATABASE_SQL)
         conn.execute(ROWS_SQL)
         if sql:
             conn.execute(sql)
-        _grant_app(conn)
+        conn.execute("reset role")
+        conn.execute(
+            f"grant usage on schema public to {GROUP_ROLE}; "
+            f"grant all privileges on all tables in schema public to {GROUP_ROLE};"
+        )
 
 
-def _grant_app(conn: psycopg.Connection) -> None:
-    """The app login Remi uses: the agency's tables, and the World's functions (executable by anyone)."""
+def _roles(conn: psycopg.Connection) -> None:
+    """The twin's roles: the World's owner, the candidate's group, and Remi's login in that group."""
     conn.execute(
         f"""
         do $$ begin
+          if not exists (select from pg_roles where rolname = '{OWNER_ROLE}') then
+            create role {OWNER_ROLE};
+          end if;
+          if not exists (select from pg_roles where rolname = '{GROUP_ROLE}') then
+            create role {GROUP_ROLE};
+          end if;
           if not exists (select from pg_roles where rolname = '{APP_ROLE}') then
-            create role {APP_ROLE} login password '{APP_PASSWORD}';
+            create role {APP_ROLE} login password '{APP_PASSWORD}' in role {GROUP_ROLE};
           end if;
         end $$;
-        grant usage on schema public to {APP_ROLE};
-        grant select, insert, update, delete on all tables in schema public to {APP_ROLE};
         """
     )
 
