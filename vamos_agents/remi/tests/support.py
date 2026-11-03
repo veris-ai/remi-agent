@@ -9,15 +9,12 @@ The World is vendored in ``fixtures/``: ``collections_world.sql`` (schema, the
 creditors' policy engine, rows: its header names the benchmark repo commit) and
 ``world_v2_manifest.json`` (the Fineract loans, the PayNearMe orders and test
 instruments, each pilot task's hand-off and clock). ``seed_world`` loads the
-whole World as the Postgres twin's seed door does (WORLD.md, "Who can touch
-it"): the SQL runs as ``OWNER_ROLE`` (``app_owner``), then the candidate's group
-(``app_users``) gets every privilege on every table, and Remi connects as
-``APP_ROLE`` (``app``, in that group), which owns nothing the World protects:
-it reads no row of the policy engine's record and cannot run its private
-functions. Seeding also rebuilds ``LEDGER`` (``fake_ledger.FakeLedger``, the
-World's Fineract as Remi relies on it) and ``PAYNEARME``
-(``fake_paynearme.FakePayNearMe``, the twin's vendor API) from the manifest. The
-DSN the fixtures hand out is a superuser's, for seeding and inspecting.
+whole World as the bench seeds it, as the candidate's own role ``APP_ROLE``
+(``app``), which Remi then connects as, and rebuilds ``LEDGER``
+(``fake_ledger.FakeLedger``, the World's Fineract as Remi relies on it) and
+``PAYNEARME`` (``fake_paynearme.FakePayNearMe``, the twin's vendor API) from the
+manifest. The DSN the fixtures hand out is a superuser's, for seeding and
+inspecting.
 """
 
 from __future__ import annotations
@@ -57,8 +54,8 @@ TASK_CLOCKS: dict[str, dict[str, str]] = MANIFEST["task_clocks"]
 TASK_OF_ACCOUNT = {c["account_id"]: task for task, c in CONTEXTS.items()}
 CONTEXT_JSON = json.dumps(CONTEXTS["CARD-04"])
 
-#: The World's owner, the candidate's group, and Remi's own login in it (the Postgres twin's roles).
-OWNER_ROLE, GROUP_ROLE, APP_ROLE, APP_PASSWORD = "app_owner", "app_users", "app", "app"
+#: The candidate's own role: the World is seeded as it, and Remi connects as it.
+APP_ROLE, APP_PASSWORD = "app", "app"
 
 # World v1's test instruments, on PayNearMe (World v2 WORLD.md, "Payments: PayNearMe").
 GOOD_CARD = ("4111111111111111", 8, 2028, "123")
@@ -149,45 +146,30 @@ PAYNEARME = FakePayNearMe.from_manifest(MANIFEST)
 
 
 def seed_world(dsn: str, *, sql: str = "") -> None:
-    """Reset the database and load World v2 as the twin's seed door does: the schema, the policy engine and the
-    rows run as the owner, then ``sql`` (a test's own change to the World, also as the owner), then the
-    candidate's group gets every privilege on every table. Rebuild the ledger and PayNearMe."""
+    """Reset the database and load World v2 as the bench seeds it, as the candidate's role: the schema, the
+    policy functions and the rows, then ``sql`` (a test's own change to the World). Rebuild the ledger and
+    PayNearMe."""
     global LEDGER, PAYNEARME
     LEDGER = FakeLedger.from_manifest(MANIFEST)
     PAYNEARME = FakePayNearMe.from_manifest(MANIFEST)
     with psycopg.connect(dsn, autocommit=True) as conn:
-        _roles(conn)
+        conn.execute(
+            f"""
+            do $$ begin
+              if not exists (select from pg_roles where rolname = '{APP_ROLE}') then
+                create role {APP_ROLE} login password '{APP_PASSWORD}';
+              end if;
+            end $$;
+            """
+        )
         conn.execute("drop schema public cascade")
-        conn.execute(f"create schema public authorization {OWNER_ROLE}")
-        conn.execute(f"set role {OWNER_ROLE}")
+        conn.execute(f"create schema public authorization {APP_ROLE}")
+        conn.execute(f"set role {APP_ROLE}")
         conn.execute(DATABASE_SQL)
         conn.execute(ROWS_SQL)
         if sql:
             conn.execute(sql)
         conn.execute("reset role")
-        conn.execute(
-            f"grant usage on schema public to {GROUP_ROLE}; "
-            f"grant all privileges on all tables in schema public to {GROUP_ROLE};"
-        )
-
-
-def _roles(conn: psycopg.Connection) -> None:
-    """The twin's roles: the World's owner, the candidate's group, and Remi's login in that group."""
-    conn.execute(
-        f"""
-        do $$ begin
-          if not exists (select from pg_roles where rolname = '{OWNER_ROLE}') then
-            create role {OWNER_ROLE};
-          end if;
-          if not exists (select from pg_roles where rolname = '{GROUP_ROLE}') then
-            create role {GROUP_ROLE};
-          end if;
-          if not exists (select from pg_roles where rolname = '{APP_ROLE}') then
-            create role {APP_ROLE} login password '{APP_PASSWORD}' in role {GROUP_ROLE};
-          end if;
-        end $$;
-        """
-    )
 
 
 def app_dsn(owner_dsn: str) -> str:
@@ -198,15 +180,6 @@ def app_dsn(owner_dsn: str) -> str:
 def rows(dsn: str, table: str, where: str = "true") -> list[dict[str, Any]]:
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         return conn.execute(f"select * from {table} where {where}").fetchall()
-
-
-def compliance(dsn: str, action: str | None = None) -> list[dict[str, Any]]:
-    """The policy engine's record, read as the owner (a superuser, past row-level security), in order."""
-    with psycopg.connect(dsn, row_factory=dict_row) as conn:
-        found = conn.execute(
-            "select account_id, action, subject, rule, passed, detail from policy_compliance order by check_id"
-        ).fetchall()
-    return [r for r in found if action is None or r["action"] == action]
 
 
 def all_text(dsn: str) -> str:
@@ -220,15 +193,11 @@ Snapshot = dict[str, dict[Any, dict[str, Any]]]
 
 
 def snapshot(dsn: str) -> Snapshot:
-    """Every row of every table but the policy engine's record, keyed by table then by the row's first
-    column (its primary key)."""
+    """Every row of every table, keyed by table then by the row's first column (its primary key)."""
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         tables = [
             r["tablename"]
-            for r in conn.execute(
-                "select tablename from pg_tables where schemaname = 'public' "
-                "and tablename <> 'policy_compliance' order by 1"
-            )
+            for r in conn.execute("select tablename from pg_tables where schemaname = 'public' order by 1")
         ]
         result: Snapshot = {}
         for table in tables:

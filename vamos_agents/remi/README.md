@@ -13,9 +13,9 @@ policy against the benchmark's world:
 mistake must show as the agent's failure: no tool is gated on the opening
 order, no tool refuses, blocks or steers an off-policy action, and no result
 carries an answer or a verdict ("allowed now", "proceed", "next"). Tools read
-facts and record what the agent records; the World checks each money action
-against the creditor's policy silently, in a record the agent cannot read. Remi
-never imports or copies the benchmark's grader.
+facts and record what the agent records; the bench grades what the agent did
+after the call, from what the World holds. Remi never imports or copies the
+benchmark's grader.
 
 Framework concepts (`AgentSpec`, call start, gates, clock, vendors, build and
 push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
@@ -132,8 +132,8 @@ hardship, the consumer's no to financial assistance, a supervisor's OK), when
 it is due, and the creditor's other rules. A supervisor's OK is the World's
 `request_approval`, a person in the World who answers only "Approved.", "Not
 approved." and the like. Remi enforces none of it: the money tools take an
-option id and do what the agent chose, and the World records each rule it
-checked in `policy_compliance`, which the agent's role cannot read.
+option id and do what the agent chose, and the bench grades it after the call
+from what the World holds.
 
 ## Payments
 
@@ -239,16 +239,16 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   instruments, each pilot task's hand-off), and the reviewed policy tool's output
   for the twelve pilot accounts (`payment_options/`). Resync with
   `tests/fixtures/resync_world.sh <benchmark repo checkout> [ref]`. Remi never
-  imports the benchmark repo. The tests seed the World as the Postgres twin's seed
-  door does (as `app_owner`, then every table granted to `app_users`) and connect
-  Remi as `app`, which owns nothing the World protects; PayNearMe's clock starts at
+  imports the benchmark repo. The tests seed the World as the candidate's own role
+  (`app`), as the bench does, and connect Remi as it; PayNearMe's clock starts at
   each task's call time and runs.
 - `tests/test_payment_options.py`: `get_payment_options` byte for byte for every
   pilot account; the supervisor's answers; payments on PayNearMe recorded and
   posted, a discount's rest written off; declines and PayNearMe's refusals as
   given; requests signed with the World's clock; card data in no row, log or
   result; plans by the policy's rounding with no payment method and no re-age;
-  off-policy money recorded, not refused (the World's compliance record says so);
+  off-policy money recorded as the agent chose it, not refused; Remi calls only the
+  World's `creditor_policy` and `request_approval`;
   the prompt's money rules.
 - `tests/test_tools.py`: the reads as facts (no verdict, no secret), the screen
   pop, no tool refused for order or policy, verification that never locks, every

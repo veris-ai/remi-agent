@@ -6,8 +6,8 @@ ledger and its PayNearMe as test doubles: ``get_payment_options`` is the reviewe
 byte for byte for every pilot account; ``request_approval`` answers only what the supervisor said; a
 payment is PayNearMe's answer, recorded in ``payments`` and posted to the ledger keyed by PayNearMe's
 payment id; a plan is the months the agent chose, its amounts by the policy's rounding, with no
-payment method. Off-policy money is recorded as the agent did it, and the World's silent compliance
-record (which the agent cannot read) says so.
+payment method. Off-policy money is recorded as the agent did it; the bench grades it after the call
+from what the World holds.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from datetime import date, timedelta
 from importlib.resources import files
 from typing import Any
 
-import psycopg
 import pytest
 
 from vamos_agents.remi import db as remi_db
@@ -38,8 +37,6 @@ from .support import (
     PAYMENT_OPTIONS,
     account_id,
     all_text,
-    app_dsn,
-    compliance,
     rows,
     seed_world,
 )
@@ -58,10 +55,6 @@ async def card(s: CallSession, details: tuple[str, int, int, str] = GOOD_CARD) -
     )
     assert "error" not in saved, saved
     return saved["method_id"]
-
-
-def _rules(dsn: str, action: str, subject: str) -> dict[str, bool]:
-    return {r["rule"]: r["passed"] for r in compliance(dsn, action) if r["subject"] == subject}
 
 
 # --- the policy, verbatim -----------------------------------------------------------------------
@@ -155,7 +148,6 @@ async def test_a_discount_paid_on_the_call_is_paynearmes_payment_recorded_posted
         "status": "approved",
     }
     assert (row["response_code"], row["payment_type"], row["last4"]) == ("0", "card", "1111")
-    assert set(_rules(pg_dsn, "payment", payment["id"]).values()) == {True}
     ledger = support.LEDGER
     assert [w[0] for w in ledger.writes] == ["repayment", "writeoff"]
     assert ledger.writes[0][1] == {
@@ -170,45 +162,23 @@ async def test_a_discount_paid_on_the_call_is_paynearmes_payment_recorded_posted
     )
 
 
-async def test_a_discount_paid_without_its_requirements_is_taken_and_the_world_records_it(
-    pg_dsn, make_session
-) -> None:
-    """Nothing refuses the agent: no hardship and no OK, PayNearMe charges, the World notes it silently."""
+async def test_a_discount_paid_without_its_requirements_is_taken_and_recorded(pg_dsn, make_session) -> None:
+    """Nothing refuses the agent: no hardship and no OK on record, and PayNearMe charges the discount; what the
+    agent did is in the World for the bench to grade after the call."""
     seed_world(pg_dsn)
     s = await make_session("CARD-04")
     paid = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "discount_40"})
-    assert paid["status"] == "approved"
-    assert _rules(pg_dsn, "payment", paid["payment_id"]) == {
-        "within_balance": True,
-        "amount_on_policy": True,
-        "requirement:hardship": False,
-        "requirement:supervisor_ok": False,
-    }
+    assert (paid["status"], paid["amount"]) == ("approved", "$1,440.00")
+    assert [(r["amount_cents"], r["status"]) for r in rows(pg_dsn, "payments")] == [(144_000, "approved")]
+    assert rows(pg_dsn, "account_flags") == [] and rows(pg_dsn, "approval_requests") == []
 
 
-async def test_the_agents_role_owns_nothing_the_world_protects(pg_dsn, make_session) -> None:
-    """Seeded as app_owner, the World gives Remi's role (app, in app_users) its tables and nothing of the policy
-    engine's: it reads no row of the compliance record and cannot run the engine's private functions. Remi needs
-    none of them: it calls only creditor_policy and request_approval."""
+async def test_remi_calls_only_creditor_policy_and_request_approval(pg_dsn, make_session) -> None:
     seed_world(pg_dsn)
     s = await make_session("CARD-04")
-    paid = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "discount_40"})
-    assert paid["status"] == "approved" and compliance(pg_dsn, "payment"), (
-        "the owner's view holds the verdicts"
-    )
-    with psycopg.connect(app_dsn(pg_dsn), autocommit=True) as app:
-        assert app.execute("select count(*) from policy_compliance").fetchone()[0] == 0
-        owners = app.execute(
-            "select distinct tableowner from pg_tables where schemaname = 'public'"
-        ).fetchall()
-        assert owners == [("app_owner",)]
-        for private in (
-            "select policy_settle('TAS-261101')",
-            "select policy_check('TAS-261101', 'payment', 'x', 'amount_on_policy', true, 'made up')",
-        ):
-            with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                app.execute(private)
     assert {"creditor_policy", "request_approval"} == remi_db.POLICY_FUNCTIONS
+    with pytest.raises(ValueError, match="not one of the World's policy functions"):
+        await s.state.db.policy_function("policy_new_id", {"prefix": "apr_"})
 
 
 async def test_a_payment_before_verification_or_after_a_dispute_is_not_refused(pg_dsn, make_session) -> None:
@@ -406,7 +376,6 @@ async def test_a_down_payment_then_the_plan_the_agent_chose(pg_dsn, make_session
     assert (row["kind"], row["total_cents"], row["method_id"]) == ("plan", 94_500, None)
     assert [i["amount_cents"] for i in row["instalments"]] == [9_450] * 10
     assert [r["kind"] for r in rows(pg_dsn, "letters")] == ["plan_confirmation"]
-    assert set(_rules(pg_dsn, "arrangement", row["arrangement_id"]).values()) == {True}
     assert [w[0] for w in support.LEDGER.writes] == ["repayment"]
 
 
@@ -435,9 +404,9 @@ async def test_an_off_policy_plan_is_recorded_as_the_agent_chose_it(pg_dsn, make
         "create_arrangement", {"option_id": "payment_plan", "months": 60, "first_due_on": late}
     )
     assert plan["recorded"] == "plan" and len(plan["instalments"]) == 60
-    rules = _rules(pg_dsn, "arrangement", plan["arrangement_id"])
-    assert rules["plan_months"] is False and rules["plan_first_due_within_30_days"] is False
-    assert rules["plan_minimum_monthly"] is True and rules["plan_payment_amounts"] is True
+    (row,) = rows(pg_dsn, "arrangements")
+    assert len(row["instalments"]) == 60 and row["instalments"][0]["due_on"] == late, "as the agent chose it"
+    assert sum(i["amount_cents"] for i in row["instalments"]) == row["total_cents"] == 240_000
 
 
 async def test_a_discount_agreement_is_one_payment_of_its_amount(pg_dsn, make_session) -> None:
@@ -451,7 +420,6 @@ async def test_a_discount_agreement_is_one_payment_of_its_amount(pg_dsn, make_se
     )  # fmt: skip
     (row,) = rows(pg_dsn, "arrangements")
     assert (row["kind"], row["total_cents"], row["method_id"]) == ("settlement_lump", 51_200, None)
-    assert set(_rules(pg_dsn, "arrangement", row["arrangement_id"]).values()) == {True}
 
 
 async def test_an_unknown_option_is_a_fact_not_a_verdict(pg_dsn, make_session) -> None:

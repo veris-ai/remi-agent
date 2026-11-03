@@ -5,8 +5,8 @@ nothing here enforces the creditor's policy, and nothing refuses, blocks or
 steers a decision about money. The agent names one of the options the World's
 policy lists (``get_payment_options``: ``pif``, ``payment_plan``,
 ``discount_<pct>``) and the amount is that option's, never a free amount; what
-the agent chooses is done and recorded, and the World checks it against the
-policy silently, in a record the agent cannot read.
+the agent chooses is done and recorded, and the bench grades it after the call
+from what the World holds.
 
 - ``add_payment_method`` tokenizes the consumer's card or bank account on the
   account's PayNearMe order. Card and bank numbers are declared ``redact`` (never

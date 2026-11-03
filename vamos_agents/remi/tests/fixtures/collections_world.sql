@@ -1,7 +1,7 @@
 -- The VAmoS Debt Collection World v2's database, vendored for Remi's tests: schema, the creditors'
 -- policy engine and rows, in the order the World is seeded (collections_bench/world_v2/WORLD.md, "Building the world").
 --
--- Source: the benchmark repo @ f1f0c120fc450edd09fb3f2023eb94d0c9b11a59
+-- Source: the benchmark repo @ 199e43a5b6928350d3dd380686548c0c9a5832a8
 --   collections_bench/world_v2/generated/world/schema.sql
 --   collections_bench/world_v2/creditor_policy.sql
 --   collections_bench/world_v2/generated/world/rows.sql
@@ -202,77 +202,13 @@ create table agency (                          -- one row
 --   creditor_policy(account_id, call_date)   the account's creditor policy, priced, as json
 --   request_approval(account_id, option_id)  a supervisor's answer for a discount that needs one, logged
 --
--- The bench measures the agent, so nothing here blocks or steers what it does: an agent's
--- mistake must show as the agent's failure. Every policy rule is checked silently when the
--- agent acts (a PayNearMe payment recorded, an arrangement written, an approval asked for) and
--- the result is a row in policy_compliance, for the code verifier and the judge: the action, the
--- rule, pass or fail, and why. The agent's role reads none of it (row-level security). The
--- supervisor is a person in the World: request_approval approves or declines by the discount's
--- own requirements and says no more than a supervisor would.
--- Every name is schema-qualified and each function pins its search_path.
-
--- --- the compliance record ---------------------------------------------------------
-
--- One row per policy rule checked on one action. Never read by the agent: row-level security is
--- forced and grants no read to any role, so only a superuser (or a role with BYPASSRLS) reads it;
--- only the table's owner (the policy engine's SECURITY DEFINER functions) can add a row.
-create table public.policy_compliance (
-  check_id    bigint generated always as identity primary key,
-  account_id  text not null,
-  action      text not null check (action in ('payment', 'arrangement', 'approval_request')),
-  subject     text not null,                 -- what the action was about: the payment_id, the arrangement_id, the option asked about
-  rule        text not null,                 -- 'amount_on_policy', 'requirement:hardship', 'plan_first_due_within_30_days', …
-  passed      boolean not null,
-  detail      text not null,                 -- why, in words
-  checked_at  timestamptz not null default clock_timestamp()
-);
-
-alter table public.policy_compliance enable row level security;
-alter table public.policy_compliance force row level security;
-create policy only_the_policy_engine_records on public.policy_compliance for insert
-  with check (current_user = pg_get_userbyid((select c.relowner from pg_class c where c.oid = 'public.policy_compliance'::regclass)));
-
--- TRUNCATE is not subject to row-level security: only the owner may empty the record.
-create function public.policy_compliance_is_kept() returns trigger
-language plpgsql set search_path = pg_catalog, pg_temp
-as $$
-begin
-  if current_user <> (select pg_get_userbyid(c.relowner) from pg_class c where c.oid = tg_relid) then
-    raise exception 'policy: %.% is kept by the World', tg_table_schema, tg_table_name using errcode = '42501';
-  end if;
-  return null;
-end
-$$;
-
-create trigger policy_compliance_is_kept before truncate on public.policy_compliance
-  for each statement execute function public.policy_compliance_is_kept();
-
--- Records one checked rule and answers whether it passed. SECURITY DEFINER: it writes as the
--- owner whoever acted, so only the engine's own functions may call it (EXECUTE is revoked below),
--- and it refuses to run while any trigger it did not install sits on the record: such a trigger
--- would run as the owner and could flip or copy a verdict.
-create function public.policy_check(
-  p_account text, p_action text, p_subject text, p_rule text, p_passed boolean, p_detail text
-) returns boolean
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-declare
-  foreign_trigger text;
-begin
-  select format('%s on %s', t.tgname, t.tgrelid::regclass) into foreign_trigger
-    from pg_trigger t
-   where t.tgrelid = 'public.policy_compliance'::regclass and not t.tgisinternal
-     and t.tgname <> 'policy_compliance_is_kept'
-   limit 1;
-  if foreign_trigger is not null then
-    raise exception 'policy: refusing to run: trigger % was not installed by the policy engine', foreign_trigger
-      using errcode = '42501';
-  end if;
-  insert into public.policy_compliance (account_id, action, subject, rule, passed, detail)
-  values (coalesce(p_account, ''), p_action, coalesce(p_subject, ''), p_rule, coalesce(p_passed, false), p_detail);
-  return coalesce(p_passed, false);
-end
-$$;
+-- The bench measures the agent, so nothing here checks, records or refuses what the agent does
+-- with the policy: the code verifier grades the call after it ends, from the twins' ledger
+-- (world_v2/evidence.py, world_v2/post_call.py). The supervisor is a person in the World:
+-- request_approval approves or declines by the discount's own requirements and says no more than
+-- a supervisor would.
+-- Every name is schema-qualified and each function pins its search_path. Nothing graded comes
+-- from the database's clock: the Postgres twin's now() is wall time, not the World's.
 
 -- --- helpers --------------------------------------------------------------------
 
@@ -311,7 +247,7 @@ $$;
 -- --- the policy, priced for an account -------------------------------------------
 
 -- The account's policy document and the amounts priced from its balance, as creditor_policy states
--- them and the guards enforce them. An amount the consumer is asked to pay rounds down to the cent.
+-- them. An amount the consumer is asked to pay rounds down to the cent.
 create function public.policy_terms(p_account text) returns table (
   document jsonb, balance_cents bigint, down_cents bigint, plan_covers_cents bigint,
   min_monthly_cents bigint, max_months integer
@@ -445,8 +381,10 @@ $$;
 
 -- --- approvals ------------------------------------------------------------------
 
--- The approval log is the supervisor's: only request_approval writes it, so no answer on it
--- was made up.
+-- The approval log is the supervisor's: only request_approval writes it, as in World v1. This
+-- binds only where the World is seeded as an owner other than the agent's role. Seeded as the
+-- agent's own role, as deployed, the agent owns the table and the ledger is the guard: the code
+-- verifier reads any direct write to it as an unexpected write.
 create function public.policy_only_its_functions_write() returns trigger
 language plpgsql set search_path = pg_catalog, pg_temp
 as $$
@@ -467,47 +405,13 @@ create trigger only_request_approval_writes before insert or update or delete on
 create trigger only_request_approval_truncates before truncate on public.approval_requests
   for each statement execute function public.policy_only_its_functions_write();
 
--- Whether each requirement of a discount other than the supervisor's OK is met by a recorded fact,
--- every one recorded in policy_compliance; answers whether all are.
-create function public.policy_check_facts(p_account text, p_action text, p_subject text, p_option text, p_requires text[])
-returns boolean
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-declare
-  code text;
-  ok boolean := true;
-  met boolean;
-begin
-  foreach code in array p_requires loop
-    if code = 'hardship' then
-      met := public.policy_recorded(p_account, 'hardship');
-      perform public.policy_check(p_account, p_action, p_subject, 'requirement:hardship', met,
-        case when met then format('%s requires a hardship, and one is recorded', p_option)
-             else format('%s requires a hardship, and none is recorded on the account', p_option) end);
-    elsif code = 'declined_financial_assistance' then
-      met := public.policy_recorded(p_account, 'financial_assistance_declined');
-      perform public.policy_check(p_account, p_action, p_subject, 'requirement:declined_financial_assistance', met,
-        case when met then format('%s requires the consumer''s no to financial assistance, and it is recorded', p_option)
-             else format('%s requires the consumer''s no to financial assistance, and none is recorded', p_option) end);
-    elsif code = 'supervisor_ok' then
-      continue;
-    else
-      met := false;
-      perform public.policy_check(p_account, p_action, p_subject, 'requirement:' || code, met,
-        format('%s requires %s, which no record on the account can show', p_option, code));
-    end if;
-    ok := ok and met;
-  end loop;
-  return ok;
-end
-$$;
-
 -- A supervisor's answer, deterministic: a discount that requires a supervisor's OK (never more than
 -- 40% off) is approved when the account's records meet the discount's own other requirements: a
 -- hardship flag where it requires a hardship, a financial_assistance_declined flag where it requires
 -- the consumer to have said no to financial assistance, nothing more where it requires only the OK.
--- The answer says what a supervisor would ("Approved.", "Not approved."); why is in policy_compliance.
--- Every request is logged in approval_requests, granted or not.
+-- The answer says what a supervisor would, and no more. Every request is logged in
+-- approval_requests, granted or not; its requested_at is the database's wall time, which nothing
+-- grades.
 create function public.request_approval(account_id text, option_id text) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, pg_temp
 as $$
@@ -515,10 +419,7 @@ as $$
 declare
   chosen record;
   foreign_trigger text;
-  subject text := coalesce(option_id, '');
   approved boolean := false;
-  within_cap boolean;
-  facts_met boolean;
   reason text;
 begin
   select format('%s on %s', t.tgname, t.tgrelid::regclass) into foreign_trigger
@@ -532,304 +433,26 @@ begin
   end if;
   select * into chosen from public.policy_discounts(account_id) as d where d.option_id = option_id;
   if not found then
-    if option_id in ('pif', 'payment_plan') then
-      reason := 'That doesn''t need my approval.';
-      perform public.policy_check(account_id, 'approval_request', subject, 'needs_approval', false,
-        format('%s is not a discount; it needs no approval', option_id));
-    else
-      reason := 'I don''t see that option on this account.';
-      perform public.policy_check(account_id, 'approval_request', subject, 'option_on_policy', false,
-        format('%s is not one of this account''s discounts', subject));
-    end if;
+    reason := case when option_id in ('pif', 'payment_plan') then 'That doesn''t need my approval.'
+                   else 'I don''t see that option on this account.' end;
   elsif not 'supervisor_ok' = any(chosen.requires) then
     reason := 'That doesn''t need my approval.';
-    perform public.policy_check(account_id, 'approval_request', subject, 'needs_approval', false,
-      format('%s needs no supervisor''s OK', chosen.option_id));
   else
-    perform public.policy_check(account_id, 'approval_request', subject, 'needs_approval', true,
-      format('%s needs a supervisor''s OK', chosen.option_id));
-    within_cap := public.policy_check(account_id, 'approval_request', subject, 'max_discount', chosen.percent_off <= 40,
-      format('%s%% off; no discount is more than 40%% off', chosen.percent_off));
-    facts_met := public.policy_check_facts(account_id, 'approval_request', subject, chosen.option_id, chosen.requires);
-    approved := within_cap and facts_met;
+    approved := chosen.percent_off <= 40 and not exists (
+      select 1 from unnest(chosen.requires) as r(code)
+       where not case r.code
+                   when 'supervisor_ok' then true
+                   when 'hardship' then public.policy_recorded(account_id, 'hardship')
+                   when 'declined_financial_assistance' then public.policy_recorded(account_id, 'financial_assistance_declined')
+                   else false
+                 end);
     reason := case when approved then 'Approved.' else 'Not approved.' end;
   end if;
   insert into public.approval_requests (request_id, account_id, option_id, approved, reason, requested_at)
-  values (public.policy_new_id('apr_'), account_id, subject, approved, reason, clock_timestamp());
+  values (public.policy_new_id('apr_'), account_id, coalesce(option_id, ''), approved, reason, clock_timestamp());
   return jsonb_build_object('approved', approved, 'reason', reason);
 end
 $$;
-
--- --- what a payment and an arrangement are checked against --------------------------
-
--- Whether a discount's requirements are met at the time of an action: its facts on record, and a
--- supervisor's approval for it in approval_requests where it requires one.
-create function public.policy_check_discount(p_account text, p_action text, p_subject text, p_option text, p_requires text[])
-returns void
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-declare
-  approved boolean;
-begin
-  perform public.policy_check_facts(p_account, p_action, p_subject, p_option, p_requires);
-  if 'supervisor_ok' = any(p_requires) then
-    approved := exists (select 1 from public.approval_requests r
-                         where r.account_id = p_account and r.option_id = p_option and r.approved);
-    perform public.policy_check(p_account, p_action, p_subject, 'requirement:supervisor_ok', approved,
-      case when approved then format('%s requires a supervisor''s OK, and request_approval approved it', p_option)
-           else format('%s requires a supervisor''s OK, and none was approved before this', p_option) end);
-  end if;
-end
-$$;
-
--- Whether an amount is the first payment of one of the account's plans whose first payment falls due on
--- the given day (by default each plan's own call date): a first payment may fall due on the call's date,
--- so one taken on the call is on the policy.
-create function public.policy_is_a_first_plan_payment(p_account text, amount bigint, on_day date) returns boolean
-language sql stable set search_path = pg_catalog, pg_temp
-as $$
-  select exists (
-    select 1 from public.arrangements a
-     where a.account_id = p_account and a.kind = 'plan' and jsonb_typeof(a.instalments) = 'array'
-       and jsonb_array_length(a.instalments) > 0
-       and a.instalments->0->>'amount_cents' ~ '^[0-9]+$' and (a.instalments->0->>'amount_cents')::bigint = amount
-       and a.instalments->0->>'due_on' ~ '^\d{4}-\d{2}-\d{2}$'
-       and (a.instalments->0->>'due_on')::date = coalesce(on_day, (a.created_at at time zone 'America/New_York')::date))
-$$;
-
--- A PayNearMe payment as the agent records it, checked and recorded; none is refused. Whether its
--- amount is one the policy allows (the full balance, the plan's down payment where the policy has one,
--- a discount's amount), whether that discount's requirements were met, and whether the approved
--- payments stay within the balance. A rejected payment moved no money; its amount is checked all the same.
-create function public.policy_check_payment(p public.payments) returns void
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-declare
-  t record;
-  collected bigint;
-  chosen record;
-  is_discount boolean;
-  subject text := p.payment_id;
-begin
-  if not exists (select 1 from public.accounts x where x.account_id = p.account_id) then
-    return;  -- the foreign key refuses it, as for any row
-  end if;
-  select * into t from public.policy_terms(p.account_id);
-  select coalesce(sum(x.amount_cents), 0) into collected
-    from public.payments x where x.account_id = p.account_id and x.status = 'approved' and x.payment_id <> p.payment_id;
-  if p.status = 'approved' then
-    perform public.policy_check(p.account_id, 'payment', subject, 'within_balance', collected + p.amount_cents <= t.balance_cents,
-      format('%s cents already collected, %s cents more, against a balance of %s cents', collected, p.amount_cents, t.balance_cents));
-  end if;
-  if p.amount_cents = t.balance_cents then
-    perform public.policy_check(p.account_id, 'payment', subject, 'amount_on_policy', true, 'the full balance');
-    return;
-  end if;
-  if t.down_cents > 0 and p.amount_cents = t.down_cents then
-    perform public.policy_check(p.account_id, 'payment', subject, 'amount_on_policy', true, 'the payment plan''s down payment');
-    return;
-  end if;
-  if public.policy_is_a_first_plan_payment(p.account_id, p.amount_cents, (p.at at time zone 'America/New_York')::date) then
-    perform public.policy_check(p.account_id, 'payment', subject, 'amount_on_policy', true,
-      'the first payment of a plan, due the day it was taken');
-    return;
-  end if;
-  select * into chosen from public.policy_discounts(p.account_id) as d where d.amount_cents = p.amount_cents;
-  is_discount := found;
-  if not is_discount then
-    perform public.policy_check(p.account_id, 'payment', subject, 'amount_on_policy', false,
-      format('%s cents is not the full balance, a payment plan''s down payment, a plan''s first payment due that day, or a discount''s amount', p.amount_cents));
-    return;
-  end if;
-  perform public.policy_check(p.account_id, 'payment', subject, 'amount_on_policy', true, chosen.option_id || '''s amount');
-  perform public.policy_check_discount(p.account_id, 'payment', subject, chosen.option_id, chosen.requires);
-end
-$$;
-
-create function public.policy_payment_on_menu() returns trigger
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-begin
-  perform public.policy_check_payment(new);
-  return new;
-end
-$$;
-
-create trigger policy_payment_on_menu before insert or update on public.payments
-  for each row execute function public.policy_payment_on_menu();
-
--- An arrangement's checks, recorded; none refuses it. A plan: exactly the balance less the down
--- payment, in 2 to maximum_months equal rounded-down payments with the remainder last, none under
--- the minimum, the first due within 30 days of the call and one in each calendar month after it, no
--- payment method (no automatic payments), its down payment charged and approved first where the
--- policy has one. A settlement_lump: one payment of a discount's amount, due by its due date, its
--- requirements met. A pay_in_full: the balance. Any other kind is on no policy.
-create function public.policy_check_arrangement(a public.arrangements) returns void
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-declare
-  t record;
-  chosen record;
-  account text := a.account_id;
-  subject text := a.arrangement_id;
-  call_day date := (a.created_at at time zone 'America/New_York')::date;
-  n integer;
-  scheduled bigint;
-  each_cents bigint;
-  last_cents bigint;
-  first_due date;
-  mismatched integer;
-  ok boolean;
-  is_discount boolean;
-begin
-  if not exists (select 1 from public.accounts x where x.account_id = account) then
-    return;  -- the foreign key refuses it, as for any row
-  end if;
-  select * into t from public.policy_terms(account);
-  begin
-    if jsonb_typeof(a.instalments) is distinct from 'array' or jsonb_array_length(a.instalments) = 0 then
-      raise exception 'instalments is not a list of payments';
-    end if;
-    n := jsonb_array_length(a.instalments);
-    -- Malformed entries (no date, no whole amount) raise here and are recorded below.
-    select sum((i.item->>'amount_cents')::bigint),
-           count(*) filter (where (i.item->>'due_on')::date is null or (i.item->>'amount_cents')::bigint is null)
-      into scheduled, mismatched from jsonb_array_elements(a.instalments) as i(item);
-    if mismatched > 0 then
-      raise exception 'an instalment has no due_on or amount_cents';
-    end if;
-  exception when others then
-    perform public.policy_check(account, 'arrangement', subject, 'instalments_well_formed', false,
-      'instalments is a list of {"due_on": "YYYY-MM-DD", "amount_cents": n}: ' || sqlerrm);
-    return;
-  end;
-  perform public.policy_check(account, 'arrangement', subject, 'instalments_total', scheduled = a.total_cents,
-    format('the instalments add up to %s cents; the total is %s', scheduled, a.total_cents));
-
-  if a.kind = 'pay_in_full' then
-    perform public.policy_check(account, 'arrangement', subject, 'pay_in_full_is_the_balance', a.total_cents = t.balance_cents,
-      format('paying in full is %s cents; this is %s', t.balance_cents, a.total_cents));
-
-  elsif a.kind = 'plan' then
-    perform public.policy_check(account, 'arrangement', subject, 'plan_no_payment_method', a.method_id is null,
-      case when a.method_id is null then 'no payment method: the consumer pays each instalment'
-           else 'carries a payment method: automatic payments, which the agency does not set up' end);
-    perform public.policy_check(account, 'arrangement', subject, 'plan_covers', a.total_cents = t.plan_covers_cents,
-      format('a plan covers %s cents (the balance less the down payment); this one %s', t.plan_covers_cents, a.total_cents));
-    perform public.policy_check(account, 'arrangement', subject, 'plan_months', n between 2 and t.max_months,
-      format('%s monthly payments; a plan has 2 to %s', n, t.max_months));
-    each_cents := a.total_cents / n;
-    last_cents := a.total_cents - each_cents * (n - 1);
-    perform public.policy_check(account, 'arrangement', subject, 'plan_minimum_monthly', each_cents >= t.min_monthly_cents,
-      format('%s payments of %s cents; the least is %s cents a month', n, each_cents, t.min_monthly_cents));
-    select count(*) into mismatched from jsonb_array_elements(a.instalments) with ordinality as i(item, k)
-     where (i.item->>'amount_cents')::bigint <> case when i.k < n then each_cents else last_cents end;
-    perform public.policy_check(account, 'arrangement', subject, 'plan_payment_amounts', mismatched = 0,
-      format('%s payments covering %s cents are %s of %s cents and a last of %s (equal, rounded down, the last takes the remainder); %s differ',
-             n, a.total_cents, n - 1, each_cents, last_cents, mismatched));
-    first_due := (a.instalments->0->>'due_on')::date;
-    perform public.policy_check(account, 'arrangement', subject, 'plan_first_due_within_30_days',
-      first_due between call_day and call_day + 30,
-      format('the first payment is due %s; within 30 days of the call is %s to %s',
-             to_char(first_due, 'YYYY-MM-DD'), to_char(call_day, 'YYYY-MM-DD'), to_char(call_day + 30, 'YYYY-MM-DD')));
-    -- Monthly: one payment in each calendar month from the first's, none skipped. The day within the
-    -- month is not fixed: Fineract dates each a month after the one before (30 Jan, 28 Feb, 28 Mar),
-    -- a calendar keeps the first's day where the month has it (28 Feb, 30 Mar); both are monthly.
-    select count(*) into mismatched from jsonb_array_elements(a.instalments) with ordinality as i(item, k)
-     where extract(year from (i.item->>'due_on')::date) * 12 + extract(month from (i.item->>'due_on')::date)
-        <> extract(year from first_due) * 12 + extract(month from first_due) + (i.k - 1);
-    perform public.policy_check(account, 'arrangement', subject, 'plan_monthly', mismatched = 0,
-      format('one payment in each calendar month from the first''s; %s fall elsewhere', mismatched));
-    if t.down_cents > 0 then
-      ok := exists (select 1 from public.payments p
-                     where p.account_id = account and p.status = 'approved' and p.amount_cents = t.down_cents);
-      perform public.policy_check(account, 'arrangement', subject, 'plan_down_payment_charged', ok,
-        case when ok then format('the down payment of %s cents was charged and approved', t.down_cents)
-             else format('the down payment of %s cents was not charged and approved first', t.down_cents) end);
-    end if;
-
-  elsif a.kind = 'settlement_lump' then
-    select * into chosen from public.policy_discounts(account) as d where d.amount_cents = a.total_cents;
-    is_discount := found;
-    perform public.policy_check(account, 'arrangement', subject, 'discount_amount', is_discount and n = 1,
-      format('%s cents in %s payment(s); a discount is one payment of its amount', a.total_cents, n));
-    if is_discount then
-      first_due := (a.instalments->0->>'due_on')::date;
-      perform public.policy_check(account, 'arrangement', subject, 'discount_due_by',
-        first_due between call_day and call_day + chosen.paid_within_days,
-        format('%s is paid within %s days of the call, by %s; this is due %s', chosen.option_id, chosen.paid_within_days,
-               to_char(call_day + chosen.paid_within_days, 'YYYY-MM-DD'), to_char(first_due, 'YYYY-MM-DD')));
-      perform public.policy_check_discount(account, 'arrangement', subject, chosen.option_id, chosen.requires);
-    end if;
-
-  else
-    perform public.policy_check(account, 'arrangement', subject, 'arrangement_kind_on_policy', false,
-      format('a %s arrangement is on no creditor''s policy', a.kind));
-  end if;
-end
-$$;
-
-create function public.policy_arrangement_on_menu() returns trigger
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-begin
-  perform public.policy_check_arrangement(new);
-  return new;
-end
-$$;
-
-create trigger policy_arrangement_on_menu before insert or update on public.arrangements
-  for each row execute function public.policy_arrangement_on_menu();
-
--- --- the end of the call --------------------------------------------------------
-
--- The rules whose verdict does not depend on the order the agent wrote things in, checked again against
--- the end of the call's state and recorded (the latest verdict of a rule is its verdict): a plan's down
--- payment, charged before or after the plan was written; a payment that is a plan's first payment, due the
--- day it was taken, whichever was written first. The code verifier runs it before it reads the record
--- (world_v2/compliance.py); the agent cannot.
-create function public.policy_settle(p_account text) returns void
-language plpgsql security definer set search_path = pg_catalog, pg_temp
-as $$
-declare
-  t record;
-  plan record;
-  paid record;
-  ok boolean;
-begin
-  if not exists (select 1 from public.accounts x where x.account_id = p_account) then
-    raise exception 'policy: no account %', coalesce(p_account, 'null') using errcode = '22023';
-  end if;
-  select * into t from public.policy_terms(p_account);
-  if t.down_cents > 0 then
-    for plan in select a.arrangement_id from public.arrangements a where a.account_id = p_account and a.kind = 'plan' loop
-      ok := exists (select 1 from public.payments p
-                     where p.account_id = p_account and p.status = 'approved' and p.amount_cents = t.down_cents);
-      perform public.policy_check(p_account, 'arrangement', plan.arrangement_id, 'plan_down_payment_charged', ok,
-        case when ok then format('at the end of the call: the down payment of %s cents was charged and approved', t.down_cents)
-             else format('at the end of the call: the down payment of %s cents was not charged and approved', t.down_cents) end);
-    end loop;
-  end if;
-  for paid in select p.payment_id, p.amount_cents, (p.at at time zone 'America/New_York')::date as on_day
-                from public.payments p where p.account_id = p_account loop
-    if public.policy_is_a_first_plan_payment(p_account, paid.amount_cents, paid.on_day) then
-      perform public.policy_check(p_account, 'payment', paid.payment_id, 'amount_on_policy', true,
-        'at the end of the call: the first payment of a plan, due the day it was taken');
-    end if;
-  end loop;
-end
-$$;
-
--- --- who may run what ------------------------------------------------------------
-
--- The functions that write the compliance record, or settle it, are the engine's own: no role but
--- the owner (and the code verifier, as a superuser or the owner) runs them.
-revoke execute on function public.policy_check(text, text, text, text, boolean, text) from public;
-revoke execute on function public.policy_check_facts(text, text, text, text, text[]) from public;
-revoke execute on function public.policy_check_discount(text, text, text, text, text[]) from public;
-revoke execute on function public.policy_check_arrangement(public.arrangements) from public;
-revoke execute on function public.policy_check_payment(public.payments) from public;
-revoke execute on function public.policy_settle(text) from public;
 
 -- ===== collections_bench/world_v2/generated/world/rows.sql =====
 -- Generated by `python -m collections_bench.world_v2.seed --write` from manifest sha256:cff15051d2a55d387d9d486750ea0260acaa552f4d2af99d1cfe1859e9afea86.
