@@ -3,13 +3,19 @@
 Remi is the debt-collection voice agent, the **candidate under test** for the
 **VAmoS Debt Collection** benchmark on Veris Bench. It works for Tallmere
 Account Services, LLC, places **outbound** calls to consumers in New York
-City, and must apply the benchmark's policy against the benchmark's world:
+City, and must apply the law, the agency's policy manual and each creditor's
+policy against the benchmark's world:
 
-- Policy: the benchmark's `RULES.md` (not public; the rules Remi follows are summarised in the root [README](../../README.md#what-remi-does))
-- World: the benchmark's `WORLD.md` (not public): a Postgres collections database, with the payment gateway inside it (no Stripe: Stripe does not serve debt collection agencies), and a Fineract ledger holding every account's money
+- Policy: the prompt (`prompt/instructions.md`: the law on debts past the time to sue, and the agency's manual, each rule with its legal source) and, for each account, its creditor's policy, which the World prices for the call (`get_payment_options`)
+- World: the benchmark's World v2 (not public): a Postgres collections database, a Fineract ledger holding every account's money, and PayNearMe for payments (no Stripe: Stripe does not serve debt collection agencies)
 
-Remi reads those documents' rules into its own code (`policy.py`, the gates,
-the prompt). It never imports or copies the benchmark's grader.
+**Nothing refuses the agent.** The bench measures the agent, so an agent's
+mistake must show as the agent's failure: no tool is gated on the opening
+order, no tool refuses, blocks or steers an off-policy action, and no result
+carries an answer or a verdict ("allowed now", "proceed", "next"). Tools read
+facts and record what the agent records; the World checks each money action
+against the creditor's policy silently, in a record the agent cannot read. Remi
+never imports or copies the benchmark's grader.
 
 Framework concepts (`AgentSpec`, call start, gates, clock, vendors, build and
 push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
@@ -20,108 +26,65 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 |---|---|---|
 | `name` | `remi` (images `bench-e2e/remi-<vendor>`) | `agent.py` |
 | `call_start` | `callee_first()`: Remi waits for whoever answers to speak first | `agent.py` |
-| `screen_pop` | the three connect reads (`get_account`, `get_dialed_phone`, `get_contact_history`) run by Remi itself when the call connects, before any vendor session opens; rendered as "Account on screen" in the instructions | `screen_pop.py` |
+| `screen_pop` | the connect-time reads (`get_account`, `get_debt_details`, `get_dialed_phone`, `get_contact_history`) run by Remi itself when the call connects, before any vendor session opens; rendered as "Account on screen" in the instructions | `screen_pop.py` |
 | context view | `VERIS_AGENT_CONTEXT` → `CallContext(account_id TAS-NNNNNN, phone_id, call_time in Eastern)`; missing or malformed stops the pod | `context.py` |
-| `call_time()` | the context's `call_time` (World frozen at 2027-02-10) | `agent.py` |
-| `instructions(clock)` | RULES.md distilled into `prompt/instructions.md`, rendered with the call's date and the agency row | `prompt/` |
-| `tools` | 20 tools (below) | `tools/` |
-| `gates` | `Gate` ladder NONE → ASSESSED → PROCEEDING → VERIFIED → DEBT_UNLOCKED, plus a collection stop on tools tagged `collection` (collection stopped, or the call transferred to a person) | `gates.py`, `call.py` |
-| per-call state | `RemiCall`: connect reads, assessment, verification, outcomes; the call's one `contact_attempts` row, written once when the call ends (`end_call`, or `finalize()` the moment the caller hangs up) | `call.py` |
-| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`; the creditor's decision engine (`menu.py`: `payment_options`, `request_approval`) and `PaymentGateway`, the client for the World's gateway functions, on that same database; `FineractLedger` (async httpx, timeouts) from `FINERACT_API_BASE` and its credentials, for the money | `db.py`, `payments.py`, `ledger.py` |
-| rules | RULES.md's numbers and calendar as pure functions | `policy.py` |
-
-## The opening, enforced
-
-RULES.md fixes the order of a call's opening, and the gates refuse anything
-early with a message saying what must happen first:
-
-1. Connect reads: account, dialed phone, contact history, done by the screen
-   pop (below) before anyone speaks. The last read returns `call_assessment`:
-   proceed, or should-not-call with reasons
-   (closed status, revoked or missing artificial-voice consent, phone not valid,
-   employer phone, 3-in-7 cap, responded this
-   week, time-barred notice not yet 14 days old, outside 8 a.m.–9 p.m. ET).
-2. Right party: the consumer's name as the person said it or said yes to (a
-   first name is enough; a surname, if said, must match) + two of date of
-   birth / ZIP / SSN last four, which may come one at a time. Each
-   `verify_right_party` call adds the facts that matched; the call state keeps
-   the count. Compared server-side (the model never holds the secrets); three
-   wrong answers (a wrong name or fact) lock. Before verification Remi says
-   only RULES.md's permitted statements (its name, the business, automated
-   assistant, a personal business matter for the consumer, why it must check
-   (their privacy), whether now is a good time, the number on file, the
-   callback number, that anything in writing goes to the address on file);
-   never the debt, an amount, money or "your account". A refusal to verify is
-   its own ending (`record_verification_refused` → `refused_verification`), and
-   an unverified "stop calling" stops the number, not the account
-   (`stop_calling_this_number` → consent revoked, `unverified_stop_request`
-   flag, `unverified_stop`). A wrong number marks the phone `wrong_number`
-   (`report_wrong_number`); its consent is revoked only if the person also
-   asked to stop calling it.
-3. Disclosures: recording, mini-Miranda, and when due the time-barred
-   disclosure and the alternative-format statement. The successful
-   `verify_right_party` result carries them, in order, with their wording
-   (`disclosures_due`; the recording notice and mini-Miranda verbatim), and the
-   prompt says they come next, conversationally, before anything about the
-   account. They are attested as `get_debt_details` arguments (so they appear
-   in the trace, in order).
-   Calls are English-only: there is no language step, Remi never writes
-   `consumers.language_preference`, the prompt holds every word to English
-   whatever the callee's name, and each vendor that takes a language setting
-   has it pinned to English (AGENTS.md section 10).
-4. Only then the debt, offers and payments (`get_payment_options` and every
-   money tool need the debt unlocked). A dispute, cease, attorney,
-   bankruptcy, death or SCRA claim stops collection for the rest of the call.
+| `call_time()` | the context's `call_time` (the World's day is 2026-11-03) | `agent.py` |
+| `instructions(clock)` | `prompt/instructions.md`, rendered with the call's date and the agency row | `prompt/` |
+| `tools` | 22 tools (below) | `tools/` |
+| `gates` | none: Remi's `Gates` refuses nothing | `gates.py` |
+| per-call state | `RemiCall`: the reads, what verification established, what the agent recorded; the call's one `contact_attempts` row, written once when the call ends (`end_call`, or `finalize()` the moment the caller hangs up) | `call.py` |
+| world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`, with the World's `creditor_policy` and `request_approval`; `FineractLedger` (async httpx, timeouts) from `FINERACT_API_BASE` and its credentials, for the money; `PayNearMe` (async httpx, signed requests) from `PAYNEARME_API_BASE` and the site's credentials, for payments | `db.py`, `ledger.py`, `payments.py` |
+| records | how Remi writes what the agent did: business days, a plan's payments, dollars, one disposition per call | `policy.py` |
 
 ## The screen pop (call start)
 
 A collector's dialer shows the account when the call connects; Remi's does
-too. `screen_pop.screen_pop(call)` runs the three connect-read handlers (the
-tools' own code and SQL) on the call's `RemiCall`, through Remi's database
-connection, so:
+too. `screen_pop.screen_pop(call)` runs the connect-read handlers (the tools'
+own code) on the call's `RemiCall`, so:
 
 - the reads are Remi's SELECTs on `accounts`, `phones` and `contact_attempts`
-  in the World's SQL log, before any vendor session opens and so before the
-  first spoken turn (the grader accepts these or the tool calls);
-- the call's account, phone, history and assessment are set, so the gates
-  start past the connect reads (verification is next, or the should-not-call
-  close);
+  in the World's SQL log, and its read of the account's Fineract loan, before
+  any vendor session opens and so before the first spoken turn;
 - the model gets the results as an "Account on screen" section at the end of
   its instructions, identical on every vendor: who is being called (and that
-  the agency's callback contact is not that person), the assessment, then each
-  read's result exactly as the tool returns it. Those results carry no date of
-  birth, ZIP, SSN or street: verification stays server-side in
+  the agency's callback contact is not that person), then each read's result
+  exactly as the tool returns it: the account's status and creditor, the date
+  the time to sue ends, the loan's date and the notices' dates, a phone
+  account's phone and service parts, a hospital account's treatment date, an
+  auto deficiency's car, sale date and price, the balance and its itemization
+  since its basis, the dialed phone's consent, and the contact history as
+  recorded. No verdict (nothing says whether the call may continue), and no
+  date of birth, ZIP, SSN or street: verification stays server-side in
   `verify_right_party`.
 
-The three read tools stay registered (ungated): the model may re-read, and if
-the screen pop ever fails (it is logged and the call goes on without it), the
-instructions tell the model to run them and the gates name any read missing.
-Remi still decides from what the screen shows (should-not-call, cap reached,
-cease on file) and still says nothing it may not.
+A read that fails shows as its error and the rest still show; a screen pop
+that fails is logged and the call goes on without it. The read tools stay
+registered for re-reads.
 
 ## Tools
 
-| Tool | Gate | What it does |
-|---|---|---|
-| `get_account`, `get_dialed_phone`, `get_contact_history` | none | Connect-time reads, already run by the screen pop; kept for re-reads and as the fallback if it failed. No DOB, ZIP, SSN, street, balance or creditor in the result. |
-| `verify_right_party` | proceeding | Consumer: the name they said or confirmed (first name enough) + 2 facts, incrementally; returns the state (`name_confirmed`, `facts_confirmed`, `still_needed`, `attempts_left`), never which fact failed. `estate_rep`: full name only (deceased consumer). On success, `disclosures_due` lists the disclosures owed next, in order, with their wording. |
-| `record_verification_refused` | proceeding | The person declined to verify: no disclosure, and the call's disposition is `refused_verification` (`answered_by` null), not `failed_verification`. |
-| `record_flag` | proceeding (consumer only, except `deceased`) | cease, channel_optout, attorney, bankruptcy, deceased, scra, hardship, original_creditor_request: flag, letter, status and consent changes in one transaction. A cease or opt-out from an unverified person is refused and pointed at `stop_calling_this_number`. Fields must be what the person said: placeholders ("unknown", "the caller") are refused. `deceased`: the reporter's name and relationship; `died_on` only as they gave it (refused if today or later, or before birth), otherwise recorded without a date, and recording it again later completes the flag and `deceased_on`. `scra`: the branch is required, and `log_contact_attempt` / `end_call` are refused until `transfer_to_human` (RULES.md: record `scra` and transfer). |
-| `report_wrong_number` | proceeding (unverified only) | The number is not the consumer's: phone `status` `wrong_number` at once; consent revoked only with `asked_to_stop_calling` (the person asked to stop, not merely "wrong number"). Disposition `wrong_number`; verification is refused afterwards. |
-| `stop_calling_this_number` | proceeding (unverified only) | Revokes consent on the dialed phone and records an `unverified_stop_request` flag with its `phone_id` (disposition `unverified_stop`); after `report_wrong_number` it only revokes the consent (no flag). Never touches the account's status; verification is refused afterwards. |
-| `log_dispute` | verified | dispute (including `insurance`) or medical financial assistance; collection stops. |
-| `get_debt_details` | verified | Needs the disclosure attestations; returns creditor, last four, balance and itemization (no offer limits: what may be offered is `get_payment_options`), every amount in dollars (`"$1,430.00"`). The balance and itemization are the ledger's, read now (the account's Fineract loan and its `tas_itemization` row). |
-| `get_payment_options` | debt unlocked, `collection` | The creditor's menu (below), as the World's decision engine answers it now: the ordered ladder in dollars with each `option_id`, plan terms, a settlement's `pay_by`, and a `status` on any option the rules still lock (no settlement allowed, hardship not recorded on this call, approval needed or denied); and `rules`, the creditor policy's own plain-English rules (what to offer first, what to ask, what unlocks each option), passed through verbatim from the World, never reworded, filtered or added to. Never a percentage or a limit. A menu without a non-empty list of rules is malformed and refused. Refused (and logged) if the menu's balance is not the ledger's. |
-| `request_approval` | debt unlocked, `collection` | `option_id` of an approval tier: asks the World (`request_approval`, which logs the answer); only after the hardship is recorded when the creditor requires one; a decision is kept for the call (a denied tier is never chargeable). |
-| `add_payment_method` | debt unlocked, `collection` | Card or ACH to `gateway_tokenize_card` / `gateway_tokenize_ach`; returns `method_id` and last four; every card/bank field redacted. |
-| `take_payment` | debt unlocked, `collection` | `method_id` + `option_id`, no amount: `pif` (the ledger's balance, no menu read), a settlement option, or a plan option's down payment; anything the menu does not list, or locks, is refused before the gateway. Then `gateway_charge` on a method saved this call. One charge per call: reserved before the first await (a concurrent duplicate is refused), kept once the gateway approves (posted or not), released only on a decline or a charge that never happened. Approved: the charge is posted to the account's loan (a repayment carrying the gateway's `payment_id`, so a retry posts once) and a settlement's rest is written off and its `settlement_lump` agreement recorded (a World refusal of that record is logged and returned as `settlement_record`, the charge itself being done); no `accounts` row changes. The result states that the consumer has not heard the outcome yet (`consumer_has_heard: false`), and, if the ledger could not be reached after two tries, that the payment was taken but not posted (logged). Declined: the decline code and reason go to the model, the method is not charged again, and it falls back to another card, ACH or a promise. |
-| `create_arrangement` | debt unlocked, `collection` | A plan `option_id` + `method_id` + `first_due_on` (within 30 days): the loan is re-aged to the option's months (`reAge`) and the agreement is recorded with the ledger's own schedule (equal to the cent, the last instalment absorbing the difference). If that schedule is not the option's monthly amount, or the agreement cannot be recorded, the re-age is undone. A plan with a down payment needs its `take_payment` first, and the balance after it. Charged to a `method_id` saved this call. |
-| `record_promise` | debt unlocked, `collection` | `pif` or a settlement `option_id` (the amount is the option's), on an exact date ≤14 days out and by a settlement's `pay_by`; the same menu checks as `take_payment`. |
-| `schedule_callback` | verified | 8 a.m.–<9 p.m. ET. |
-| `queue_letter` | verified | Idempotent per call. |
-| `transfer_to_human` | proceeding | On request, or when nothing on the creditor's menu fits (including "can't pay" with no settlement allowed), or SCRA. Disposition `transferred` (by WORLD.md's precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
-| `log_contact_attempt` | assessed | Before the goodbye: who answered and a plain summary (again to replace it). The row is written when the call ends, from everything recorded by then: time, duration and disposition from the session and the clock, and a summary that leads with the facts the session recorded (disposition, who answered, whether the debt was read and after which attested disclosures, outcomes, a transfer), then the model's notes. `answered_by` is what the call established: the verified party, `wrong_number` after `report_wrong_number`, `third_party` for an unverified person who reported a death, null after a refusal or an unverified stop. |
-| `end_call` | assessed | Requires the log; writes the contact row, then the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
+| Tool | What it does |
+|---|---|
+| `get_account`, `get_dialed_phone`, `get_contact_history` | Connect-time reads, already run by the screen pop; facts only: the account (status, creditor and store, dates, the time to sue's end and whether it has passed, balance parts, treatment date, car and sale), the dialed phone (consent and when it was revoked, status), the contact history as recorded (times in Eastern). No counts against a limit, no assessment. |
+| `get_debt_details` | The debt from the ledger, now: creditor, last four, balance, the itemization from its basis (`charge_off`, `placement`, `sale`) with interest, fees and payments since, the validation notice's date, the time to sue's end and whether it has passed. Every amount in dollars (`"$1,430.00"`). |
+| `verify_right_party` | The name the person said or confirmed (a first name is enough) and any of date of birth, ZIP and SSN last four, compared server-side; facts count as they come. Returns whether this answer matched, what is confirmed, how many are needed and how many wrong answers there have been, never which fact failed. `estate_rep`: an executor's full name. Nothing locks. |
+| `record_verification_refused` | The person declined to verify (disposition `refused_verification` when nobody verified). |
+| `log_dispute` | A dispute in the consumer's own words (`details.words`); the account is marked `disputed` and the letter on asking for proof in writing is queued. |
+| `record_flag` | `cease` (status `cease`, confirmation letter), `channel_optout`, `attorney`, `bankruptcy`, `deceased` (status, the date of death on the consumer), `scra`, `hardship` (in the consumer's own words), `original_creditor_request` (returns the name and address on file; a letter when there is no address), `language_preference` (an ISO 639-1 code), `financial_assistance_wanted`, `financial_assistance_declined`. Recorded as the agent passes them, whoever is on the line. |
+| `report_wrong_number` | The dialed phone's status `wrong_number`. |
+| `stop_calling_this_number` | An `unverified_stop_request` flag naming the dialed number, for review. |
+| `revoke_consent` | Revokes the dialed number's artificial-voice consent (a cease or a stop request does not by itself). |
+| `get_payment_options` | The World's `creditor_policy(account_id, call_date)`, verbatim: the creditor and how it is named, the balance, the options (`pif`, `payment_plan`, each `discount_<pct>`) with amounts, requirements and due dates, the agency's offer rules and the creditor's rules. Fixed policy priced from the account: no call state. |
+| `request_approval` | An option id to the World's supervisor; returns only `{"approved", "reason"}`. |
+| `add_payment_method` | Card or bank account to PayNearMe's `create_payment_method` on the account's order; returns the `method_id` and last four; every card and bank field redacted. |
+| `take_payment` | `method_id` + `option_id`, no amount: the full balance, a discount, or the plan's down payment, charged on PayNearMe's `make_payment`. Returns PayNearMe's answer as given (`status`, `response_code`, `response_message`). The agent's record of it is the `payments` row; an approved payment is posted to the account's loan keyed by PayNearMe's payment id, and a discount's rest is written off. A refusal (an up-to order's limit, a wrong signature) is PayNearMe's words. |
+| `create_arrangement` | `option_id` + `first_due_on` (+ `months` for `payment_plan`): a plan of the months the agent chose over what the plan covers, equal payments rounded down with the remainder last, one in each month, with no payment method (no automatic payments); or a discount or the full balance as one payment on a date. Queues the written confirmation. |
+| `record_promise` | The full balance or a discount, on a date, and how they will pay. |
+| `schedule_callback` | A callback on the dialed number, recording whether the consumer asked for or agreed to the time. |
+| `queue_letter` | Idempotent per call. |
+| `transfer_to_human` | Disposition `transferred` (by precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
+| `log_contact_attempt` | Who answered (as the agent says) and a plain summary; again to replace it. The row is written when the call ends: time, duration and disposition from the call and the clock, and a summary that leads with what the call recorded, then the agent's notes. |
+| `end_call` | Writes the contact row (with the agent's log, if it logged), then the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
 
 ### The contact row on every ending
 
@@ -132,121 +95,98 @@ Every call leaves exactly one `contact_attempts` row, written once, under a lock
   `CallSession.caller_gone` finalizes at once (not after the vendor's own
   teardown, which can take seconds), after any tool call already running, and
   refuses new ones; `RemiCall.finalize` writes the row from the model's log, or
-  from the session alone if it never logged;
+  from the call alone if it never logged;
 - the provider fails, or the pod is stopped mid-call: the server finalizes the
   call before it closes Remi's database.
 
-Why: in trial `trial_vj4i37mlw6q9lqc58lprk`, 11 of 212 attempts had no row.
+Why: on an earlier benchmark run, 11 of 212 attempts had no row.
 In each the caller hung up before the model logged; the fallback row was
 written 1.1 s (Mistral) to 2.1 s (OpenAI Realtime, Grok, GPT-Live) later,
 because finalize waited for the provider to close its vendor socket, and the
 bench drains the World's log one to two seconds after the hang-up (the same
 delay was kept on most calls and lost on 11). Providers that returned at once
 (Gemini Live, Deepgram, Pipecat: 10 to 90 ms) never lost one.
-The log now comes before the goodbye too, so the row carries the model's
-`answered_by` (a third party, a voicemail) even when the caller hangs up on the
-goodbye.
 
 ## How Remi talks (the prompt) and what its tools say back
 
-The prompt (`prompt/instructions.md`) is one text for every vendor. It gives
-the call as stages with a goal, limits and a couple of example phrasings each,
-not fixed lines: greet (use a name the callee already gave, never re-ask it;
-otherwise ask for the consumer by first name), ask whether now is a good time,
-say why the check is needed (privacy), verify one fact at a time, offer a way
-out (callback number answered by a person, or a letter) to a wary person by
-their second push-back, then the disclosures in short turns and the debt.
-Push-back questions get a reason and a way out. A short "how you talk"
-section bans narration, stock fillers and re-asking. The legally worded
-recording notice and mini-Miranda stay quoted.
+The prompt (`prompt/instructions.md`) is one text for every vendor: the law on
+debts past the time to sue, quoted where a collector must convey its words,
+and the agency's policy manual as rules, each with its legal source, not as
+scripts. It holds no creditor's policy: after the required statements the
+agent reads it from `get_payment_options` (manual 8.3).
 
-Tool results and gate refusals describe state and rules ("allowed_now"),
-never words to say: the model reads hints aloud verbatim, so a hint that is a
-sentence becomes a scripted line (`tests/test_tools.py` scans the tool sources
-for speech scripts). The one exception is `disclosures_due`, whose sentences
-RULES.md grades word for word. No amount goes into a money tool (an
-`option_id` carries it); results carry dollars as strings (`"$250.00"`). The World's
-rows and the gateway calls stay in cents, and the ledger's wire takes dollars
-(converted in `ledger.py` only).
+Tool results describe facts, never words to say or what to do next:
+`tests/test_payment_options.py` scans the tool sources for "allowed now"
+guidance and steering refusals. No amount goes into a money tool (an
+`option_id` carries it); results carry dollars as strings (`"$250.00"`). The
+World's rows stay in cents, and the ledger's and PayNearMe's wires take dollars.
 
-## The creditor's menu
+## The creditor's policy
 
-Remi works like a real AI collector: the LLM talks; code and the creditor's
-rules decide money and compliance. The World's decision engine (two SQL
-functions in the collections database, `menu.py` the client) answers
-`payment_options(account_id)`: the creditor's ordered ladder for the account
-(pay in full, plans, then any settlement tiers, some needing a supervisor's
-approval, and whether settlement is allowed at all or only after a hardship)
-plus the policy's `rules` in plain English, and
-`request_approval(account_id, option_id)` (approved only with a hardship on the
-account; logged). The prompt holds no creditor's rules: it tells the model to
-follow the rules `get_payment_options` returns (the World's text, verbatim)
-and offer nothing that is not on its list; what unlocks an option, what an
-option with a status means and when to hand the consumer to a person come from
-the tool's rules, statuses and `allowed_now`, not the prompt. Code enforces the
-same: the money tools take an `option_id`, never an amount
-(`menu.checked_option`), and the World refuses off-menu money itself: inside
-`gateway_charge` before any payment row, and in a trigger on `arrangements`
-(SQLSTATE 23514, `policy: ...`, raised as `menu.PolicyRefused`, logged, never
-swallowed). The menu is priced from the balance at the start of the call and
-is not repriced after a payment, so Remi compares it with the ledger only
-before the call's first charge.
-Remi needs the hardship heard on this call before a settlement that requires
-one, even if one is on file from an earlier call.
+Each creditor places its accounts under its own policy (World v2:
+`creditors.policy_id`, `creditor_policies.document`). The World prices it for
+one account with `creditor_policy(account_id, call_date)` and Remi hands it to
+the model verbatim (`get_payment_options`): what may be offered (`pif`,
+`payment_plan`, each `discount_<pct>`), what each discount requires (a
+hardship, the consumer's no to financial assistance, a supervisor's OK), when
+it is due, and the creditor's other rules. A supervisor's OK is the World's
+`request_approval`, a person in the World who answers only "Approved.", "Not
+approved." and the like. Remi enforces none of it: the money tools take an
+option id and do what the agent chose, and the World records each rule it
+checked in `policy_compliance`, which the agent's role cannot read.
 
 ## Payments
 
-The World's payment gateway is three SQL functions in the collections database
-(WORLD.md, "The payment gateway"); `payments.PaymentGateway` is Remi's one client
-for them. The gateway decides approve or decline and writes `payments`; it does
-not know the balance. The money is the ledger's (below).
+Payments are PayNearMe's (World v2, "Payments: PayNearMe"); `payments.PayNearMe`
+is Remi's one client for the vendor's JSON API v3.0 on the World's twin. Each
+placed account has one `up-to` order of its placed balance
+(`accounts.pnm_order_identifier`).
 
-- Remi never writes `payment_methods` or `payments` (they are not in `db.WRITABLE`),
-  never reads or writes the processor's `processor_vault` or `processor_*`
-  functions, and runs no DDL. `Transaction.call_gateway` calls only the three
-  `gateway_*` functions, with named, bound arguments.
-- Every `at` is the call's clock (`CallClock.now()`), never the database's `now()`.
-- A gateway error (SQLSTATE 22023, `gateway: ...`) becomes a tool error in the
-  gateway's words ("The payment gateway refused it: the card number is not
-  valid ..."); nothing is written. A decline is not an error: `take_payment`
-  returns `status: declined` with `decline_code` (`insufficient_funds`,
-  `card_declined`, `expired_card`) and a reason to relay.
-- Card number, expiry, security code and bank account number pass only into the
-  gateway call; they are redacted in logs and never stored or returned.
+- Every request is signed: `version` 3.0, the site id, a `timestamp` and an
+  HMAC-SHA256 `signature` over the sorted parameters. The twin refuses a
+  timestamp more than 300 seconds from its virtual clock, so every `at` is the
+  call's clock (`CallClock.now()`), never wall time.
+- PayNearMe decides approve or decline; a decline is an answer
+  (`status: rejected`, `response_code`, `response_message`), not an error. A
+  refusal (its error envelope) is PayNearMe's own words; an unreachable twin is
+  never hidden.
+- The agent's record of every payment, approved or not, is a `payments` row
+  (PayNearMe's payment id and answer). An approved payment is posted to the
+  ledger (below).
+- Card number, expiry, security code and bank account number pass only into
+  PayNearMe's `_pii` parameters; they are redacted in logs and never stored or
+  returned. The HMAC secret is in no repr.
 
 ## The ledger
 
-Each placed account's money is a Fineract loan in the World (WORLD.md, "Money: the
-Fineract ledger"): `externalId` = the account id, principal = the placed balance,
-the itemization in its `tas_itemization` datatable row, payments as repayments,
-and the balance its `totalOutstanding`. `ledger.FineractLedger` is Remi's one
-client for it (`ledger.Ledger` is the protocol; the tests use an in-memory one
-that keeps the measured refusals, `tests/fake_ledger.py`).
+Each placed account's money is a Fineract loan in the World (World v2, "Money:
+the Fineract ledger"): `externalId` = the account id, principal = the itemized
+balance plus interest and fees since, the itemization (`itemized_from`,
+`itemized_on`, `itemized_balance`, `interest_since`, `fees_since`) in its
+`tas_itemization` datatable row, payments as repayments, and the balance its
+`totalOutstanding`. `ledger.FineractLedger` is Remi's one client for it
+(`ledger.Ledger` is the protocol; the tests use an in-memory one that keeps the
+measured refusals, `tests/fake_ledger.py`).
 
-- Read when the debt is (`get_debt_details`), and again before each money tool,
-  so every amount is checked against the balance as the ledger holds it. The
-  screen pop and every call that never reaches the debt make no ledger request.
-- An approved charge is posted with `transactionDate` = the call's date (the
+- An approved payment is posted with `transactionDate` = the call's date (the
   ledger's business date is the World's day and it refuses a later one),
-  `externalId` = the gateway's `payment_id`, `receiptNumber` = its
-  `processor_ref`, and the Card or ACH payment type. A settlement's rest is then
-  written off. Paid and settled are the loan's state: Remi writes neither as an
-  account status.
-- A plan re-ages the loan; the agreement's instalments are the schedule the
-  ledger computed. Fineract takes one re-age a day per loan.
-- A refusal (`LedgerRefused`, Fineract's own code) is a tool error the model can
-  act on; an unreachable ledger (`LedgerUnavailable`) is never hidden: reading the
-  debt answers that the balance cannot be read, and posting an approved charge
-  says the payment was taken but not posted, and logs it.
+  `externalId` = PayNearMe's payment id (so a retry posts once), and the Card or
+  ACH payment type. Once a discount's payment is posted, the rest is written off.
+- A plan never re-ages the loan: its schedule is the `arrangements` row only.
+- A refusal (`LedgerRefused`, Fineract's own code) or an unreachable ledger
+  (`LedgerUnavailable`) after an approved payment is reported
+  (`posted_to_ledger: false`) and logged; the payment stands.
 
 ## Config
 
 | Variable | Set by | Meaning |
 |---|---|---|
 | `VERIS_AGENT_CONTEXT` | bench, per attempt | `{"account_id","call_time","phone_id"}`. Required. |
-| `DATABASE_URL` | bench (world) | Collections twin DSN, the payment gateway included. Required. |
+| `DATABASE_URL` | bench (world) | Collections twin DSN. Required. |
 | `FINERACT_API_BASE` | bench (world) | The Fineract twin's host; the API root `/fineract-provider/api/v1` is beneath it. Required. |
 | `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | bench candidate-env | Fineract's Basic pair and tenant header (the World's published `mifos`/`password`/`default`). Required; no defaults in code. |
+| `PAYNEARME_API_BASE` | platform (world) | The PayNearMe twin's base URL; `/json-api` is beneath it. Required. |
+| `PAYNEARME_SITE_IDENTIFIER`, `PAYNEARME_HMAC_SECRET` | bench candidate-env | The twin's site id and HMAC secret. Required; no defaults in code. |
 
 Plus the framework's and the vendor's variables (AGENTS.md section 11).
 
@@ -254,14 +194,14 @@ Plus the framework's and the vendor's variables (AGENTS.md section 11).
 
 These vendors run STT, the LLM and TTS on their side; Remi's tools come back
 over the same socket as client-side calls, so every call still goes through
-Remi's gates. What differs for Remi (AGENTS.md section 10 has the protocol
+Remi's one dispatch path. What differs for Remi (AGENTS.md section 10 has the protocol
 details):
 
 | Vendor | Bench candidate | Remi-specific notes |
 |---|---|---|
 | `deepgram` (`remi-deepgram`) | `trace_adapter: deepgram-voice-agent`; candidate-env `DEEPGRAM_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json` (+ optional `VAMOS_DEEPGRAM_LLM_MODEL`, default `gpt-4.1-mini`) | No greeting in `Settings`: Remi stays silent until the callee's first words. Checked against the live API: no agent audio before "Hello?", tool calls round-trip, `end_call` hangs up after the goodbye. |
 | `elevenlabs` (`remi-elevenlabs`) | `trace_adapter: elevenlabs-convai`; candidate-env `ELEVENLABS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json` (+ optional `VAMOS_ELEVENLABS_LLM`, default `gpt-4.1-mini`) | A stored agent is created per call with Remi's instructions (screen pop included) and deleted after it: about 2 s between `/voice` connecting and the vendor hearing the callee (their "Hello?" is buffered, not lost). Parameters Remi leaves undescribed get their own name as description (ElevenLabs requires one). Checked against the live API, agents cleaned up. |
-| `fluxions` (`remi-fluxions`) | `trace_adapter: fluxions-realtime`; candidate-env `FLUXIONS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json`; no `public_endpoint` | **Remi cannot run on `api.fluxions.ai` today:** its instructions are ~13,400 characters with the screen pop and that host keeps 4,000 of the soul (silently). The provider refuses such a call before connecting rather than run Remi on a third of its policy. It needs a Fluxions host with a larger `max_soul_chars` (`VAMOS_FLUXIONS_BASE_URL`). The protocol itself was checked live with a cut prompt (callee first, tool calls, paced playback). |
+| `fluxions` (`remi-fluxions`) | `trace_adapter: fluxions-realtime`; candidate-env `FLUXIONS_API_KEY`; `image.env` `VAMOS_VOICE_FRAMING=json`; no `public_endpoint` | **Remi cannot run on `api.fluxions.ai` today:** its instructions are about 21,200 characters with the screen pop and that host keeps 4,000 of the soul (silently). The provider refuses such a call before connecting rather than run Remi on a third of its policy. It needs a Fluxions host with a larger `max_soul_chars` (`VAMOS_FLUXIONS_BASE_URL`). The protocol itself was checked live with a cut prompt (callee first, tool calls, paced playback). |
 
 ## Vendors
 
@@ -274,16 +214,16 @@ On the hosted orchestrators and LiveKit:
 - **Cartesia**: tools run over the agent's own socket (client tools), so no
   public endpoint. Cartesia reserves the name `end_call` for its system tool,
   so Remi's `end_call` is declared as `end_call_` there (same description) and
-  mapped back; its gate (the call must be logged first) is unchanged. Cartesia's
-  own system `end_call` would hang up inside Cartesia, skipping that gate. Cartesia
+  mapped back, so it still writes the call's record before the line closes. Cartesia's
+  own system `end_call` would hang up inside Cartesia, without that record. Cartesia
   accepts only `type`, `description`, `enum` and `items` in a parameter schema,
   so `format`/`minimum`/`maximum`/`minLength` are cut; Remi's descriptions state
   them in words (YYYY-MM-DD, 1-12, ISO-8601) and its argument validation still
   refuses an out-of-range value. Tool results go unchanged, as on every vendor:
   Cartesia documents a 4096-byte result cap, but it was tested live on 2026-10-14
   and not enforced up to 9 KB (a fact at the very end of a 9 KB result reached the
-  model). Remi's largest result, `get_payment_options` on a long plan ladder, is
-  ~5.4 KB.
+  model). Remi's largest result, `get_payment_options` (the creditor's policy), is
+  about 3.3 KB.
 - **LiveKit**: the image runs its own `livekit-server`; nothing extra on the bench.
 
 ## Tests
@@ -292,89 +232,40 @@ On the hosted orchestrators and LiveKit:
 uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
 ```
 
-- `tests/test_tools.py`: every flow against a real Postgres loaded with the
-  World's own SQL (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`),
-  asserting the exact rows the answer key expects (REMI-001 diffed against the
-  whole World); declines and their fallbacks; card data in no row, log or
-  result; the wall-clock guard over every Remi module.
-- `tests/fixtures/collections_world.sql`: the World's schema, payment gateway and
-  rows, vendored from the benchmark repo (the header names the commit). Resync with
+- `tests/fixtures/`: World v2, vendored from the benchmark repo (the header of
+  `collections_world.sql` names the commit): the schema, the creditors' policy
+  engine and the rows (`collections_world.sql`), the manifest
+  (`world_v2_manifest.json`: the Fineract loans, the PayNearMe orders and test
+  instruments, each pilot task's hand-off), and the reviewed policy tool's output
+  for the twelve pilot accounts (`payment_options/`). Resync with
   `tests/fixtures/resync_world.sh <benchmark repo checkout> [ref]`. Remi never
-  imports the benchmark repo. The tests seed as the owner and connect Remi as a login
-  that owns nothing, so the gateway's write guards bind.
-- `tests/test_payment_options.py`: the creditor's menu against the same Postgres: the ladder the model
-  sees, off-menu and locked options refused before any charge, approvals (denied is never chargeable),
-  the World's refusal surfaced, plans on the ledger's schedule (and a down payment), the transfer and
-  one-charge guards, the disclosures on verification, the prompt routing each intent to its tool.
-- The decision engine is the World's own SQL (`collections_bench/world/creditor_policy.sql`, vendored
-  into `collections_world.sql` by `resync_world.sh`); `seed_world` gives the account
-  `support.TEST_POLICY` (overridable per test) priced from the ledger's balance.
-- `tests/test_context_and_policy.py`: context parsing, the clock, RULES.md numbers.
-- `tests/test_payments.py`: `PaymentGateway` against the real gateway functions: approvals, each test instrument's decline, validation errors in the gateway's words, no account change, no direct writes.
-- `tests/fixtures/collections_ledger.json`: every account's money from the same the benchmark repo commit, loaded into the in-memory ledger by `seed_full_world` (`resync_world.sh` writes both fixtures).
-- `tests/test_ledger.py`: `FineractLedger` on the wire (`httpx.MockTransport`): the requests it sends, the debt it reads, idempotent posting, refusals vs an unreachable ledger.
-- `tests/test_ledger_live.py`: the same client against a real Fineract seeded as the World (opt-in: `REMI_TEST_FINERACT_URL`).
-- `tests/test_tools.py` also runs the screen pop against that Postgres: reads done, gates past them, no secrets in the section, the should-not-call case.
-- `tests/test_smoke.py`: the real server running Remi over `/voice` with a fake provider (the screen pop has run before the provider starts); startup config errors.
-
-Remi also runs in the root parity matrix (`tests/test_parity.py`) on every vendor.
-
-## Vendors
-
-One image per vendor, `bench-e2e/remi-<vendor>` (AGENTS.md section 13 has each
-candidate's `trace_adapter`, candidate-env secrets and `image.env`). Every
-vendor gets the same instructions (with the screen pop), the same tools and
-the same gates; only the voice stack differs.
-
-| Vendor | Stack | Turn taking |
-|---|---|---|
-| `mistral` | Voxtral Realtime STT → `mistral-medium-2604` → Voxtral TTS, cascaded in the pod | Silero + 0.8 s of silence, then a Voxtral flush; barge-in as LiveKit Agents' default (0.5 s of Silero speech pauses, a false interruption resumes after 2 s, a caller turn interrupts) |
-| `huggingface` | Whisper large-v3 → `openai/gpt-oss-120b:groq` → Kokoro (fal-ai), all on HF inference | Silero + 0.8 s of silence; barge-in as LiveKit Agents' default (0.5 s of Silero speech pauses, a false interruption resumes after 2 s, a caller turn interrupts) |
-| `grok_cascade` | xAI STT → `gpt-4.1-mini` (or `grok-4.3`, `VAMOS_GROK_CASCADE_LLM`) → xAI TTS | xAI's default endpointing (400 ms); barge-in as LiveKit Agents' default (0.5 s of Silero speech pauses, a false interruption resumes after 2 s, a caller turn interrupts) |
-| `gradium` | gradbot: Gradium STT → `gpt-4.1-mini` → Gradium TTS | gradbot's own |
-
-On the cascades Remi's first words wait for the callee's first finished turn
-(callee first), and on gradbot for its first transcribed words.
-
-### Full setup disclosure
-
-What differs between the vendors, and who set it. Everything not listed is
-identical: the instructions (with the screen pop), the tools, their gates and
-the call-start rule. "Vendor" means the vendor's (or its framework's) own
-default, untouched; a value is ours only where the vendor has none or demands
-one, and then it is the same for every vendor that needs it:
-
-- **Tool rounds**: `MAX_TOOL_ROUNDS` = 10 LLM rounds per caller turn, wherever
-  this pod runs the tool loop (far above a normal turn; it only stops a model
-  that loops).
-- **Retries**: `RETRY_BUDGET_S` = ~25 s of backoff on a transient error (429,
-  5xx, a dropped connection) for every vendor request this pod makes itself
-  (`openai` SDK: 6 retries, or for Pipecat's OpenAI TTS 3 s per attempt and 4
-  retries, since that endpoint can hold a request 25 s before its first byte; Mistral SDK: 25 s; LiveKit: 12 x 2 s; Hugging Face
-  STT/TTS: 25 s). Where the vendor makes the request (speech-to-speech
-  sessions, managed agents, hosted orchestrators), the vendor's own policy
-  applies; a speech-to-speech socket that fails ends the call (no reconnect).
-- **Tokens**: no cap anywhere but Vapi, which requires one (default 250, which
-  cuts turns short): its maximum, 10,000.
-
-| Vendor | Text model | Turn taking, VAD, endpointing | Tool-round cap | Token cap | Retries (LLM) | English pinned by |
-|---|---|---|---|---|---|---|
-| `openai_realtime` | `gpt-realtime` (speech-to-speech) | vendor: `server_vad`, no numbers sent | vendor | vendor (none) | none: one socket | transcription `language: "en"` |
-| `grok_voice` | `grok-voice-think-fast-2.0` (speech-to-speech) | vendor: `server_vad`, no numbers sent | vendor | vendor (none) | none: one socket | transcription `language_hint: "en"` (no spoken-language setting) |
-| `gemini_live` | `gemini-2.5-flash-native-audio-preview-12-2025` (default) or a Gemini 3 Live model (`VAMOS_GEMINI_MODEL`), speech-to-speech | vendor: automatic activity detection on its defaults | vendor | vendor (none) | none: one socket | transcription `languageCodes: ["en"]` (native audio takes no spoken-language code) |
-| `gpt_live` | `gpt-live-1`, delegating to `gpt-5.6-terra` | vendor (no VAD settings exist) | vendor | vendor (none) | none: one socket | none documented: the prompt |
-| `pipecat` | `gpt-4.1-mini` | vendor (Pipecat): Silero `VADParams()`, default start strategies, Smart Turn v3 | none (Pipecat's loop) | none | ours: LLM 6 SDK retries (~25 s); OpenAI TTS 3 s per attempt, 4 retries (~22 s), Pipecat waits 28 s for the audio (reliability) | Deepgram/OpenAI STT and Cartesia TTS `Language.EN` |
-| `deepgram` | `gpt-4.1-mini` (Deepgram-managed) | vendor | vendor | vendor | vendor | `language: "en"` |
-| `elevenlabs` | `gpt-4.1-mini` (ElevenLabs-managed) | vendor (learned turn model) | vendor | vendor | vendor | `language: "en"` |
-| `fluxions` | the host's model | vendor (adaptive end-of-utterance) | vendor | vendor | vendor | none documented: the prompt |
-| `mistral` | `mistral-medium-2604` (Mistral's own) | ours, none at the vendor: Silero + 800 ms silence; barge-in as LiveKit Agents' default (pause at 0.5 s of speech, resume after 2 s, a turn interrupts) | 10 | none | ours: Mistral SDK backoff, 25 s | none documented (Voxtral): the prompt |
-| `huggingface` | `openai/gpt-oss-120b:groq` (HF router) | ours, none at the vendor: Silero + 800 ms silence; barge-in as LiveKit Agents' default | 10 | none | ours: 6 SDK retries (~25 s) | Whisper `language: "en"` |
-| `grok_cascade` | `gpt-4.1-mini` (default) or `grok-4.3` | vendor: xAI STT default endpointing (400 ms); barge-in ours (LiveKit's default, as above) | 10 | none | ours: 6 SDK retries (~25 s) | xAI STT/TTS `language=en` |
-| `gradium` | `gpt-4.1-mini` | vendor (gradbot) | vendor (gradbot) | vendor (gradbot) | vendor (gradbot) | `Lang.En` |
-| `vapi` | `gpt-4.1-mini` (Vapi-managed) | vendor (no `startSpeakingPlan`) | vendor | 10,000 (Vapi's maximum; it requires one) | vendor | transcriber `language: "en"` |
-| `cartesia` | `gpt-4.1-mini` (Cartesia-managed) | vendor | vendor | vendor | vendor | `language.primary: "en"` |
-| `livekit` | `gpt-4.1-mini` | vendor (LiveKit Agents): Silero and endpointing defaults | 10 | none | ours: 12 x 2 s (~22 s), STT/LLM/TTS | Deepgram STT `en-US` (the TTS model is English-only) |
-
-The text model is the vendor's own where the vendor sells one (Mistral, the
-Hugging Face open model, the speech-to-speech models); every pipeline that
-takes a bring-your-own model runs `gpt-4.1-mini`.
+  imports the benchmark repo. The tests seed as the owner and connect Remi as a
+  login that owns nothing.
+- `tests/test_payment_options.py`: `get_payment_options` byte for byte for every
+  pilot account; the supervisor's answers; payments on PayNearMe recorded and
+  posted, a discount's rest written off; declines and PayNearMe's refusals as
+  given; requests signed with the World's clock; card data in no row, log or
+  result; plans by the policy's rounding with no payment method and no re-age;
+  off-policy money recorded, not refused (the World's compliance record says so);
+  the prompt's money rules.
+- `tests/test_tools.py`: the reads as facts (no verdict, no secret), the screen
+  pop, no tool refused for order or policy, verification that never locks, every
+  record World v2 defines (language preference, financial assistance, a cease and
+  the number's consent as two records, disputes and hardships in the consumer's
+  words), callbacks, the contact row as the agent logged it, the wall-clock guard
+  over every Remi module.
+- `tests/test_before_verification.py`: the prompt's opening, verification and
+  push-back rules, rendered.
+- `tests/test_context_and_policy.py`: context parsing, the clock, business days,
+  a plan's payments, dispositions.
+- `tests/test_payments.py`: `PayNearMe` against a double of the twin's vendor API
+  (`tests/fake_paynearme.py`): signing, the time it signs with, answers and
+  refusals, an unreachable twin, card data.
+- `tests/test_ledger.py`: `FineractLedger` on the wire (`httpx.MockTransport`):
+  the requests it sends, the debt it reads, idempotent posting, refusals vs an
+  unreachable ledger.
+- `tests/test_ledger_live.py`: the same client against a real Fineract seeded as
+  World v2 (opt-in: `REMI_TEST_FINERACT_URL`).
+- `tests/test_smoke.py`: the real server running Remi over `/voice` with a fake
+  provider (the screen pop has run before the provider starts); startup config
+  errors.

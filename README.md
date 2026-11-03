@@ -33,21 +33,24 @@ Remi works for an invented third-party agency in New York City. On every call it
    debt, then gives the required disclosures.
 3. Handles what the consumer brings: a payment, a plan, a hardship, a dispute, a
    request to stop calling, a better time to call, a request for a person.
-4. When the consumer is ready to pay, fetches the creditor's payment options and
-   offers them by the creditor's policy:
-   - payment in full first, then a plan, then a settlement only after the
-     consumer describes a hardship;
+4. When the consumer is ready to pay, fetches the creditor's policy for the
+   account and offers by it:
+   - the full balance first, then a plan, then discounts from smallest to
+     largest, each only with what the creditor's policy requires (a hardship in
+     the consumer's own words, a supervisor's OK);
    - never reveal the creditor's limits (biggest discount, lowest amount, longest
      term) before offering them;
    - never suggest a hardship, or say one would change the offer;
-   - no fake "final offer" or deadline; get a yes to a plan's terms before
-     creating it; request approval before an approval-tier settlement.
+   - no fake "final offer" or deadline; get a yes to an agreement's terms before
+     recording it; ask for a supervisor's OK before mentioning a discount that
+     needs one.
 5. Records what happened: payments, plans, disputes, flags, callbacks and one
    contact record per call.
 
-The policy is enforced twice: in the prompt (`vamos_agents/remi/prompt/`) and in
-code, where gates refuse a tool called too early with a message saying what must
-happen first (`gates.py`, `policy.py`).
+The policy is the prompt's (`vamos_agents/remi/prompt/`: the law and the agency's
+manual) and, for each account, the creditor's policy the World prices for the call
+(`get_payment_options`). Nothing in code refuses the agent: the benchmark measures
+the agent, so its mistakes show as its own.
 
 ## Implementations
 
@@ -107,10 +110,10 @@ docker run --rm -p 8008:8008 \
 curl localhost:8008/health
 ```
 
-Remi needs its world to do anything useful: a Postgres collections database (with
-the payment gateway inside it) at `DATABASE_URL`, and a Fineract ledger at
-`FINERACT_API_BASE`. In the benchmark, Veris provides both as a simulated copy of
-the agency's systems, reset for every call. The voice channel is
+Remi needs its world to do anything useful: a Postgres collections database at
+`DATABASE_URL`, a Fineract ledger at `FINERACT_API_BASE`, and PayNearMe for
+payments at `PAYNEARME_API_BASE`. In the benchmark, Veris provides all three as a
+simulated copy of the agency's systems, reset for every call. The voice channel is
 `ws://<host>:8008/voice` (PCM16, 24 kHz, mono). Vendor keys, framing and every
 other setting are in [AGENTS.md](AGENTS.md).
 
