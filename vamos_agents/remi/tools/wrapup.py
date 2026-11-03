@@ -5,8 +5,9 @@ Every call ends with exactly one contact-attempt row (NYC § 2-193).
 plain-language summary; the row itself is written once, when the call ends: by
 ``end_call``, or by ``RemiCall.finalize`` the moment the other side hangs up (or
 the socket drops) first, so an outcome recorded after the log still counts. Who
-answered is what the agent logged: the bench grades it, so a wrong claim is the
-agent's. The row's duration comes from ``CallClock`` and its disposition from what
+answered is what the agent logged, always one of the World's values: the bench
+grades it, so a wrong claim is the agent's. A row with no one in ``answered_by``
+("The call ended before Remi logged it.") is a call the agent never logged. The row's duration comes from ``CallClock`` and its disposition from what
 the call recorded. Nothing here waits for a step or refuses to close: the bench
 measures the agent.
 """
@@ -94,11 +95,12 @@ async def transfer_to_human(session: RemiCall, args: TransferArgs) -> dict[str, 
 
 
 class ContactLogArgs(BaseModel):
-    answered_by: Literal["consumer", "estate_rep", "third_party", "voicemail", "wrong_number", "none"] = (
-        Field(
-            description="Who answered: consumer, estate_rep, third_party (anyone else who said who they are), voicemail, "
-            "wrong_number, or none when nobody was confirmed."
-        )
+    answered_by: Literal[
+        "consumer", "estate_rep", "third_party", "voicemail", "wrong_number", "no_answer"
+    ] = Field(
+        description="Who answered, as the World records it: consumer, estate_rep (a deceased consumer's executor "
+        "or administrator), third_party (any other person), voicemail, wrong_number (someone who does not know "
+        "the consumer), or no_answer."
     )
     summary: str = Field(
         min_length=10,
@@ -116,8 +118,7 @@ async def log_contact_attempt(session: RemiCall, args: ContactLogArgs) -> dict[s
     """Log this call's one contact record: who answered and what happened. The record is written when the call
     ends, with the time, duration and disposition filled in from everything recorded on the call. Calling it
     again replaces your log."""
-    answered_by = None if args.answered_by == "none" else args.answered_by
-    session.contact_note = ContactNote(answered_by, args.summary.strip(), args.number_is_wrong)
+    session.contact_note = ContactNote(args.answered_by, args.summary.strip(), args.number_is_wrong)
     return {"logged": True}
 
 

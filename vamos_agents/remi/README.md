@@ -83,7 +83,7 @@ registered for re-reads.
 | `schedule_callback` | A callback on the dialed number, recording whether the consumer asked for or agreed to the time. |
 | `queue_letter` | Idempotent per call. |
 | `transfer_to_human` | Disposition `transferred` (by precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
-| `log_contact_attempt` | Who answered (as the agent says) and a plain summary; again to replace it. The row is written when the call ends: time, duration and disposition from the call and the clock, and a summary that leads with what the call recorded, then the agent's notes. |
+| `log_contact_attempt` | Who answered, as the agent says (required: one of the World's `answered_by` values, so a row with no one in `answered_by` and "The call ended before Remi logged it." is a call the agent never logged), and a plain summary; again to replace it. The row is written when the call ends: time, duration and disposition from the call and the clock, and a summary that leads with what the call recorded, then the agent's notes. |
 | `end_call` | Writes the contact row (with the agent's log, if it logged), then the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
 
 ### The contact row on every ending

@@ -59,7 +59,7 @@ def new_id(prefix: str) -> str:
 class ContactNote:
     """What log_contact_attempt recorded for the call's one contact row (the row is written at the end)."""
 
-    answered_by: str | None  # as the agent logged it
+    answered_by: str  # as the agent logged it: one of the World's values, never empty
     notes: str
     number_is_wrong: bool
 
@@ -210,19 +210,23 @@ class RemiCall:
     # --- the call's one contact record ------------------------------------------------------
 
     def disposition_for(self, answered_by: str | None) -> str:
-        """The record's disposition, from who the agent logged as answering and what the call recorded."""
+        """The record's disposition, from who the agent logged as answering (None: it never logged the call) and
+        what the call recorded: with nobody verified, an unverified stop, a refusal or wrong answers first."""
         if self.deceased_flag_id is not None:
             return "deceased"
-        if answered_by in ("voicemail", "wrong_number", "third_party"):
+        if answered_by in ("voicemail", "wrong_number"):
             return answered_by
-        if answered_by is None or answered_by == "no_answer":
+        if self.verified_as is None:
             if self.number_stop == "unverified":
                 return "unverified_stop"
             if self.verification_refused and not self.wrong_answers:
                 return "refused_verification"
             if self.wrong_answers:
                 return "failed_verification"
-            return "not_verified"
+            if answered_by == "third_party":
+                return "third_party"
+            if answered_by is None or answered_by == "no_answer":
+                return "not_verified"
         return policy.disposition(self.outcomes, transferred=self.transferred)
 
     def recorded_facts(self, answered_by: str | None, disposition: str) -> str:

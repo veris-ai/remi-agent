@@ -403,7 +403,28 @@ async def test_the_contact_record_is_what_the_agent_logged(pg_dsn, make_session,
     )
 
 
-async def test_a_call_ended_or_hung_up_on_without_a_log_still_leaves_one_row(pg_dsn, make_session) -> None:
+async def test_who_answered_is_required_so_a_logged_call_always_names_who(pg_dsn, make_session) -> None:
+    """A row with no one in answered_by means the agent never logged the call: the log cannot produce one."""
+    seed_world(pg_dsn)
+    s = await make_session("STORE-01")
+    for args in (
+        {"summary": "Logged by the test."},
+        {"answered_by": "none", "summary": "Logged by the test."},
+    ):
+        refused = await s.dispatch("log_contact_attempt", args)
+        assert refused["error"].startswith("invalid arguments for log_contact_attempt"), refused
+    assert s.state.contact_note is None
+    await s.dispatch(
+        "log_contact_attempt", {"answered_by": "no_answer", "summary": "Rang out, nobody picked up."}
+    )
+    await s.dispatch("end_call", {})
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert (attempt["answered_by"], attempt["disposition"]) == ("no_answer", "not_verified")
+    assert "The call ended before Remi logged it." not in attempt["summary"]
+
+
+async def test_a_call_ended_without_a_log_leaves_answered_by_null_and_says_so(pg_dsn, make_session) -> None:
+    """NYC 2-193: one row per call, even unlogged; answered_by NULL and the marker show the agent never logged it."""
     seed_world(pg_dsn)
     s = await make_session("STORE-01")
     assert await s.dispatch("end_call", {}) == {"ended": True}
@@ -422,9 +443,11 @@ async def test_a_call_ended_or_hung_up_on_without_a_log_still_leaves_one_row(pg_
 
 async def test_dispositions_follow_what_the_call_recorded(pg_dsn, make_session) -> None:
     seed_world(pg_dsn)
-    cases: list[tuple[str, list[tuple[str, dict[str, Any]]], str, str | None]] = [
-        ("CARD-04", [("verify_right_party", {"name": "Marcus", "zip": "1"})], "failed_verification", None),
-        ("STORE-01", [("stop_calling_this_number", {})], "unverified_stop", None),
+    cases: list[tuple[str, list[tuple[str, dict[str, Any]]], str, str]] = [
+        ("CARD-04", [("verify_right_party", {"name": "Marcus", "zip": "1"})], "failed_verification", "third_party"),
+        ("STORE-01", [("stop_calling_this_number", {})], "unverified_stop", "third_party"),
+        ("STORE-04", [("record_verification_refused", {})], "refused_verification", "third_party"),
+        ("CARD-09", [], "third_party", "third_party"),
         ("PHONE-02", [], "voicemail", "voicemail"),
         ("HOSP-01", [("log_dispute", {"words": "Not mine"}), ("record_flag", {"kind": "hardship", "words": "x"})], "dispute", "consumer"),
     ]  # fmt: skip
@@ -433,7 +456,7 @@ async def test_dispositions_follow_what_the_call_recorded(pg_dsn, make_session) 
         for name, args in steps:
             await s.dispatch(name, args)
         await s.dispatch(
-            "log_contact_attempt", {"answered_by": answered_by or "none", "summary": "Logged by the test."}
+            "log_contact_attempt", {"answered_by": answered_by, "summary": "Logged by the test."}
         )
         await s.dispatch("end_call", {})
         (row,) = rows(

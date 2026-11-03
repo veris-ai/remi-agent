@@ -73,7 +73,8 @@ class FakeProvider(VoiceProvider):
         call.start.mark_callee_spoke()  # the vendor's VAD heard "Hello?"
         await call.outbound.send(GREETING, "greeting")
         await call.session.dispatch(
-            "log_contact_attempt", {"answered_by": "none", "summary": "Smoke call: greeted and hung up."}
+            "log_contact_attempt",
+            {"answered_by": "third_party", "summary": "Smoke call: greeted and hung up."},
         )
         await call.session.dispatch("end_call", {})
         await call.hang_up()
@@ -137,7 +138,8 @@ def test_voice_call_end_to_end(app, pg_dsn: str) -> None:
         "contact_attempts",
         "TAS-261101",
     )
-    assert attempt["disposition"] == "not_verified" and attempt["duration_s"] >= 1
+    assert (attempt["answered_by"], attempt["disposition"]) == ("third_party", "third_party")
+    assert attempt["duration_s"] >= 1
 
 
 def test_startup_fails_loudly_on_missing_config() -> None:
