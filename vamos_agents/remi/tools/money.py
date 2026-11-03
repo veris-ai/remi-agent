@@ -2,11 +2,13 @@
 
 The bench measures the agent (World v2 WORLD.md, "Nothing refuses the agent"):
 nothing here enforces the creditor's policy, and nothing refuses, blocks or
-steers a decision about money. The agent names one of the options the World's
-policy lists (``get_payment_options``: ``pif``, ``payment_plan``,
-``discount_<pct>``) and the amount is that option's, never a free amount; what
-the agent chooses is done and recorded, and the bench grades it after the call
-from what the World holds.
+steers a decision about money. The amount and terms are the ones the agent
+states; ``option_id`` is only a label the agent may give (``pif``,
+``payment_plan``, ``discount_<pct>``, as ``get_payment_options`` names them). What
+the agent chooses is done and recorded, PayNearMe's and the World's answers come
+back as given, and the bench grades the money after the call from what the World
+holds. The only errors are for input that is not one (an unknown ``method_id``,
+an amount that is not an amount).
 
 - ``add_payment_method`` tokenizes the consumer's card or bank account on the
   account's PayNearMe order, with the billing details the agent passes (PayNearMe
@@ -15,18 +17,19 @@ from what the World holds.
   and the billing details are declared ``redact`` (never logged), go only to
   PayNearMe, and are never stored or echoed: the result is PayNearMe's
   ``payment_method_identifier`` and the last four digits.
-- ``take_payment`` charges an option's amount on PayNearMe (the full balance, a
-  discount, or a plan's down payment) and reports PayNearMe's answer as given. The
-  agent's record of it is the ``payments`` row (PayNearMe's payment id, its net
-  amount, status and response). An approved payment is posted to the account's
-  Fineract loan keyed by PayNearMe's payment id, and once a discount's payment is
-  posted the rest is written off.
-- ``create_arrangement`` records an agreement: a plan of the months the agent
-  chose, each payment computed by the policy's rule (equal, rounded down, the
-  last taking the remainder) over what the plan covers, with no payment method
-  (no automatic payments); or a discount, or the full balance, as one payment on
-  a date. It queues the agreement's written confirmation.
-- ``record_promise`` records a promise to pay an option's amount on a date.
+- ``take_payment`` charges the amount on PayNearMe and reports PayNearMe's answer
+  as given. The agent's record of it is the ``payments`` row (PayNearMe's payment
+  id, its net amount, status and response); if that row cannot be written the
+  failure is logged loudly and PayNearMe's answer still stands. An approved
+  payment is posted to the account's Fineract loan keyed by PayNearMe's payment
+  id, and once a payment labelled as a discount is posted, the rest of the
+  balance is written off.
+- ``create_arrangement`` records an agreement: a payment plan of the total and
+  months stated, each payment computed by the policy's rule (equal, rounded
+  down, the last taking the remainder), with no payment method (no automatic
+  payments); or a discount, or the full balance, as one payment on a date. It
+  queues the agreement's written confirmation.
+- ``record_promise`` records a promise to pay an amount on a date.
 
 Every amount these tools return is in dollars ("$250.00"); the World's rows stay
 in cents.
@@ -36,7 +39,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -51,9 +56,24 @@ from .catalog import REGISTRY
 
 logger = logging.getLogger(__name__)
 
-OPTION_ID = (
-    "One of this account's options (get_payment_options): 'pif', 'payment_plan' or a 'discount_<pct>'."
+OPTION_LABEL = (
+    "Optional: the option of the account's policy this is for, as get_payment_options names it ('pif', "
+    "'payment_plan', 'discount_<pct>'). A label only: the amount and terms are the ones given here."
 )
+#: The arrangement row's kind for each kind of agreement.
+ARRANGEMENT_KINDS = {"payment_plan": "plan", "discount": "settlement_lump", "full_balance": "pay_in_full"}
+
+
+def _cents(amount: str) -> int:
+    """An amount in dollars as stated ("1440.00", "$1,440", "1440") in cents; a ToolError when it is not one."""
+    text = re.sub(r"[\s$,]", "", str(amount))
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        value = Decimal("NaN")
+    if not value.is_finite() or value != value.quantize(Decimal("0.01")):
+        raise ToolError(f"amount {amount!r} is not an amount in dollars, such as 1440.00.")
+    return int(value * 100)
 
 
 class PaymentMethodArgs(BaseModel):
@@ -93,11 +113,10 @@ class PaymentMethodArgs(BaseModel):
     ),
 )  # fmt: skip
 async def add_payment_method(session: RemiCall, args: PaymentMethodArgs) -> dict[str, Any]:
-    """Save the card or bank account the consumer reads out with PayNearMe, so it can be charged (take_payment).
-    PayNearMe requires, for a card, its number, expiry, security code and billing name, address and ZIP; for a
-    bank account, its routing and account numbers and billing name and ZIP. What is passed goes to PayNearMe as
-    given, and PayNearMe's answer comes back. Card details go only to PayNearMe. Refer to the method by its last
-    four digits."""
+    """Saves a card or bank account with PayNearMe on this account's order. PayNearMe requires, for a card, its
+    number, expiry, security code and billing name, address and ZIP; for a bank account, its routing and account
+    numbers and billing name and ZIP. What is passed goes to PayNearMe as given, and PayNearMe's answer comes back:
+    the method_id and the last four digits. Card details go only to PayNearMe."""
     account = await session.ensure_account()
     billing = {
         "billing_name": args.billing_name,
@@ -133,26 +152,6 @@ def _described(saved: SavedMethod) -> str:
     return f"{'card' if saved.kind == 'card' else 'bank account'} ending {saved.last4}"
 
 
-def _option_ids(terms: dict[str, Any]) -> list[str]:
-    return [terms["full_balance"]["option_id"], terms["payment_plans"]["option_id"]] + [
-        d["option_id"] for d in terms["discounts"]
-    ]
-
-
-def _option(terms: dict[str, Any], option_id: str) -> tuple[str, dict[str, Any]]:
-    """The option the policy lists under ``option_id``, and its kind: pay_in_full, plan or discount."""
-    if option_id == terms["full_balance"]["option_id"]:
-        return "pay_in_full", terms["full_balance"]
-    if option_id == terms["payment_plans"]["option_id"]:
-        return "plan", terms["payment_plans"]
-    for discount in terms["discounts"]:
-        if discount["option_id"] == option_id:
-            return "discount", discount
-    raise ToolError(
-        f"{option_id} is not an option on this account's policy: {', '.join(_option_ids(terms))}."
-    )
-
-
 def _method(session: RemiCall, method_id: str) -> SavedMethod:
     saved = session.payment_methods.get(method_id)
     if saved is None:
@@ -164,38 +163,34 @@ def _method(session: RemiCall, method_id: str) -> SavedMethod:
 
 class PaymentArgs(BaseModel):
     method_id: str = Field(description="The method_id add_payment_method returned.")
-    option_id: str = Field(description=f"{OPTION_ID} 'payment_plan' charges the plan's down payment.")
+    amount: str = Field(description="The amount charged, in dollars, e.g. 1440.00.")
+    option_id: str | None = Field(
+        None,
+        description=f"{OPTION_LABEL} Once a payment labelled 'discount_<pct>' is posted, the rest of the balance is "
+        "written off.",
+    )
 
 
 @REGISTRY.tool(PaymentArgs)
 async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
-    """Charge a saved payment method now on PayNearMe for one of the account's options: the full balance ('pif'),
-    a discount ('discount_<pct>'), or a plan's down payment ('payment_plan'). Returns PayNearMe's answer."""
+    """Charges the amount now on PayNearMe to a saved card or bank account. Returns PayNearMe's answer, whether the
+    payment was posted to the account's ledger, and the balance the ledger then holds."""
     account = await session.ensure_account()
     saved = _method(session, args.method_id)
-    kind, option = _option(await session.read_policy(), args.option_id)
-    if kind == "plan":
-        if not option["down_payment"]:
-            raise ToolError(
-                "This account's payment plans have no down payment: nothing to charge for payment_plan."
-            )
-        amount = policy.cents(option["down_payment"]["amount"])
-    else:
-        amount = policy.cents(option["amount"])
+    amount = _cents(args.amount)
+    discount = bool(args.option_id) and str(args.option_id).startswith("discount_")
     async with session.charge_lock:
         try:
             payment = await session.payments.pay(
                 order=account.pnm_order_identifier, method=saved, amount_cents=amount, at=session.clock.now()
             )
         except PaymentsUnavailable as err:
-            logger.error(
-                "PayNearMe unavailable charging %s on %s: %s", args.option_id, account.account_id, err
-            )
+            logger.error("PayNearMe unavailable charging %s on %s: %s", amount, account.account_id, err)
             raise ToolError(
                 "PayNearMe did not answer: whether the payment went through is not known."
             ) from err
         await _record_payment(session, payment)
-    posted = payment.approved and await _post(session, payment, write_off=kind == "discount")
+    posted = payment.approved and await _post(session, payment, write_off=discount)
     result: dict[str, Any] = {
         "payment_id": payment.payment_id,
         "status": payment.status,
@@ -211,27 +206,39 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
         with contextlib.suppress(ToolError):
             result["remaining_balance"] = policy.dollars((await session.read_debt()).balance_cents)
     if payment.approved:
-        session.outcomes.add({"pay_in_full": "paid", "discount": "settled"}.get(kind, "down_payment"))
+        settled = discount or result.get("remaining_balance") == "$0.00"
+        session.outcomes.add("settled" if discount else "paid" if settled else "partial_payment")
     return result
 
 
 async def _record_payment(session: RemiCall, payment: Payment) -> None:
-    """The agency's record of PayNearMe's payment (World v2 ``payments``), approved or not."""
-    async with session.db.transaction() as tx:
-        await tx.insert(
-            "payments",
-            {
-                "payment_id": payment.payment_id,
-                "account_id": session.context.account_id,
-                "method_id": payment.method_id,
-                "amount_cents": payment.amount_cents,
-                "status": payment.status,
-                "response_code": payment.response_code,
-                "response_message": payment.response_message,
-                "payment_type": payment.kind,
-                "last4": payment.last4,
-                "at": session.clock.now(),
-            },
+    """The agency's record of PayNearMe's payment (World v2 ``payments``), approved or not. PayNearMe's answer
+    stands whatever happens here: a record that cannot be written is logged loudly, never reported as a charge
+    that failed."""
+    try:
+        async with session.db.transaction() as tx:
+            await tx.insert(
+                "payments",
+                {
+                    "payment_id": payment.payment_id,
+                    "account_id": session.context.account_id,
+                    "method_id": payment.method_id,
+                    "amount_cents": payment.amount_cents,
+                    "status": payment.status,
+                    "response_code": payment.response_code,
+                    "response_message": payment.response_message,
+                    "payment_type": payment.kind,
+                    "last4": payment.last4,
+                    "at": session.clock.now(),
+                },
+            )
+    except Exception:
+        logger.exception(
+            "could not record PayNearMe payment %s (%s, %d cents) on %s: the payments row is missing",
+            payment.payment_id,
+            payment.status,
+            payment.amount_cents,
+            session.context.account_id,
         )
 
 
@@ -271,37 +278,35 @@ async def _post(session: RemiCall, payment: Payment, *, write_off: bool) -> bool
 
 
 class ArrangementArgs(BaseModel):
-    option_id: str = Field(description=f"{OPTION_ID} The option the consumer agreed to.")
-    months: int | None = Field(
-        None, ge=1, description="payment_plan: the number of monthly payments the consumer agreed to."
+    kind: Literal["payment_plan", "discount", "full_balance"] = Field(
+        description="What was agreed: a payment plan, a discount, or the full balance."
     )
+    total: str = Field(
+        description="The total agreed, in dollars, e.g. 945.00. A payment plan: what its monthly payments add up to."
+    )
+    months: int | None = Field(None, ge=1, description="payment_plan: the number of monthly payments.")
     first_due_on: date = Field(
         description="YYYY-MM-DD. payment_plan: the first monthly payment's date (later ones fall one in each month "
         "after it). A discount or the full balance: the date it is paid by."
     )
+    option_id: str | None = Field(None, description=OPTION_LABEL)
 
 
 @REGISTRY.tool(ArrangementArgs)
 async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[str, Any]:
-    """Record an agreement the consumer made: a payment plan of the months they agreed to (each payment is
-    computed from what the plan covers: equal, rounded down to the cent, the last taking the remainder; the
-    consumer pays each one, so no payment method is attached), or a discount or the full balance as one payment
-    on a date. Queues the agreement's written confirmation."""
-    terms = await session.read_policy()
-    kind, option = _option(terms, args.option_id)
-    if kind == "plan":
+    """Records an agreement the consumer made: a payment plan of the total and months given (each payment equal,
+    rounded down to the cent, the last taking the remainder; the consumer pays each one, so no payment method is
+    attached), or a discount or the full balance as one payment on a date. Queues the agreement's written
+    confirmation."""
+    total = _cents(args.total)
+    if args.kind == "payment_plan":
         if args.months is None:
-            raise ToolError(
-                "A payment plan needs months: the number of monthly payments the consumer agreed to."
-            )
-        total = policy.cents(option["plan_covers"])
+            raise ToolError("A payment plan is a number of monthly payments: months was not passed.")
         amounts = policy.plan_instalment_cents(total, args.months)
         dates = policy.monthly_due_dates(args.first_due_on, args.months)
-        row_kind = "plan"
     else:
-        total = policy.cents(option["amount"])
         amounts, dates = [total], [args.first_due_on]
-        row_kind = "settlement_lump" if kind == "discount" else "pay_in_full"
+    row_kind = ARRANGEMENT_KINDS[args.kind]
     instalments = [{"due_on": d.isoformat(), "amount_cents": a} for d, a in zip(dates, amounts, strict=True)]
     arrangement_id = new_id("arr")
     due_by = policy.confirmation_letter_due_by(session.clock.today())
@@ -335,19 +340,16 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
 
 
 class PromiseArgs(BaseModel):
-    option_id: str = Field(description=f"{OPTION_ID} The full balance or a discount.")
-    due_on: date = Field(description="The exact date the consumer will pay by, YYYY-MM-DD.")
+    amount: str = Field(description="The amount promised, in dollars, e.g. 1180.00.")
+    due_on: date = Field(description="The date the consumer will pay by, YYYY-MM-DD.")
     method: Literal["card", "ach", "check"]
+    option_id: str | None = Field(None, description=OPTION_LABEL)
 
 
 @REGISTRY.tool(PromiseArgs)
 async def record_promise(session: RemiCall, args: PromiseArgs) -> dict[str, Any]:
-    """Record a promise to pay one of the account's options (the full balance or a discount) on an exact date, and
-    how the consumer will pay."""
-    kind, option = _option(await session.read_policy(), args.option_id)
-    if kind == "plan":
-        raise ToolError("payment_plan is several payments, not one amount: a plan is create_arrangement.")
-    amount = policy.cents(option["amount"])
+    """Records a promise to pay an amount on a date, and how the consumer will pay."""
+    amount = _cents(args.amount)
     async with session.db.transaction() as tx:
         await tx.insert(
             "promises_to_pay",

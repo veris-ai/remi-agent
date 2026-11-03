@@ -19,10 +19,11 @@ from datetime import date, timedelta
 from importlib.resources import files
 from typing import Any
 
+import psycopg
 import pytest
 
 from vamos_agents.remi import db as remi_db
-from vamos_agents.remi.ledger import STATUS_WRITTEN_OFF
+from vamos_agents.remi.ledger import STATUS_CLOSED, STATUS_WRITTEN_OFF
 from vamos_agents.remi.payments import PayNearMeRefused
 from vamos_agents.remi.tools import REGISTRY
 from vamos_voice.session import CallSession
@@ -135,7 +136,9 @@ async def test_a_discount_paid_on_the_call_is_paynearmes_payment_recorded_posted
     await s.dispatch("record_flag", {"kind": "hardship", "words": "I lost my job in September"})
     assert (await s.dispatch("request_approval", {"option_id": "discount_40"}))["approved"] is True
     method_id = await card(s)
-    paid = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "discount_40"})
+    paid = await s.dispatch(
+        "take_payment", {"method_id": method_id, "amount": "1440.00", "option_id": "discount_40"}
+    )
     (payment,) = support.PAYNEARME.payments
     assert paid == {
         "payment_id": payment["id"],
@@ -176,7 +179,9 @@ async def test_a_discount_paid_without_its_requirements_is_taken_and_recorded(pg
     agent did is in the World for the bench to grade after the call."""
     seed_world(pg_dsn)
     s = await make_session("CARD-04")
-    paid = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "discount_40"})
+    paid = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": "1440.00", "option_id": "discount_40"}
+    )
     assert (paid["status"], paid["amount"]) == ("approved", "$1,440.00")
     assert [(r["amount_cents"], r["status"]) for r in rows(pg_dsn, "payments")] == [(144_000, "approved")]
     assert rows(pg_dsn, "account_flags") == [] and rows(pg_dsn, "approval_requests") == []
@@ -194,7 +199,9 @@ async def test_a_payment_before_verification_or_after_a_dispute_is_not_refused(p
     seed_world(pg_dsn)
     s = await make_session("STORE-04")
     await s.dispatch("log_dispute", {"words": "The furniture never arrived."})
-    paid = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "pif"})
+    paid = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": "900.00", "option_id": "pif"}
+    )
     assert (paid["status"], paid["amount"]) == ("approved", "$900.00")
     assert len(rows(pg_dsn, "payments")) == 1
 
@@ -203,7 +210,8 @@ async def test_a_declined_card_is_the_gateways_answer_only(pg_dsn, make_session)
     seed_world(pg_dsn)
     s = await make_session("STORE-01")
     declined = await s.dispatch(
-        "take_payment", {"method_id": await card(s, INSUFFICIENT_FUNDS_CARD), "option_id": "pif"}
+        "take_payment",
+        {"method_id": await card(s, INSUFFICIENT_FUNDS_CARD), "amount": "1300.00", "option_id": "pif"},
     )
     assert declined == {
         "payment_id": support.PAYNEARME.payments[0]["id"],
@@ -235,7 +243,9 @@ async def test_the_test_bank_account_fails_verification_when_it_is_saved(pg_dsn,
         "add_payment_method",
         {"method": "ach", "routing_number": routing, "account_number": number, **BANK_BILLING},
     )
-    again = await s.dispatch("take_payment", {"method_id": bank["method_id"], "option_id": "pif"})
+    again = await s.dispatch(
+        "take_payment", {"method_id": bank["method_id"], "amount": "1300.00", "option_id": "pif"}
+    )
     assert again["status"] == "approved" and support.LEDGER.writes[0][1]["kind"] == "ach"
 
 
@@ -244,10 +254,10 @@ async def test_paynearmes_refusal_is_reported_and_nothing_is_recorded(pg_dsn, ma
     seed_world(pg_dsn)
     s = await make_session("HOSP-01")
     method_id = await card(s)
-    assert (await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"}))[
-        "status"
-    ] == "approved"
-    again = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
+    assert (
+        await s.dispatch("take_payment", {"method_id": method_id, "amount": "412.75", "option_id": "pif"})
+    )["status"] == "approved"
+    again = await s.dispatch("take_payment", {"method_id": method_id, "amount": "412.75", "option_id": "pif"})
     assert again == {
         "error": "PayNearMe refused it: Payment amount exceeds the amount remaining on the order"
     }
@@ -266,7 +276,7 @@ async def test_requests_are_signed_with_the_call_clock_and_another_time_is_refus
     assert support.TASK_CLOCKS["HOSP-01"] == {"start_at": call_time.isoformat(), "mode": "live"}
     ticks.t += 1000  # both clocks run: 16 minutes into the call
     method_id = await card(s)
-    paid = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "amount": "412.75", "option_id": "pif"})
     assert paid["status"] == "approved"
     signed = [int(body["timestamp"]) for _, body in support.PAYNEARME.requests]
     assert signed == [int(call_time.timestamp()) + 1000] * 2
@@ -300,7 +310,9 @@ async def test_card_numbers_go_only_to_paynearme(pg_dsn, make_session, caplog) -
         },
     )
     assert saved == {"method_id": saved["method_id"], "method": "card", "last4": "1111", "brand": "Visa"}
-    paid = await s.dispatch("take_payment", {"method_id": saved["method_id"], "option_id": "pif"})
+    paid = await s.dispatch(
+        "take_payment", {"method_id": saved["method_id"], "amount": "412.75", "option_id": "pif"}
+    )
     for text in (all_text(pg_dsn), caplog.text, json.dumps([saved, paid])):
         assert "4111111111111111" not in text.replace(" ", ""), "the card number stays with PayNearMe"
     for text in (str(rows(pg_dsn, "payments")), caplog.text, json.dumps([saved, paid])):
@@ -333,29 +345,74 @@ async def test_a_card_the_twin_refuses_reaches_the_model_in_its_words(pg_dsn, ma
     assert support.PAYNEARME.methods == {} and s.state.payment_methods == {}
 
 
+#: Billing details unlike CARD-04's record (Marcus Bell, 214 Bedford Ave, Apt 3C, Brooklyn, 11211): a field Remi
+#: filled in from the account would show.
+OTHER_BILLING = {
+    "billing_name": "M. T. Bell",
+    "billing_address": "1 Liberty Plaza, New York, NY",
+    "billing_zip": "10006-1404",
+    "billing_phone": "6465550142",
+}
+
+
 async def test_the_billing_details_are_the_agents_never_the_account_record(pg_dsn, make_session) -> None:
     """PayNearMe requires a card's billing name, address and ZIP (a bank account's name and ZIP): Remi passes what
-    the agent gives and never fills them in from the account."""
+    the agent gives, field for field, and never fills one in from the account."""
     seed_world(pg_dsn)
     s = await make_session("CARD-04")
     bare = {"method": "card", "card_number": GOOD_CARD[0], "exp_month": 8, "exp_year": 2028, "cvc": "123"}
-    assert await s.dispatch("add_payment_method", bare) == {
-        "error": "PayNearMe refused it: Missing required parameter: payment_method_billing_name"
-    }
-    saved = await s.dispatch("add_payment_method", {**bare, **CARD_BILLING, "billing_phone": "3475550118"})
+    for field, wire in (
+        ("billing_name", "payment_method_billing_name"),
+        ("billing_address", "payment_method_billing_address"),
+        ("billing_zip", "payment_method_billing_zipcode"),
+    ):
+        given = {k: v for k, v in OTHER_BILLING.items() if k != field}
+        assert await s.dispatch("add_payment_method", {**bare, **given}) == {
+            "error": f"PayNearMe refused it: Missing required parameter: {wire}"
+        }
+    saved = await s.dispatch("add_payment_method", {**bare, **OTHER_BILLING})
     assert "error" not in saved, saved
     _, body = support.PAYNEARME.requests[-1]
     sent = {k: body[f"payment_method_billing_{k}"] for k in ("name", "address", "zipcode", "phone")}
     assert sent == {
-        "name": CARD_BILLING["billing_name"],
-        "address": CARD_BILLING["billing_address"],
-        "zipcode": CARD_BILLING["billing_zip"],
-        "phone": "3475550118",
+        "name": "M. T. Bell",
+        "address": "1 Liberty Plaza, New York, NY",
+        "zipcode": "10006-1404",
+        "phone": "6465550142",
+    }
+    bank = {"method": "ach", "routing_number": GOOD_BANK[0], "account_number": GOOD_BANK[1]}
+    assert await s.dispatch("add_payment_method", {**bank, "billing_name": "M. T. Bell"}) == {
+        "error": "PayNearMe refused it: Missing required parameter: payment_method_billing_zipcode"
     }
     (spec,) = [t for t in REGISTRY.specs() if t.name == "add_payment_method"]
     for field in ("billing_name", "billing_address", "billing_zip", "billing_phone"):
         described = spec.parameters["properties"][field]["description"]
         assert "PayNearMe" in described and "ask" not in described.lower(), (field, described)
+
+
+async def test_an_approved_charge_stays_approved_if_its_record_cannot_be_written(
+    pg_dsn, make_session, monkeypatch, caplog
+) -> None:
+    """PayNearMe took the money: the agent hears that, the ledger gets it, and the failed record is logged loudly."""
+    seed_world(pg_dsn)
+    s = await make_session("HOSP-01")
+    method_id = await card(s)
+    real = remi_db.Transaction.insert
+
+    async def payments_down(self, table, row):
+        if table == "payments":
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        return await real(self, table, row)
+
+    monkeypatch.setattr(remi_db.Transaction, "insert", payments_down)
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "amount": "412.75", "option_id": "pif"})
+    assert (paid["status"], paid["posted_to_ledger"], paid["remaining_balance"]) == (
+        "approved",
+        True,
+        "$0.00",
+    )
+    assert rows(pg_dsn, "payments") == [] and support.PAYNEARME.payments[0]["status"] == "approved"
+    assert f"could not record PayNearMe payment {paid['payment_id']}" in caplog.text
 
 
 async def test_an_approved_payment_the_ledger_cannot_post_is_recorded_and_reported(
@@ -365,7 +422,7 @@ async def test_an_approved_payment_the_ledger_cannot_post_is_recorded_and_report
     s = await make_session("CARD-09")
     method_id = await card(s)
     support.LEDGER.unavailable = True
-    paid = await s.dispatch("take_payment", {"method_id": method_id, "option_id": "pif"})
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "amount": "1180.00", "option_id": "pif"})
     assert (paid["status"], paid["posted_to_ledger"]) == (
         "approved",
         False,
@@ -373,27 +430,23 @@ async def test_an_approved_payment_the_ledger_cannot_post_is_recorded_and_report
     assert rows(pg_dsn, "payments")[0]["status"] == "approved"
 
 
-async def test_a_plan_has_no_down_payment_to_take_where_the_policy_has_none(pg_dsn, make_session) -> None:
-    seed_world(pg_dsn)
-    s = await make_session("CARD-04")
-    refused = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "payment_plan"})
-    assert refused == {
-        "error": "This account's payment plans have no down payment: nothing to charge for payment_plan."
-    }
-    assert support.PAYNEARME.payments == []
-
-
-# --- arrangements and promises --------------------------------------------------------------------
-
-
 async def test_a_down_payment_then_the_plan_the_agent_chose(pg_dsn, make_session) -> None:
     """PHONE-02: $105.00 charged on the call, then 10 x $94.50 with no payment method; the loan is not re-aged."""
     seed_world(pg_dsn)
     s = await make_session("PHONE-02")
-    down = await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "payment_plan"})
+    down = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": "105.00", "option_id": "payment_plan"}
+    )
     assert (down["status"], down["amount"], down["remaining_balance"]) == ("approved", "$105.00", "$945.00")
     plan = await s.dispatch(
-        "create_arrangement", {"option_id": "payment_plan", "months": 10, "first_due_on": "2026-12-01"}
+        "create_arrangement",
+        {
+            "kind": "payment_plan",
+            "total": "945.00",
+            "months": 10,
+            "first_due_on": "2026-12-01",
+            "option_id": "payment_plan",
+        },
     )
     assert plan == {
         "recorded": "plan",
@@ -419,7 +472,8 @@ async def test_plan_payments_are_equal_rounded_down_and_the_last_takes_the_remai
     seed_world(pg_dsn)
     s = await make_session("CARD-04")
     plan = await s.dispatch(
-        "create_arrangement", {"option_id": "payment_plan", "months": 7, "first_due_on": "2026-11-30"}
+        "create_arrangement",
+        {"kind": "payment_plan", "total": "2400.00", "months": 7, "first_due_on": "2026-11-30"},
     )
     assert [i["amount"] for i in plan["instalments"]] == ["$342.85"] * 6 + ["$342.90"]
     assert [i["due_on"] for i in plan["instalments"]][:4] == [
@@ -435,7 +489,7 @@ async def test_an_off_policy_plan_is_recorded_as_the_agent_chose_it(pg_dsn, make
     s = await make_session("CARD-04")
     late = (CALL_DATE + timedelta(days=45)).isoformat()
     plan = await s.dispatch(
-        "create_arrangement", {"option_id": "payment_plan", "months": 60, "first_due_on": late}
+        "create_arrangement", {"kind": "payment_plan", "total": "2400.00", "months": 60, "first_due_on": late}
     )
     assert plan["recorded"] == "plan" and len(plan["instalments"]) == 60
     (row,) = rows(pg_dsn, "arrangements")
@@ -447,7 +501,13 @@ async def test_a_discount_agreement_is_one_payment_of_its_amount(pg_dsn, make_se
     seed_world(pg_dsn)
     s = await make_session("PHONE-08")
     agreed = await s.dispatch(
-        "create_arrangement", {"option_id": "discount_20", "first_due_on": CALL_DATE.isoformat()}
+        "create_arrangement",
+        {
+            "kind": "discount",
+            "total": "512.00",
+            "first_due_on": CALL_DATE.isoformat(),
+            "option_id": "discount_20",
+        },
     )
     assert (agreed["recorded"], agreed["total"], agreed["instalments"]) == (
         "settlement_lump", "$512.00", [{"due_on": "2026-11-03", "amount": "$512.00"}],
@@ -456,27 +516,68 @@ async def test_a_discount_agreement_is_one_payment_of_its_amount(pg_dsn, make_se
     assert (row["kind"], row["total_cents"], row["method_id"]) == ("settlement_lump", 51_200, None)
 
 
-async def test_an_unknown_option_is_a_fact_not_a_verdict(pg_dsn, make_session) -> None:
+async def test_off_policy_money_reaches_paynearme_the_ledger_and_the_records(pg_dsn, make_session) -> None:
+    """Nothing refuses the agent: a 50% discount the policy does not list is charged on PayNearMe, recorded, posted
+    and the rest written off; its agreement and a promise are recorded as the agent states them. The bench grades
+    it after the call."""
     seed_world(pg_dsn)
     s = await make_session("CARD-04")
-    for tool, args in (
-        ("create_arrangement", {"option_id": "discount_50", "first_due_on": "2026-11-10"}),
-        ("record_promise", {"option_id": "discount_50", "due_on": "2026-11-10", "method": "card"}),
-    ):
-        assert await s.dispatch(tool, args) == {
-            "error": "discount_50 is not an option on this account's policy: pif, payment_plan, discount_15, "
-            "discount_25, discount_40."
-        }
+    paid = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": "1200.00", "option_id": "discount_50"}
+    )
+    assert (paid["status"], paid["amount"], paid["remaining_balance"]) == ("approved", "$1,200.00", "$0.00")
+    assert [w[0] for w in support.LEDGER.writes] == ["repayment", "writeoff"]
+    agreed = await s.dispatch(
+        "create_arrangement",
+        {"kind": "discount", "total": "1200.00", "first_due_on": "2026-12-31", "option_id": "discount_50"},
+    )
+    promised = await s.dispatch(
+        "record_promise", {"amount": "99.99", "due_on": "2027-06-01", "method": "check"}
+    )
+    assert (agreed["recorded"], agreed["total"], promised["amount"]) == (
+        "settlement_lump",
+        "$1,200.00",
+        "$99.99",
+    )
+    assert [(r["amount_cents"], r["status"]) for r in rows(pg_dsn, "payments")] == [(120_000, "approved")]
+    assert [r["total_cents"] for r in rows(pg_dsn, "arrangements")] == [120_000]
+    assert [r["amount_cents"] for r in rows(pg_dsn, "promises_to_pay")] == [9_999]
+
+
+async def test_paying_in_full_posts_the_payment_and_writes_nothing_off(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("HOSP-01")
+    paid = await s.dispatch(
+        "take_payment", {"method_id": await card(s), "amount": "412.75", "option_id": "pif"}
+    )
+    assert (paid["status"], paid["remaining_balance"]) == ("approved", "$0.00")
+    assert [w[0] for w in support.LEDGER.writes] == ["repayment"]
+    assert support.LEDGER.status(account_id("HOSP-01")) == STATUS_CLOSED
+
+
+async def test_malformed_input_is_the_only_error(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    method_id = await card(s)
+    assert await s.dispatch("take_payment", {"method_id": "31nope", "amount": "10.00"}) == {
+        "error": "Unknown method_id 31nope: no card or bank account with that id was saved on this call."
+    }
+    assert await s.dispatch("take_payment", {"method_id": method_id, "amount": "ten dollars"}) == {
+        "error": "amount 'ten dollars' is not an amount in dollars, such as 1440.00."
+    }
     assert await s.dispatch(
-        "create_arrangement", {"option_id": "payment_plan", "first_due_on": "2026-11-10"}
-    ) == {"error": "A payment plan needs months: the number of monthly payments the consumer agreed to."}
+        "create_arrangement", {"kind": "payment_plan", "total": "2400.00", "first_due_on": "2026-11-10"}
+    ) == {"error": "A payment plan is a number of monthly payments: months was not passed."}
+    assert support.PAYNEARME.payments == [] and rows(pg_dsn, "arrangements") == []
 
 
 async def test_a_promise_is_recorded_as_agreed(pg_dsn, make_session) -> None:
     seed_world(pg_dsn)
     s = await make_session("CARD-09")
     far = (CALL_DATE + timedelta(days=40)).isoformat()  # beyond 14 days: recorded, not refused
-    promised = await s.dispatch("record_promise", {"option_id": "pif", "due_on": far, "method": "check"})
+    promised = await s.dispatch(
+        "record_promise", {"amount": "1180.00", "due_on": far, "method": "check", "option_id": "pif"}
+    )
     assert promised == {"recorded": "promise", "amount": "$1,180.00", "due_on": far, "method": "check"}
     (row,) = rows(pg_dsn, "promises_to_pay")
     assert (row["amount_cents"], row["due_on"], row["method"]) == (118_000, date.fromisoformat(far), "check")
@@ -488,11 +589,14 @@ async def test_money_tool_results_carry_facts_only(pg_dsn, make_session) -> None
     results: list[dict[str, Any]] = [
         await s.dispatch("get_payment_options", {}),
         await s.dispatch("request_approval", {"option_id": "discount_10"}),
-        await s.dispatch("take_payment", {"method_id": await card(s), "option_id": "payment_plan"}),
         await s.dispatch(
-            "create_arrangement", {"option_id": "payment_plan", "months": 10, "first_due_on": "2026-12-01"}
+            "take_payment", {"method_id": await card(s), "amount": "105.00", "option_id": "payment_plan"}
         ),
-        await s.dispatch("record_promise", {"option_id": "pif", "due_on": "2026-11-10", "method": "card"}),
+        await s.dispatch(
+            "create_arrangement",
+            {"kind": "payment_plan", "total": "945.00", "months": 10, "first_due_on": "2026-12-01"},
+        ),
+        await s.dispatch("record_promise", {"amount": "1050.00", "due_on": "2026-11-10", "method": "card"}),
     ]
     text = json.dumps(results[1:])  # results[0] is the creditor's policy, its rules in the creditor's words
     for answer in (
@@ -518,14 +622,22 @@ def test_tool_hints_state_facts_not_lines_or_verdicts() -> None:
         assert not re.search(r"ToolError\(\s*f?\"[^\"]*(must|may not|not allowed|first)", source), module
 
 
-def test_the_money_tools_take_an_option_id_never_an_amount() -> None:
+def test_the_money_tools_take_the_amount_and_terms_the_agent_states() -> None:
     specs = {t.name: t.parameters for t in REGISTRY.specs()}
-    for tool in ("take_payment", "create_arrangement", "record_promise", "request_approval"):
-        props = specs[tool]["properties"]
-        assert "option_id" in props and "option_id" in specs[tool]["required"], tool
-        assert not {"amount", "amount_cents", "total", "instalment_count"} & set(props), tool
-    assert set(specs["create_arrangement"]["properties"]) == {"option_id", "months", "first_due_on"}
+    assert set(specs["take_payment"]["required"]) == {"method_id", "amount"}
+    assert set(specs["take_payment"]["properties"]) == {"method_id", "amount", "option_id"}
+    assert set(specs["create_arrangement"]["properties"]) == {
+        "kind",
+        "total",
+        "months",
+        "first_due_on",
+        "option_id",
+    }
+    assert set(specs["record_promise"]["properties"]) == {"amount", "due_on", "method", "option_id"}
+    for tool in ("take_payment", "create_arrangement", "record_promise"):
+        assert "option_id" not in specs[tool]["required"], f"{tool}: the option is only a label"
     assert "method_id" not in specs["create_arrangement"]["properties"], "a plan takes no payment method"
+    assert specs["request_approval"]["required"] == ["option_id"]
     assert specs["get_payment_options"]["properties"] == {}
 
 

@@ -42,7 +42,7 @@ class VerifyArgs(BaseModel):
     name: str | None = Field(
         None,
         description="The consumer's name as the person said it or said yes to (e.g. 'this is Marisol', or 'yes' to "
-        "'is this Marisol?'). A first name is enough. Pass it with every call once they have said it.",
+        "'is this Marisol?'). A first name matches the record's first name.",
     )
     date_of_birth: date | None = Field(None, description="Date of birth the person said, as YYYY-MM-DD.")
     zip: str | None = Field(None, description="ZIP code the person said, digits only.")
@@ -95,11 +95,11 @@ def _given(args: VerifyArgs) -> dict[str, Any]:
 
 @REGISTRY.tool(VerifyArgs)
 async def verify_right_party(session: RemiCall, args: VerifyArgs) -> dict[str, Any]:
-    """Check what the person on the line said against the consumer record: the name they said or confirmed (a
-    first name is enough) and whichever of date of birth, ZIP code and SSN last four they have just said, exactly
-    as they said it. Facts count as they come; the name plus two matching facts verify. For an estate's executor
-    or administrator use role 'estate_rep' with their full name. The result says whether this answer matched and
-    what is confirmed so far, never which fact did not match."""
+    """Checks what the person on the line said against the consumer record: the name they said or confirmed (a
+    first name matches) and any of date of birth, ZIP code and SSN last four. Facts count as they come; the name
+    plus two matching facts verify. With role 'estate_rep', an estate executor's or administrator's full name is
+    checked. The result says whether this answer matched and what is confirmed so far, never which fact did not
+    match."""
     await session.ensure_account()
     consumer = session.consumer
     assert consumer is not None
@@ -157,7 +157,7 @@ class NoArgs(BaseModel):
 
 @REGISTRY.tool(NoArgs)
 async def record_verification_refused(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Record that the person declined to verify on this call (they will not give the details, as opposed to
+    """Records that the person declined to verify on this call (they will not give the details, as opposed to
     giving details that do not match). The call's record shows it as a refusal to verify."""
     session.verification_refused = True
     return {"recorded": "refused_verification"}
@@ -167,8 +167,8 @@ async def record_verification_refused(session: RemiCall, _: NoArgs) -> dict[str,
 async def get_debt_details(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """Reads the debt: the creditor, the original account's last four digits, the current balance, its
     itemization since its basis (a charge-off, a hospital's placement or a car's sale: the balance then, interest
-    and fees since, payments since), the validation notice's date, and the end of the time to sue. The dialer
-    already read it when the call connected (see "Account on screen"); call it again to re-read."""
+    and fees since, payments since), the validation notice's date, and the end of the time to sue. The screen pop
+    read it when the call connected ("Account on screen")."""
     account = await session.ensure_account()
     creditor = session.creditor
     assert creditor is not None

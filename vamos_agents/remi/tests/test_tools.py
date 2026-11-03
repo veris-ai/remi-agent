@@ -8,7 +8,7 @@ what it is told (WORLD.md, "Nothing refuses the agent"). Against the real Postgr
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import psycopg
@@ -192,8 +192,11 @@ async def test_no_tool_waits_for_verification_or_stops_after_a_dispute(pg_dsn, m
         ("log_dispute", {"words": "The furniture never arrived."}),
         ("record_flag", {"kind": "cease"}),
         ("request_approval", {"option_id": "discount_40"}),
-        ("record_promise", {"option_id": "pif", "due_on": "2026-11-10", "method": "card"}),
-        ("create_arrangement", {"option_id": "payment_plan", "months": 6, "first_due_on": "2026-12-01"}),
+        ("record_promise", {"amount": "900.00", "due_on": "2026-11-10", "method": "card"}),
+        (
+            "create_arrangement",
+            {"kind": "payment_plan", "total": "900.00", "months": 6, "first_due_on": "2026-12-01"},
+        ),
         (
             "schedule_callback",
             {"scheduled_for": "2026-11-03T23:30:00-05:00", "consumer_asked_or_agreed": False},
@@ -515,3 +518,71 @@ def test_the_summary_is_asked_for_only_what_happened() -> None:
 
 def test_every_pilot_call_is_on_the_worlds_day() -> None:
     assert {support.context(task).call_time.date() for task in support.CONTEXTS} == {support.CALL_DATE}
+
+
+async def test_a_second_death_report_updates_the_one_flag(pg_dsn, make_session, ticks) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-09")
+    first = {"kind": "deceased", "reported_by": "Ivan Petrov", "relationship": "brother"}
+    await s.dispatch("record_flag", first)
+    ticks.t += 30
+    await s.dispatch(
+        "record_flag", {**first, "relationship": "brother, the executor", "died_on": "2026-09-30"}
+    )
+    ticks.t += 30
+    await s.dispatch(
+        "record_flag", {**first, "relationship": "brother, the executor", "died_on": "2026-09-29"}
+    )
+    (flag,) = [f for f in rows(pg_dsn, "account_flags") if f["kind"] == "deceased"]
+    assert flag["details"] == {
+        "reported_by": "Ivan Petrov",
+        "relationship": "brother, the executor",
+        "is_estate_rep": False,
+    }
+    (consumer,) = rows(pg_dsn, "consumers", "consumer_id = 'con_261102'")
+    assert consumer["deceased_on"] == date(2026, 9, 29)
+
+
+async def test_consent_is_revoked_once_and_a_revoked_number_is_left_as_it_was(
+    pg_dsn, make_session, ticks
+) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("LAW-17")
+    await s.dispatch("revoke_consent", {})
+    (first,) = rows(pg_dsn, "phones", "phone_id = 'ph_261112_1'")
+    ticks.t += 60
+    assert await s.dispatch("revoke_consent", {}) == {
+        "recorded": "consent_revoked",
+        "phone_id": "ph_261112_1",
+    }
+    (again,) = rows(pg_dsn, "phones", "phone_id = 'ph_261112_1'")
+    assert again["consent_revoked_at"] == first["consent_revoked_at"] == support.context("LAW-17").call_time
+    revoked = "2026-10-01T10:00:00-04:00"
+    seed_world(
+        pg_dsn, sql=f"update phones set consent_revoked_at = '{revoked}' where phone_id = 'ph_261112_1'"
+    )
+    s2 = await make_session("LAW-17")
+    await s2.dispatch("revoke_consent", {})
+    (kept,) = rows(pg_dsn, "phones", "phone_id = 'ph_261112_1'")
+    assert (
+        kept["consent_revoked_at"].isoformat()
+        == datetime.fromisoformat(revoked).astimezone(kept["consent_revoked_at"].tzinfo).isoformat()
+    )
+
+
+def test_no_tool_description_instructs_or_names_a_next_step() -> None:
+    """Tool and parameter descriptions say what a tool does and what it records, never what to do or what next."""
+    from vamos_agents.remi.tools.catalog import REGISTRY
+
+    hints = (
+        "Refer to", "Call it", "call it", "Pass it", "Pass an", "so it can be charged", "is revoke_consent",
+        "is record_flag", "is create_arrangement", "Use it", "use role", "should ", "must ", "first,",
+        "(take_payment)", "is stop_calling", "Confirm ", "say ", "tell ",
+    )  # fmt: skip
+    for spec in REGISTRY.specs():
+        texts = [spec.description] + [
+            p.get("description", "") for p in spec.parameters["properties"].values()
+        ]
+        for text in texts:
+            for hint in hints:
+                assert hint not in text, (spec.name, hint, text)

@@ -77,9 +77,9 @@ registered for re-reads.
 | `get_payment_options` | The World's `creditor_policy(account_id, call_date)`, verbatim: the creditor and how it is named, the balance, the options (`pif`, `payment_plan`, each `discount_<pct>`) with amounts, requirements and due dates, the agency's offer rules and the creditor's rules. Fixed policy priced from the account: no call state. |
 | `request_approval` | An option id to the World's supervisor; returns only `{"approved", "reason"}`. |
 | `add_payment_method` | Card or bank account to PayNearMe's `create_payment_method` on the account's order, with the billing details the agent passes: PayNearMe requires a card's security code and billing name, address and ZIP (5 or 9 digits), and a bank account's billing name and ZIP; the phone is optional. Remi passes what it is given and never fills a field in from the account record; a missing one comes back as PayNearMe's "Missing required parameter". Returns the `method_id` and last four; every card, bank and billing field redacted. |
-| `take_payment` | `method_id` + `option_id`, no amount: the full balance, a discount, or the plan's down payment, charged on PayNearMe's `make_payment`. Returns PayNearMe's answer as given (`status`, `response_code`, `response_message`). The agent's record of it is the `payments` row; an approved payment is posted to the account's loan keyed by PayNearMe's payment id, and a discount's rest is written off. A refusal (an up-to order's limit, a wrong signature) is PayNearMe's words. |
-| `create_arrangement` | `option_id` + `first_due_on` (+ `months` for `payment_plan`): a plan of the months the agent chose over what the plan covers, equal payments rounded down with the remainder last, one in each month, with no payment method (no automatic payments); or a discount or the full balance as one payment on a date. Queues the written confirmation. |
-| `record_promise` | The full balance or a discount, on a date, and how they will pay. |
+| `take_payment` | `method_id` + `amount` (the agent's, in dollars) + an optional `option_id` label, charged on PayNearMe's `make_payment`; nothing is refused for being off the policy. Returns PayNearMe's answer as given (`status`, `response_code`, `response_message`). The agent's record of it is the `payments` row (if it cannot be written, the failure is logged loudly and PayNearMe's answer still stands); an approved payment is posted to the account's loan keyed by PayNearMe's payment id, and once a payment labelled `discount_<pct>` is posted the rest is written off. A refusal (an up-to order's limit, a wrong signature) is PayNearMe's words. |
+| `create_arrangement` | `kind` (`payment_plan`, `discount`, `full_balance`) + `total` + `first_due_on` (+ `months` for a plan) + an optional `option_id` label, as the agent states them: a plan's payments are equal, rounded down with the remainder last, one in each month, with no payment method (no automatic payments); a discount or the full balance is one payment on a date. Queues the written confirmation. |
+| `record_promise` | The `amount` the agent states, on a date, and how they will pay (+ an optional `option_id` label). |
 | `schedule_callback` | A callback on the dialed number, recording whether the consumer asked for or agreed to the time. |
 | `queue_letter` | Idempotent per call. |
 | `transfer_to_human` | Disposition `transferred` (by precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
@@ -117,9 +117,11 @@ agent reads it from `get_payment_options` (manual 8.3).
 
 Tool results describe facts, never words to say or what to do next:
 `tests/test_payment_options.py` scans the tool sources for "allowed now"
-guidance and steering refusals. No amount goes into a money tool (an
-`option_id` carries it); results carry dollars as strings (`"$250.00"`). The
-World's rows stay in cents, and the ledger's and PayNearMe's wires take dollars.
+guidance and steering refusals, and `tests/test_tools.py` every tool and
+parameter description for instructions or next steps. The money tools take the
+amounts and terms the agent states (an `option_id` is only a label); results
+carry dollars as strings (`"$250.00"`). The World's rows stay in cents, and the
+ledger's and PayNearMe's wires take dollars.
 
 ## The creditor's policy
 
@@ -131,9 +133,9 @@ the model verbatim (`get_payment_options`): what may be offered (`pif`,
 hardship, the consumer's no to financial assistance, a supervisor's OK), when
 it is due, and the creditor's other rules. A supervisor's OK is the World's
 `request_approval`, a person in the World who answers only "Approved.", "Not
-approved." and the like. Remi enforces none of it: the money tools take an
-option id and do what the agent chose, and the bench grades it after the call
-from what the World holds.
+approved." and the like. Remi enforces none of it: the money tools take the
+amounts and terms the agent states and do what it chose, and the bench grades it
+after the call from what the World holds.
 
 ## Payments
 

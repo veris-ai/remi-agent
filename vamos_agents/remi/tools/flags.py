@@ -32,10 +32,8 @@ class DisputeArgs(BaseModel):
 
 @REGISTRY.tool(DisputeArgs)
 async def log_dispute(session: RemiCall, args: DisputeArgs) -> dict[str, Any]:
-    """Record a dispute, in the consumer's own words: the debt is not theirs, the amount is wrong, it was already
-    paid, identity theft, insurance should have paid it, they ask for proof that they owe it, or a claim the
-    creditor's policy names as a dispute. Marks the account disputed and queues the letter on how to ask for
-    proof in writing."""
+    """Records a dispute, in the consumer's own words. Marks the account disputed and queues the letter on how to
+    ask for proof in writing."""
     async with session.db.transaction() as tx:
         await session.insert_flag(tx, "dispute", {"words": args.words})
         await session.queue_letters(tx, "substantiation_instructions")
@@ -88,8 +86,7 @@ class FlagArgs(BaseModel):
 
 @REGISTRY.tool(FlagArgs)
 async def record_flag(session: RemiCall, args: FlagArgs) -> dict[str, Any]:
-    """Record a fact about the account: cease (stop all contact), channel_optout (stop one channel; one call per
-    channel), attorney (name, phone), bankruptcy (chapter, case number, court, filing date), deceased (who
+    """Records a fact about the account: cease (stop all contact), channel_optout (one channel stopped), attorney (name, phone), bankruptcy (chapter, case number, court, filing date), deceased (who
     reported it, their relationship, the date of death), scra (active military duty, the branch), hardship (in
     the consumer's own words), original_creditor_request (returns the original creditor's name and address on
     file), language_preference (an ISO 639-1 code), financial_assistance_wanted (they want to apply for the
@@ -229,8 +226,7 @@ class NoArgs(BaseModel):
 
 @REGISTRY.tool(NoArgs)
 async def report_wrong_number(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Record that the number you called is not the consumer's (a wrong number): marks the dialed phone
-    wrong_number. Its consent is revoke_consent."""
+    """Records that the number you called is not the consumer's: marks the dialed phone wrong_number."""
     phone = await session.ensure_phone()
     if not session.phone_marked_wrong and phone.status != "wrong_number":
         async with session.db.transaction() as tx:
@@ -241,9 +237,8 @@ async def report_wrong_number(session: RemiCall, _: NoArgs) -> dict[str, Any]:
 
 @REGISTRY.tool(NoArgs)
 async def stop_calling_this_number(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Record a request to stop calling from a person who has not verified, for a person to review (an
-    unverified_stop_request on the account, naming the dialed number). Revoking the number's consent is
-    revoke_consent; a verified consumer's request is record_flag cease or channel_optout."""
+    """Records a request to stop calling from a person who has not verified, for a person to review: an
+    unverified_stop_request on the account, naming the dialed number."""
     async with session.db.transaction() as tx:
         await session.insert_flag(tx, "unverified_stop_request", {"phone_id": session.context.phone_id})
     session.number_stop = "unverified"
@@ -252,7 +247,7 @@ async def stop_calling_this_number(session: RemiCall, _: NoArgs) -> dict[str, An
 
 @REGISTRY.tool(NoArgs)
 async def revoke_consent(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Revoke the artificial-voice consent of the number you called, now."""
+    """Revokes the artificial-voice consent of the number you called, now."""
     phone = await session.ensure_phone()
     async with session.db.transaction() as tx:
         await session.revoke_consent(tx, phone)

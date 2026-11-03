@@ -30,8 +30,7 @@ class NoArgs(BaseModel):
 async def get_payment_options(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """This account's creditor policy: how the creditor is named, the balance, what may be offered and on what
     terms (the full balance 'pif', a 'payment_plan', each 'discount_<pct>', with their amounts and due dates),
-    and the creditor's other rules. Pass an option's id to take_payment, create_arrangement, record_promise or
-    request_approval."""
+    and the creditor's other rules."""
     return await session.read_policy()
 
 
@@ -41,7 +40,7 @@ class ApprovalArgs(BaseModel):
 
 @REGISTRY.tool(ApprovalArgs)
 async def request_approval(session: RemiCall, args: ApprovalArgs) -> dict[str, Any]:
-    """Ask a supervisor for an OK on one of this account's options. Returns the supervisor's answer."""
+    """Asks a supervisor for an OK on one of this account's options. Returns the supervisor's answer."""
     answer = await session.db.policy_function(
         "request_approval", {"account_id": session.context.account_id, "option_id": args.option_id}
     )

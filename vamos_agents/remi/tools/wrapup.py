@@ -35,7 +35,7 @@ class CallbackArgs(BaseModel):
 
 @REGISTRY.tool(CallbackArgs)
 async def schedule_callback(session: RemiCall, args: CallbackArgs) -> dict[str, Any]:
-    """Schedule a call back on the number you called, recording whether the consumer asked for or agreed to the
+    """Schedules a call back on the number you called, recording whether the consumer asked for or agreed to the
     time."""
     when = args.scheduled_for if args.scheduled_for.tzinfo else args.scheduled_for.replace(tzinfo=EASTERN)
     when = when.astimezone(EASTERN)
@@ -73,9 +73,7 @@ class LetterArgs(BaseModel):
 
 @REGISTRY.tool(LetterArgs)
 async def queue_letter(session: RemiCall, args: LetterArgs) -> dict[str, Any]:
-    """Queue a letter to the consumer's address on file. log_dispute, record_flag cease or
-    original_creditor_request, and create_arrangement queue their own letter; a letter is queued at most once
-    per call."""
+    """Queues a letter to the consumer's address on file; a kind already queued on this call is not queued again."""
     async with session.db.transaction() as tx:
         queued = await session.queue_letters(tx, args.kind)
     return {"queued": args.kind} if queued else {"queued": args.kind, "already_queued_on_this_call": True}
@@ -89,7 +87,7 @@ class TransferArgs(BaseModel):
 
 @REGISTRY.tool(TransferArgs)
 async def transfer_to_human(session: RemiCall, args: TransferArgs) -> dict[str, Any]:
-    """Transfer the call to a person."""
+    """Transfers the call to a person."""
     session.transferred = True
     return {"transferred": True, "reason": args.reason}
 
@@ -104,8 +102,8 @@ class ContactLogArgs(BaseModel):
     )
     summary: str = Field(
         min_length=10,
-        description="One or two plain-language sentences: what was actually said and done on this call, and the "
-        "outcome. Only what happened, never what you meant or were told to say.",
+        description="What was actually said and done on this call, and its outcome, in plain language: what happened, "
+        "never what you meant or were told to say.",
     )
     number_is_wrong: bool = Field(
         False,
@@ -115,7 +113,7 @@ class ContactLogArgs(BaseModel):
 
 @REGISTRY.tool(ContactLogArgs)
 async def log_contact_attempt(session: RemiCall, args: ContactLogArgs) -> dict[str, Any]:
-    """Log this call's one contact record: who answered and what happened. The record is written when the call
+    """Logs this call's one contact record: who answered and what happened. The record is written when the call
     ends, with the time, duration and disposition filled in from everything recorded on the call. Calling it
     again replaces your log."""
     session.contact_note = ContactNote(args.answered_by, args.summary.strip(), args.number_is_wrong)
@@ -128,7 +126,7 @@ class NoArgs(BaseModel):
 
 @REGISTRY.tool(NoArgs)
 async def end_call(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Hang up, once your last words have played. Writes the call's contact record (with your log, if you
+    """Hangs up once your last words have played. Writes the call's contact record (with your log, if you
     logged the call)."""
     await session.write_contact_record()
     session.ended = True

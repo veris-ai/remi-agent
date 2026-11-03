@@ -43,7 +43,7 @@ async def get_account(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """Reads the account being called (from the dialer's context): the consumer's name, the account's status
     and creditor, its dates (the loan's date, the end of the time to sue, the notices mailed) and its own facts
     (a phone account's balance parts, a hospital account's treatment date, an auto deficiency's car and sale).
-    The dialer already ran it when the call connected (see "Account on screen"); call it again to re-read."""
+    The screen pop read it when the call connected ("Account on screen")."""
     account = await session.load_account()
     consumer, creditor, agency = session.consumer, session.creditor, session.agency
     assert consumer is not None and creditor is not None and agency is not None
