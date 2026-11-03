@@ -141,6 +141,25 @@ close. Pipecat owns its transport, so its `LineSerializer` applies the same
 `Framing`: the pipeline's `EndFrame`/`CancelFrame` is written as `end` before
 Pipecat closes with 1000, and a caller's `end` cancels the pipeline.
 
+**What is written is heard.** The actor plays every byte of agent audio it
+receives at 1x (veris-sandbox `actor-service/app/actor/channels/voice_base.py`)
+and never drops queued agent speech when the caller talks over the agent;
+neither framing has a "clear" message. So what was written is what the
+caller heard (`OutboundAudio.heard_ms`), and **the agent's memory must hold
+exactly what the caller heard**. Most vendors stream faster than real time:
+`OutboundAudio` is the playback buffer a phone gateway would be, writing audio
+at most `PLAYBACK_LEAD_S` (1 s) ahead of real time while the rest waits in
+order. On the vendor's interruption signal, queued audio is dropped
+(`interrupted(drop_unsent=True)`) only by a provider that then cuts the
+vendor's context to `heard_ms`: OpenAI Realtime (`conversation.item.truncate`)
+and the in-pod cascade (its own history). A vendor that keeps in its context
+everything it sent and cannot be told what the caller heard (Grok, Gemini
+Live, the managed agents, the hosted orchestrators, gradbot) drops nothing:
+all of it plays (`interrupted()`), so its memory matches what was heard.
+Pipecat's transport plays the buffer's role itself: it writes at 1x (one 40 ms
+chunk per 40 ms), drops its unsent audio on an interruption, and keeps in its
+context only the text whose audio it wrote.
+
 ## 4. The boundary: framework vs pack, and why
 
 | Lives in `vamos_voice/` (framework) | Lives in `vamos_agents/<name>/` (pack) |
@@ -299,8 +318,11 @@ on every vendor; turn taking stays each vendor's own.
 
 Turn taking is the vendor's own: server VAD with `create_response` and
 `interrupt_response` on (OpenAI), Grok's VAD as documented. The provider never
-answers a caller turn itself and never cancels a response; on caller speech it
-only truncates the context to what was played (where the vendor supports it).
+answers a caller turn itself and never cancels a response. On caller speech,
+OpenAI's playback stops (queued audio and the rest of the interrupted item are
+dropped) and its context is truncated to what was written to the line; Grok,
+which cannot truncate, keeps its whole reply in context, so nothing of it is
+dropped.
 Its own requests (tool results, the opening turn) are serialized: one asked for
 while a response is in flight waits for its `response.done` (requests
 coalesce), and one refused with `conversation_already_has_active_response` is
@@ -364,7 +386,11 @@ Remi, and document it here.
    and run `call.inbound.run()`; if `setup.start_policy.agent_opens` request
    the opening turn. Never ask the model to act before the callee speaks. Call
    `call.start.mark_callee_spoke()` on the vendor's first user-turn signal;
-   send agent audio only via `call.outbound.send`.
+   send agent audio only via `call.outbound.send` (it never blocks: audio past
+   the 1 s lead is queued) and call `call.outbound.interrupted()` on the
+   vendor's interruption signal; pass `drop_unsent=True` only if the provider
+   then cuts the vendor's context to `heard_ms` (the agent's memory must hold
+   exactly what the caller heard).
 5. Route every tool call to `call.session.dispatch` and send its dict back;
    when `call.session.ended`, `await call.hang_up()`.
 6. Use `vamos_voice.providers.wire.connect_websocket` (the client the bench's
@@ -387,7 +413,7 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 |---|---|---|---|---|---|
 | Where the tools go | `session.update` `tools` | same | `setup.tools` | the backend's `delegation.responses.tools`; the live model runs none and is told their names in its instructions (`live_instructions`, one line each), which OpenAI's live-prompting guide says it uses to decide what to hand off | the LLM service's tools |
 | Forced tool choice (never used: the screen pop needs none) | `response.create` `tool_choice` | **no** (undocumented) | **no** | on the backend only (left `"auto"`) | `tool_choice` on the SDK call |
-| Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`); the tool calls pending at the barge-in come back in a `toolCallCancellation`, by then already run and answered: logged (ids, tool names, whether each returned an error), nothing undone, skipped or sent | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
+| Barge-in truncation (context cut to what was heard) | on `speech_started`: queued audio and the rest of the item dropped; `conversation.item.truncate` at `heard_ms` (what was written) when part of the item will not be heard (audio dropped, or still streaming); none for an item written in full and done | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech and keeps the reply in its context, so nothing is dropped: the caller hears all of it. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`); Gemini keeps in its history what it had sent, so nothing is dropped on `interrupted`; the tool calls pending at the barge-in come back in a `toolCallCancellation`, by then already run and answered: logged (ids, tool names, whether each returned an error), nothing undone, skipped or sent | **no** such event: full duplex, the live model stops itself (no signal, so audio already queued plays out) | Pipecat's interruption: its transport writes at 1x and drops what it has not sent; the context keeps the text whose audio was written |
 | Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |
 | `TurnTaking` mapping | **none**: `server_vad` on OpenAI's defaults | **none**: `server_vad` on xAI's defaults | **none**: automatic activity detection on Gemini's defaults | **none**: no VAD settings exist | **none**: Silero `VADParams()`, Pipecat's default start strategies and Smart Turn v3 stop |
 | Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat, except that an interruption does not cancel a running tool call (Pipecat 1.12 would settle it as `CANCELLED`): its real result replaces `IN_PROGRESS` and, as after Pipecat's cancel, runs no inference |
@@ -401,7 +427,7 @@ client-side over the same socket):
 |---|---|---|---|
 | Where the instructions and tools go | `Settings` (`agent.think.prompt` / `.functions`), per call. **The managed LLM caps the prompt** at 25,000 characters and truncates a longer one (`PROMPT_TOO_LONG` warning): a call over the cap fails before connecting, and that warning fails the call | a stored agent **created per call** (REST) and deleted after it; the prompt also rides `conversation_initiation_client_data` (for the trace) | `session.update` `soul` / `tools`, per call. **The host caps the soul** (`GET /config` `max_soul_chars`, 4,000 on `api.fluxions.ai`) and silently truncates: a call over the cap fails before connecting |
 | Tool schema changes | none | every parameter needs a `description`; an undescribed one gets its own name | none |
-| Barge-in truncation | **no**: Deepgram stops itself on `UserStartedSpeaking` | **no**: ElevenLabs stops itself (`interruption`) | the client is the playback buffer: audio arrives ~6x real time, is released at most 1 s ahead, `audio.flush` drops the rest, `playback.pos` reports what was heard |
+| Barge-in truncation | **no**: Deepgram stops itself on `UserStartedSpeaking` (nothing dropped: what it sent plays) | **no**: ElevenLabs stops itself (`interruption`; nothing dropped: what it sent plays) | the client is the playback buffer: audio arrives ~6x real time, is released at most 1 s ahead, `audio.flush` drops the rest, `playback.pos` reports what was heard |
 | Caller transcription | `ConversationText` (role `user`) | `user_transcript` | `user.transcript` |
 | `TurnTaking` mapping | **none** (`nova-3` has no endpointing setting) | **none** (a learned turn model; `turn_eagerness: normal`) | **none** (an adaptive end-of-utterance model with no knob) |
 | Callee-spoke signal | first user `ConversationText` | first non-empty `user_transcript` | first non-empty `user.transcript` |
@@ -457,9 +483,9 @@ vendors are compared under the same plumbing on both benches.
   stops the audio (`OutboundAudio.interrupted`), clears the vendor's
   TTS utterance (xAI `text.clear`), and silences the rest of the turn. The LLM
   round it lands in still completes, and its tool calls are neither cancelled
-  nor delayed (each runs when the model makes it); the reply is
-  kept in the history as the words the caller can have heard
-  (`OutboundAudio.played_ms`), marked `… [interrupted by the caller]`.
+  nor delayed (each runs when the model makes it); the reply is kept in the
+  history as the words the caller heard (`OutboundAudio.heard_ms`: everything
+  written to the line), marked `… [interrupted by the caller]`.
 - **Playout.** TTS audio leaves in 0.5 s slices, at most 1 s ahead of real
   time (vendors synthesize faster than speech plays; audio already at the
   caller cannot be cut).
@@ -483,8 +509,8 @@ on Energy.
 | Capability | mistral | huggingface | grok_cascade | gradium |
 |---|---|---|---|---|
 | End of turn | local: Silero + `silence_ms`, then `input_audio.flush` | local: Silero + `silence_ms`, utterance to Whisper | xAI's default endpointing (400 ms, no Smart Turn) | gradbot |
-| Barge-in | local Silero, `BargeInRule` (LiveKit's: pause at 0.5 s, resume after 2 s, a turn interrupts) | same | same + `text.clear` | gradbot (`interrupted` event) |
-| History after barge-in | trimmed to what played | trimmed | trimmed | gradbot keeps only transmitted words |
+| Barge-in | local Silero, `BargeInRule` (LiveKit's: pause at 0.5 s, resume after 2 s, a turn interrupts) | same | same + `text.clear` | gradbot (`interrupted` event; nothing dropped: what it sent plays) |
+| History after barge-in | trimmed to what was written (the caller hears all of it) | trimmed | trimmed | gradbot keeps only transmitted words |
 | Forced tool choice | never (`tool_choice="auto"`) | same | same | not exposed |
 | Callee-spoke signal | first finished turn | same | same | first `stt_text` |
 | `TurnTaking` mapping | `silence_ms`, `vad_threshold` (Silero start) | same | `vad_threshold` (barge-in only) | none: gradbot's defaults |
@@ -739,7 +765,7 @@ configured so the actor waits for the agent's greeting.
 | One repo per agent; a new benchmark means copying the whole stack | One framework, one pack per agent; adding an agent touches no framework file (section 9). |
 | ~1,500 duplicated lines: 15 `web.py`, tool-surface copies, 13 Dockerfiles, Grok ≈ copy of OpenAI | One `server.py`, one dispatch path, one `Dockerfile` (`ARG AGENT` x `ARG VENDOR`), one Realtime-protocol base. |
 | Call start implemented 15 ways (greeting fields, TTS frames, instructed turns) | One `CallStartPolicy`, honoured by every provider; parity tests assert what each sends, for both policies. |
-| Vendor behaviour drift (barge-in truncation, VAD thresholds, date injection) | every vendor on its own turn-taking defaults (no shared numbers sent); `OutboundAudio.played_ms` drives truncation; the date is rendered into one prompt. Parity tests assert the frames each vendor sends. |
+| Vendor behaviour drift (barge-in truncation, VAD thresholds, date injection) | every vendor on its own turn-taking defaults (no shared numbers sent); `OutboundAudio` is the playback buffer of every vendor but Pipecat, whose transport plays that role (at most 1 s ahead of real time), and the agent's memory holds exactly what was heard: queued audio is dropped on an interruption only where the context is cut to `heard_ms` (what was written), and plays in full elsewhere; the date is rendered into one prompt. Parity tests assert the frames each vendor sends. |
 | Parity tests that only checked module attributes | `tests/test_parity.py` runs each provider through scripted calls, agents x vendors. |
 | 73 unbounded `>=` deps, `uv:latest` | Every dependency bounded; `uv` and Python images pinned; `uv.lock` committed; `uv sync --locked`. |
 | Unauthenticated inbound webhooks / tunnels for hosted vendors | No tunnels. Only a provider's own `/vendor/<name>` routes, authenticated with a per-call secret and checked against the live call, dispatching through `CallSession`; Cartesia needs none (client tools on its socket). |
@@ -813,8 +839,15 @@ uv run ruff check . && uv run ruff format --check .
 - `tests/test_pipecat_tools.py`: Pipecat's LLM service and context aggregators with a scripted OpenAI stream:
   a tool call the caller talks over runs once, its real result reaches the context (never `CANCELLED`) and
   forces no inference; `end_call` talked over still hangs up.
+- `tests/test_outbound_audio.py`: the playback buffer every vendor but Pipecat writes through, on a
+  test clock: written at once within the 1 s lead, beyond it paced and in order, never blocking;
+  `interrupted()` drops nothing, `interrupted(drop_unsent=True)` only what was not written
+  (`sent_ms` falls back to `heard_ms`) while the playout clock runs on; `drain` waits for the
+  queue, capped by `MAX_DRAIN_S`; the pump stops once the line closes.
 - `tests/test_realtime_turns.py`: the Realtime call flow (nothing but the session at call start,
-  vendor-native turn taking, a request refused for an active response).
+  vendor-native turn taking, a request refused for an active response, barge-in: OpenAI drops queued
+  audio and the rest of the item and truncates at what was written only when part of the item will
+  not be heard; Grok drops nothing and sends no truncate).
 - `tests/test_smoke_inbound.py`: the real server with the fake inbound agent over `/voice`.
 - `tests/test_hosted_vendors.py`: Vapi and Cartesia through scripted calls (fake socket,
   `httpx.MockTransport` for their REST APIs): the call held for the callee, Vapi's webhook
@@ -824,7 +857,7 @@ uv run ruff check . && uv run ruff format --check .
   routes mounted under `/vendor/<name>`.
 - `tests/test_framing.py`: both framings, alone and through the real server (agent hang-up
   sends `end` before the 1000 close, a caller's `end` finalizes the call, binary unchanged),
-  and Pipecat's serializer.
+  Pipecat's serializer, and its transport writing agent audio at 1x.
 - `vamos_agents/remi/tests/`: Remi's tools against a real Postgres
   (`docker run postgres:16-alpine`, or `REMI_TEST_DATABASE_URL`) loaded with
   World v2's own SQL (schema, the creditors' policy engine, rows; vendored in

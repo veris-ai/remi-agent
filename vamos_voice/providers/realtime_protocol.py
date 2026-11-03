@@ -26,10 +26,17 @@ audio goes straight out.
 
 Turns are the vendor's own: its server VAD decides when the caller has
 finished (and the vendor replies), and when the caller interrupts the agent
-(the vendor stops its response; this provider only truncates the context to
-what was played). Nothing here filters, gates or second-guesses caller audio:
-these agents are benchmark reference candidates, and background noise is a
-benchmark condition that measures the vendor.
+(the vendor stops its response). The model's context must hold exactly what
+the caller heard: everything written to the line, since the ``voice_ws``
+caller plays every byte it receives. So on ``input_audio_buffer.speech_started``
+a vendor that truncates (OpenAI) gets what it asks of a client: playback stops
+(the agent audio still queued in ``OutboundAudio`` is dropped, and so is
+whatever the vendor still sends of the interrupted item) and the context is
+truncated to what was written. A vendor that cannot truncate (Grok) keeps its
+whole reply in its context, so nothing of it is dropped. Nothing here
+filters, gates or second-guesses caller audio: these agents are benchmark
+reference candidates, and background noise is a benchmark condition that
+measures the vendor.
 
 The provider's own requests are serialized: a ``response.create`` it asks for
 (tool results, the opening turn) while another response is in flight waits
@@ -109,6 +116,8 @@ class _RealtimeCall:
         self.provider, self.ws, self.call = provider, ws, call
         self.tool_answered = False  # a function_call_output went out in the current response
         self.audio_item: str | None = None
+        self.audio_streaming = False  # more audio of ``audio_item`` may still come (not done yet)
+        self.interrupted_item: str | None = None  # cut off by the caller: the rest of it is dropped
         # Responses this provider asked for, oldest first (popped at response.created), what
         # the running one is for ("vendor" when the vendor's VAD started it), and the one
         # request waiting for it to finish.
@@ -148,8 +157,12 @@ class _RealtimeCall:
         call = self.call
         if kind == "response.output_audio.delta":
             item = event.get("item_id", "")
-            self.audio_item = item
+            if item and item == self.interrupted_item:
+                return False  # the caller cut in: the rest of this item never reaches the line
+            self.audio_item, self.audio_streaming = item, True
             await call.outbound.send(base64.b64decode(event.get("delta", "")), item)
+        elif kind == "response.output_audio.done":
+            self.audio_streaming = False
         elif kind == "response.created":
             self.active = self.requested.popleft()[1] if self.requested else "vendor"
         elif kind == "input_audio_buffer.speech_started":
@@ -194,6 +207,7 @@ class _RealtimeCall:
     async def response_done(self, response: dict[str, Any]) -> bool:
         call = self.call
         answered, self.tool_answered = self.tool_answered, False
+        self.audio_streaming = False
         if self.active is None and self.requested:
             self.requested.popleft()  # done without a created (never in the GA protocol; be safe)
         self.active = None
@@ -208,22 +222,35 @@ class _RealtimeCall:
         return False
 
     async def barge_in(self) -> None:
-        """The caller talks over the agent. Where the vendor supports it, tell it how much of the
-        reply the caller actually heard, so the model's context does not contain words that never
-        played; either way, what is still queued will not be heard."""
-        item, outbound = self.audio_item, self.call.outbound
-        self.audio_item = None
-        if not item or outbound.played_ms(item) >= outbound.sent_ms(item):
-            return  # nothing of it is still unplayed
+        """The caller talks over the agent (the vendor stops its response itself). The model's
+        context must hold exactly what the caller heard, and the caller hears everything written
+        to the line (the ``voice_ws`` caller plays every byte it receives).
+
+        A vendor that truncates (OpenAI): stop playback, dropping the agent audio still queued and
+        whatever the vendor still sends of the interrupted item, and truncate an item the caller
+        will not hear in full (queued audio was dropped, or its audio is still streaming) to what
+        was written. An item written in full whose audio is done was heard in full: nothing is sent.
+
+        A vendor that cannot truncate (Grok) keeps in its context everything it generated, so
+        nothing is dropped: all of it reaches the caller."""
+        outbound = self.call.outbound
+        item, self.audio_item = self.audio_item, None
         if not self.provider.truncates_on_barge_in:
-            outbound.interrupted()
+            outbound.interrupted()  # nothing dropped: the vendor's context keeps the whole reply
             return
-        await self.send(
-            {
-                "type": "conversation.item.truncate",
-                "item_id": item,
-                "content_index": 0,
-                "audio_end_ms": outbound.played_ms(item),
-            }
-        )
-        outbound.interrupted()
+        dropped = outbound.interrupted(drop_unsent=True)
+        if not item:
+            return  # no agent audio since the last barge-in
+        self.interrupted_item = item
+        cut = [i for i, ms in dropped.items() if i and ms > 0]  # in playback order
+        if self.audio_streaming and item not in cut:
+            cut.append(item)
+        for i in cut:
+            await self.send(
+                {
+                    "type": "conversation.item.truncate",
+                    "item_id": i,
+                    "content_index": 0,
+                    "audio_end_ms": outbound.heard_ms(i),
+                }
+            )

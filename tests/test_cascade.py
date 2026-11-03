@@ -239,7 +239,8 @@ async def test_caller_speech_pauses_the_reply_and_a_caller_turn_interrupts_it(
     )
     assert assistant["content"].endswith(INTERRUPTED_MARKER)
     kept = assistant["content"].removesuffix(INTERRUPTED_MARKER).split()
-    assert 1 <= len(kept) < 15, kept
+    heard = call.outbound.heard_ms("reply-1")  # everything written: the caller plays every byte
+    assert 1 <= len(kept) == heard // provider.tts.ms_per_word < 40, (kept, heard)
     await stop(task)
 
 

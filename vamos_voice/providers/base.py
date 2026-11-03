@@ -11,8 +11,9 @@ by every provider:
 - ``start``: the ``CallStart`` (hold the line for the callee, or open with a greeting);
 - ``inbound`` / ``outbound``: caller audio in (forwarded once the provider binds
   its vendor send and runs the pump) and agent audio out (dropped until the
-  callee has spoken; playout tracked for barge-in truncation and for hanging
-  up after the last words).
+  callee has spoken; then the agent's playback buffer: written at most
+  ``PLAYBACK_LEAD_S`` ahead of real time, the rest queued, and what was written
+  tracked for barge-in truncation and for hanging up after the last words).
 
 A provider owns only what is genuinely vendor-specific: the wire protocol, the
 tool-format conversion, how it requests an opening turn, and how it maps
@@ -26,6 +27,7 @@ import abc
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, Self
@@ -43,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 #: Longest the agent waits for its last words to play before closing the line.
 MAX_DRAIN_S = 15.0
+#: How far ahead of real time agent audio is written to the caller's line (the in-pod cascade's and
+#: Fluxions' lead). The ``voice_ws`` caller plays every byte it receives, so audio beyond this waits in
+#: ``OutboundAudio``, where an interruption can still drop it (only where the vendor's context is cut to match).
+PLAYBACK_LEAD_S = 1.0
 #: Where a provider's own HTTP routes are mounted: ``/vendor/<provider name>/...``.
 VENDOR_ROUTE_PREFIX = "/vendor"
 #: Where this pod runs the tool loop (the cascades, LiveKit), the most LLM rounds one caller turn may take,
@@ -192,28 +198,54 @@ class InboundAudio:
 
 @dataclass
 class _Item:
+    #: Accepted from the vendor: written to the line or still queued.
     n_bytes: int = 0
-    #: When the far end, playing at 1x, reaches the end of this item's audio sent so far.
+    #: Written to the line.
+    written_bytes: int = 0
+    #: When the far end, playing at 1x, reaches the end of this item's audio written so far.
     playout_until: float = 0.0
 
 
 class OutboundAudio:
-    """Agent audio toward the caller, through the call-start gate, with playout tracking."""
+    """Agent audio toward the caller: the call-start gate, then the agent's playback buffer.
+
+    The bench's ``voice_ws`` caller plays every byte it receives, at speaking speed, and the
+    framing has no message that clears its buffer (``vamos_voice.framing``): whatever is written
+    to the line will be heard. Most vendors stream faster than real time. So this is the playback
+    buffer a phone gateway would be: audio is written at most ``PLAYBACK_LEAD_S`` ahead of real
+    time and the rest waits here in order. What was written is what the caller hears
+    (``heard_ms``). The agent's memory must hold exactly what the caller heard, so queued audio is
+    dropped on the vendor's interruption (``interrupted(drop_unsent=True)``) only by a provider
+    that then cuts the vendor's context to ``heard_ms``; otherwise all of it plays.
+    """
 
     def __init__(
-        self, line: CallerLine, start: CallStart, monotonic: Callable[[], float] = time.monotonic
+        self,
+        line: CallerLine,
+        start: CallStart,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
     ) -> None:
         self._line = line
         self._start = start
         self._monotonic = monotonic
+        self._sleep = sleep
         self._playout_until = 0.0
         self._last_sent_at: float | None = None
         self._items: dict[str, _Item] = {}
+        self._queue: deque[tuple[bytes, str]] = deque()  # accepted, not yet written: (pcm, item id)
+        self._pump: asyncio.Task[None] | None = None
         self.dropped_bytes = 0
         self.sent_bytes = 0
 
     async def send(self, pcm: bytes, item_id: str = "") -> bool:
-        """Forward agent audio; False (and dropped) while the line is held."""
+        """Accept agent audio (True); False, and dropped, while the line is held for the callee.
+
+        Never waits for playout: providers call this from their vendor event loops, which must keep
+        reading (an interruption must be seen at once). With nothing queued and the line within the
+        lead of real time, the audio is written at once; otherwise it is queued behind what is
+        already waiting, and the pump writes it as the line plays.
+        """
         if not pcm:
             return True
         if not self._start.audio_open:
@@ -221,39 +253,111 @@ class OutboundAudio:
                 logger.warning("agent audio before the callee spoke is being dropped")
             self.dropped_bytes += len(pcm)
             return False
-        now = self._monotonic()
         item = self._items.setdefault(item_id, _Item())
         item.n_bytes += len(pcm)
-        self._playout_until = max(now, self._playout_until) + pcm_ms(len(pcm)) / 1000
-        item.playout_until = self._playout_until
         self.sent_bytes += len(pcm)
         if pcm.strip(b"\x00"):  # a vendor that streams digital silence (Vapi) is still quiet
-            self._last_sent_at = now
-        await self._line.send(pcm)
+            self._last_sent_at = self._monotonic()
+        if not self._queue and not self._pumping() and self._lead_wait_s() <= 0:
+            await self._write(pcm, item)
+            return True
+        self._queue.append((pcm, item_id))
+        if not self._pumping():
+            self._pump = asyncio.create_task(self._run_pump(), name="agent audio -> caller")
         return True
 
+    def _pumping(self) -> bool:
+        return self._pump is not None and not self._pump.done()
+
+    def _lead_wait_s(self) -> float:
+        """How long until the line is within ``PLAYBACK_LEAD_S`` of real time (<= 0: it is now)."""
+        return self._playout_until - self._monotonic() - PLAYBACK_LEAD_S
+
+    async def _write(self, pcm: bytes, item: _Item) -> None:
+        self._playout_until = max(self._monotonic(), self._playout_until) + pcm_ms(len(pcm)) / 1000
+        item.written_bytes += len(pcm)
+        item.playout_until = self._playout_until
+        await self._line.send(pcm)
+
+    async def _run_pump(self) -> None:
+        """Write the queue in order, each piece once the line is within the lead; once the line has
+        closed, drop what is left."""
+        try:
+            while self._queue and not self._line.closed:
+                if (wait := self._lead_wait_s()) > 0:
+                    await self._sleep(wait)
+                    continue  # an interruption or a hang-up may have come meanwhile
+                pcm, item_id = self._queue.popleft()
+                await self._write(pcm, self._items[item_id])
+        except Exception:
+            logger.exception("agent audio could not be written to the caller")
+        self._drop_queue()
+
+    def _drop_queue(self) -> dict[str, int]:
+        dropped: dict[str, int] = {}
+        while self._queue:
+            pcm, item_id = self._queue.popleft()
+            self._items[item_id].n_bytes -= len(pcm)
+            self.sent_bytes -= len(pcm)
+            dropped[item_id] = dropped.get(item_id, 0) + len(pcm)
+        return {item_id: int(pcm_ms(n)) for item_id, n in dropped.items()}
+
     def played_ms(self, item_id: str) -> int:
-        """How much of an item the caller can have heard: what was sent, less what the far end
-        (playing at 1x, and silent while nothing is sent) has not reached yet."""
+        """How much of an item has played at the caller by now: what was written, less what the far
+        end (playing at 1x, and silent while nothing is written) has not reached yet."""
         item = self._items.get(item_id)
         if item is None:
             return 0
         unplayed_ms = max(0.0, item.playout_until - self._monotonic()) * 1000
-        return int(max(0.0, pcm_ms(item.n_bytes) - unplayed_ms))
+        return int(max(0.0, pcm_ms(item.written_bytes) - unplayed_ms))
+
+    def heard_ms(self, item_id: str) -> int:
+        """How much of an item the caller hears: everything written to the line, played or not (the
+        ``voice_ws`` caller plays every byte it receives; nothing can clear its buffer)."""
+        item = self._items.get(item_id)
+        return int(pcm_ms(item.written_bytes)) if item else 0
 
     def sent_ms(self, item_id: str) -> int:
+        """How much of an item was accepted: written, or still queued (back to what was written once
+        an interruption drops the queue)."""
         item = self._items.get(item_id)
         return int(pcm_ms(item.n_bytes)) if item else 0
 
-    def interrupted(self) -> None:
-        """The caller barged in: what was queued past this point will not be heard."""
-        self._playout_until = self._monotonic()
+    def interrupted(self, *, drop_unsent: bool = False) -> dict[str, int]:
+        """The vendor's interruption signal (the caller talked over the agent).
+
+        The agent's memory must hold exactly what the caller heard. By default nothing is dropped:
+        a vendor that keeps in its own context everything it sent us, and cannot be told what the
+        caller heard, has all of it heard. ``drop_unsent=True`` drops the audio still queued
+        (accepted, not yet written) and returns how many ms of it each item lost; only for a
+        provider that then makes the vendor's context match ``heard_ms`` (OpenAI Realtime's
+        truncate, the cascade's history). What was written still plays at the caller either way,
+        so the playout clock runs on."""
+        if not drop_unsent:
+            return {}
+        dropped = self._drop_queue()
+        if dropped:
+            logger.info("interruption: %d ms of queued agent audio dropped", sum(dropped.values()))
+        return dropped
 
     async def drain(self) -> None:
-        """Wait until everything sent has had time to play."""
-        remaining = min(MAX_DRAIN_S, self._playout_until - self._monotonic())
+        """Wait until the queue is written and everything written has played, never longer than
+        ``MAX_DRAIN_S`` in all."""
+        deadline = self._monotonic() + MAX_DRAIN_S
+        while (pump := self._pump) is not None and not pump.done():
+            if (left := deadline - self._monotonic()) <= 0:
+                break
+            await asyncio.wait({pump}, timeout=left)
+        remaining = min(deadline, self._playout_until) - self._monotonic()
         if remaining > 0:
-            await asyncio.sleep(remaining)
+            await self._sleep(remaining)
+
+    async def close(self) -> None:
+        """The call is over: drop what is still queued and stop the pump."""
+        self._drop_queue()
+        if (pump := self._pump) is not None and not pump.done():
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
 
     async def wait_until_quiet(self, quiet_s: float, max_wait_s: float, poll_s: float = 0.05) -> None:
         """Wait until no audible agent audio has arrived for ``quiet_s`` (giving up after ``max_wait_s``).

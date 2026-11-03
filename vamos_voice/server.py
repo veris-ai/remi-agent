@@ -162,8 +162,10 @@ async def serve_call(
     line.on_caller_gone = session.caller_gone
     if calls is not None:
         calls.add(session)
+    call: CallRuntime | None = None
     try:
-        await provider.run_call(await call_runtime(agent, session, clock, turns, line))
+        call = await call_runtime(agent, session, clock, turns, line)
+        await provider.run_call(call)
     except Exception:
         logger.exception("call failed in provider %s", provider.name)
     finally:
@@ -171,6 +173,8 @@ async def serve_call(
         if calls is not None:
             calls.discard(session)
         await line.close()
+        if call is not None:
+            await call.outbound.close()  # agent audio still queued for a closed line goes nowhere
         logger.info(
             "call over after %.1fs; tools: %s", clock.elapsed.total_seconds(), ", ".join(session.tool_log)
         )

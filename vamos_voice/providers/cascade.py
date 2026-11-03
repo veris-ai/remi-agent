@@ -51,8 +51,8 @@ What the cascade itself owns, the same for every vendor:
   are neither cancelled nor delayed: each runs when the model makes it (a
   payment that was decided is made and recorded); then the turn ends and the
   caller's words are the next turn. The interrupted reply is kept in the
-  history as the words the caller can have heard
-  (``OutboundAudio.played_ms``), marked ``INTERRUPTED_MARKER``.
+  history as the words the caller heard (``OutboundAudio.heard_ms``), marked
+  ``INTERRUPTED_MARKER``.
 - **Playout.** TTS audio goes out in ``PLAYBACK_SLICE_MS`` slices, at most
   ``PLAYBACK_LEAD_MS`` ahead of real time: the vendors stream faster than
   speech plays, and audio already at the caller cannot be cut.
@@ -377,7 +377,7 @@ class _CascadeCall:
         self.unpause()
         if self.player is not None:
             self.player.cancel()
-        self.call.outbound.interrupted()
+        self.call.outbound.interrupted(drop_unsent=True)  # the history keeps exactly what was written
 
     async def on_turn(self, text: str) -> None:
         text = text.strip()
@@ -532,7 +532,7 @@ class _CascadeCall:
 
     def heard(self, said: str, item: str) -> str | None:
         """The part of an interrupted reply the caller can have heard, marked; None if nothing played."""
-        played = self.call.outbound.played_ms(item)
+        played = self.call.outbound.heard_ms(item)
         if played <= 0:
             return None
         words = said.split()
