@@ -6,6 +6,7 @@ side of what happens before verification is ``test_tools.py``.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from vamos_agents.remi.context import CallContext
@@ -90,8 +91,13 @@ def test_the_manual_explains_the_check_and_what_follows_verification() -> None:
         ("## 9. Stating the debt", "(12 CFR 1006.34(b)(3))"),
     ):
         assert line in section(text, heading), line
-    # not every account is itemized from its charge-off: a hospital account is from its last statement
-    assert "charge-off" not in section(text, "## 9. Stating the debt")
+
+
+def test_the_prompt_never_says_the_accounts_are_charged_off() -> None:
+    """Not every account is charged off: a hospital account is itemized from its last statement."""
+    text = rendered_prompt()
+    assert "Creditors place past-due consumer accounts with the agency" in text
+    assert re.search(r"charge[d -]*off", text, re.IGNORECASE) is None
 
 
 def test_push_back_gets_a_reason_and_a_way_out() -> None:
