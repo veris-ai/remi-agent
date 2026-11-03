@@ -22,6 +22,18 @@ speaks is dropped by the shared ``OutboundAudio`` gate. For an agent that
 speaks first, the opening is requested with a text turn carrying the policy's
 ``opening_note`` (labelled as a call-system note so the judge never mistakes
 it for the caller): the Live API has no other way to ask for a turn.
+
+Tools: each ``toolCall``'s function calls run in order through dispatch as it
+arrives, and one ``toolResponse`` carries their true results, before the next
+server message is read. When caller speech interrupts a turn whose calls are
+pending, Gemini sends ``toolCallCancellation`` with their ids (the calls
+"should not have been executed"; clients "may attempt to undo" side effects).
+By then they have run and been answered, so the provider only logs a warning:
+each id, its tool name and whether it returned an error (never arguments or
+results). It undoes, skips and sends nothing: the Live API documents no
+response to a cancellation and no way to add context that neither starts nor
+interrupts generation (``clientContent`` "will interrupt any current model
+generation").
 """
 
 from __future__ import annotations
@@ -154,6 +166,8 @@ class _GeminiCall:
         self.provider, self.ws, self.call = provider, ws, call
         self.turn = 0
         self.resampler = Resampler(CHANNEL_RATE_HZ, INPUT_RATE_HZ)
+        #: Every function call this call ran, by id: (tool name, whether it returned an error).
+        self.ran: dict[str | None, tuple[str, bool]] = {}
 
     async def send(self, message: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(message))
@@ -220,6 +234,8 @@ class _GeminiCall:
             if call.session.ended:
                 await call.hang_up()
                 return True
+        if "toolCallCancellation" in message:
+            self.log_cancellation(message["toolCallCancellation"].get("ids") or [])
         if "goAway" in message:
             logger.warning("gemini: goAway %s", message["goAway"])
         return False
@@ -228,8 +244,25 @@ class _GeminiCall:
         responses = []
         for fc in calls:
             result = await self.call.session.dispatch(fc["name"], fc.get("args") or {})
+            self.ran[fc.get("id")] = (fc["name"], "error" in result)
             responses.append({"id": fc.get("id"), "name": fc["name"], "response": result})
         await self.send({"toolResponse": {"functionResponses": responses}})
+
+    def log_cancellation(self, ids: list[str]) -> None:
+        """Gemini cancelled tool calls (caller speech interrupted their turn): say which, and what ran.
+
+        Tool names and outcomes only, never arguments or results (they can hold card data). Nothing
+        is undone, skipped or sent: a call that ran has already had its true ``toolResponse``.
+        """
+        cancelled = []
+        for call_id in ids:
+            if call_id in self.ran:
+                name, failed = self.ran[call_id]
+                outcome = "with an error" if failed else "with a result"
+                cancelled.append(f"{call_id} ({name}: already run and answered {outcome})")
+            else:
+                cancelled.append(f"{call_id} (not run by this call)")
+        logger.warning("gemini: toolCallCancellation for %s", ", ".join(cancelled) or "no ids")
 
 
 PROVIDER = GeminiLiveProvider

@@ -387,7 +387,7 @@ pin it in a test. Never send a frame the vendor documents as unsupported: an
 |---|---|---|---|---|---|
 | Where the tools go | `session.update` `tools` | same | `setup.tools` | the backend's `delegation.responses.tools`; the live model runs none and is told their names in its instructions (`live_instructions`, one line each), which OpenAI's live-prompting guide says it uses to decide what to hand off | the LLM service's tools |
 | Forced tool choice (never used: the screen pop needs none) | `response.create` `tool_choice` | **no** (undocumented) | **no** | on the backend only (left `"auto"`) | `tool_choice` on the SDK call |
-| Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`) | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
+| Barge-in truncation (context cut to what was heard) | `conversation.item.truncate` at `played_ms` | **no**: xAI lists truncate/cancel as unsupported. Grok stops generating itself on caller speech; its context may keep a few seconds the caller never heard. `truncates_on_barge_in = False` | vendor-side (`START_OF_ACTIVITY_INTERRUPTS`); the tool calls pending at the barge-in come back in a `toolCallCancellation`, by then already run and answered: logged (ids, tool names, whether each returned an error), nothing undone, skipped or sent | **no** such event: full duplex, the live model stops itself | Pipecat's interruption |
 | Caller transcription (in the judge's trace) | `audio.input.transcription` (`gpt-4o-mini-transcribe`) | only with `transcription.model = "grok-transcribe"` (always sent) | `inputAudioTranscription` | always on (`session.input_transcript.delta`) | STT |
 | `TurnTaking` mapping | **none**: `server_vad` on OpenAI's defaults | **none**: `server_vad` on xAI's defaults | **none**: automatic activity detection on Gemini's defaults | **none**: no VAD settings exist | **none**: Silero `VADParams()`, Pipecat's default start strategies and Smart Turn v3 stop |
 | Turn management (who gets a reply, what may interrupt) | vendor: server VAD, `create_response`/`interrupt_response` on | vendor: server VAD | vendor | vendor | Pipecat |
@@ -793,9 +793,10 @@ uv run ruff check . && uv run ruff format --check .
 - `tests/test_parity.py`: agents x vendors, on the frames each provider sends, including
   Remi's screen pop (reads before any vendor frame, section in the setup, no secrets, no
   forced tool choice, gates past the reads).
-- `tests/test_grok_voice.py`, `tests/test_gpt_live.py`: each vendor's own
+- `tests/test_grok_voice.py`, `tests/test_gpt_live.py`, `tests/test_gemini_live.py`: each vendor's own
   frame translation (session shape, the screen pop in both GPT-Live instruction sets,
-  barge-in, end of call), pinned where it differs from OpenAI Realtime.
+  barge-in, end of call, Gemini's `toolCallCancellation`),
+  pinned where it differs from OpenAI Realtime.
 - `tests/test_deepgram.py`, `tests/test_elevenlabs.py`, `tests/test_fluxions.py`: the managed
   voice agents' own protocol (Deepgram's `Settings`, audio held until `SettingsApplied` and its prompt cap;
   ElevenLabs' per-call agent, always deleted, and its parameter descriptions; Fluxions' soul
