@@ -403,3 +403,82 @@ async def test_the_billing_zip_is_5_or_9_digits_and_the_phone_is_optional() -> N
         CARD_BILLING["billing_address"],
     )
     await client.close()
+
+
+@pytest.mark.parametrize(
+    ("zipcode", "accepted"),
+    [
+        ("75013", True),
+        ("75013-1234", True),
+        ("750131234", True),
+        ("75013 1234", True),
+        ("75013  1234", False),
+        ("75013\t1234", False),
+        ("75013 -1234", False),
+        ("7501", False),
+    ],
+)
+async def test_a_zip_plus_4_takes_one_space_or_one_hyphen(zipcode: str, accepted: bool) -> None:
+    twin, client = twin_and_client()
+    card = {"number": "4111111111111111", "exp_month": 8, "exp_year": 2028, "cvc": "123", **CARD_BILLING}
+    if accepted:
+        await client.add_card(order=ORDER, at=AT, **{**card, "billing_zip": zipcode})
+        assert len(twin.methods) == 1
+    else:
+        with pytest.raises(PayNearMeRefused, match="Billing ZIP code is invalid"):
+            await client.add_card(order=ORDER, at=AT, **{**card, "billing_zip": zipcode})
+    await client.close()
+
+
+def _signed(fields: dict[str, str]) -> dict[str, str]:
+    body = {
+        "version": "3.0",
+        "site_identifier": SITE_IDENTIFIER,
+        "timestamp": str(int(AT.timestamp())),
+        **fields,
+    }
+    body["signature"] = signature(body, HMAC_SECRET)
+    return body
+
+
+def _post(twin, operation: str, fields: dict[str, str]) -> dict:
+    url = f"https://twin.example/json-api/{operation}"
+    return twin.handle(httpx.Request("POST", url, json=_signed(fields))).json()
+
+
+async def test_skip_ach_verify_skips_the_account_checks_not_the_routing_check() -> None:
+    """The double as the twin: verification runs when a bank account is added unless skip_ach_verify is true; the
+    routing check always runs; an account added unverified is declined at charge with its verification result.
+    (Remi never sends skip_ach_verify.)"""
+    twin, client = twin_and_client()
+    gs02 = {
+        "pnm_order_identifier": ORDER,
+        "payment_method_type": "ach",
+        "payment_method_ach_aba_pii": "110000000",
+        "payment_method_ach_account_pii": "000222222227",
+        "payment_method_billing_name": "Marcus Bell",
+        "payment_method_billing_zipcode": "11211",
+    }
+    assert _post(twin, "create_payment_method", gs02) == {
+        "status": "error",
+        "errors": [{"description": "This account number is invalid"}],
+    }
+    added = _post(twin, "create_payment_method", {**gs02, "skip_ach_verify": "true"})
+    method = added["order"]["electronic_payments"]["payment_methods"][0]["accounts"][0][
+        "payment_method_identifier"
+    ]
+    charge = {
+        "pnm_order_identifier": ORDER,
+        "payment_method_identifier": method,
+        "payment_amount": "100.00",
+        "payment_currency": "USD",
+    }
+    paid = _post(twin, "make_payment", charge)["payment"]
+    assert (paid["payment_status"], paid["response_code"]) == ("rejected", "GS02")
+    short = {**gs02, "payment_method_ach_account_pii": "123", "skip_ach_verify": "true"}
+    assert _post(twin, "create_payment_method", short)["status"] == "ok", "the account length is verification"
+    bad_routing = {**gs02, "payment_method_ach_aba_pii": "110000001", "skip_ach_verify": "true"}
+    assert _post(twin, "create_payment_method", bad_routing)["errors"] == [
+        {"description": "ABA isn’t valid (bad checksum)"}
+    ]
+    await client.close()

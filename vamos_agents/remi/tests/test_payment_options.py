@@ -219,7 +219,8 @@ async def test_a_declined_card_is_the_gateways_answer_only(pg_dsn, make_session)
     assert support.LEDGER.writes == []
 
 
-async def test_the_test_bank_account_fails_validation(pg_dsn, make_session) -> None:
+async def test_the_test_bank_account_fails_verification_when_it_is_saved(pg_dsn, make_session) -> None:
+    """PayNearMe verifies a bank account when it is added: the World's GS02 account is refused there, in its words."""
     seed_world(pg_dsn)
     s = await make_session("STORE-01")
     routing, number = INVALID_BANK
@@ -227,13 +228,8 @@ async def test_the_test_bank_account_fails_validation(pg_dsn, make_session) -> N
         "add_payment_method",
         {"method": "ach", "routing_number": routing, "account_number": number, **BANK_BILLING},
     )
-    assert saved == {"method_id": saved["method_id"], "method": "ach", "last4": "2227"}
-    paid = await s.dispatch("take_payment", {"method_id": saved["method_id"], "option_id": "pif"})
-    assert (paid["status"], paid["response_code"], paid["paid_with"]) == (
-        "rejected",
-        "GS02",
-        "bank account ending 2227",
-    )
+    assert saved == {"error": "PayNearMe refused it: This account number is invalid"}
+    assert support.PAYNEARME.methods == {} and support.PAYNEARME.payments == []
     routing, number = GOOD_BANK
     bank = await s.dispatch(
         "add_payment_method",

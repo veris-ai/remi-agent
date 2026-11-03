@@ -5,7 +5,7 @@ with #2054 (the up-to order, no implied fee, the vendor's error envelope),
 #2056 (input validation) and #2058 (required billing fields), seeded by World v2
 (``world_v2/paynearme.py``): one ``up-to`` order per placed account, no fee, and
 World v1's test instruments. This double keeps its rules and its words, as read
-from that code (the stack's head, aec8fdba):
+from that code (services-sandbox main, 5e14fdfc):
 
 - every request is ``POST /json-api/<operation>`` with a JSON body carrying
   ``version`` ``3.0``, ``site_identifier``, ``timestamp`` and ``signature``:
@@ -16,9 +16,11 @@ from that code (the stack's head, aec8fdba):
 - ``create_payment_method`` requires, for a card, the security code and the
   billing name, address and ZIP, and for a bank account the billing name and
   ZIP ("Missing required parameter: <name>"; the billing phone is optional; a
-  ZIP is 5 or 9 digits, "Billing ZIP code is invalid"); then it validates what a
+  ZIP is 5 or 9 digits, one hyphen or space before the last four, "Billing ZIP
+  code is invalid"); then it validates what a
   debtor reads out, tokenizes it on the order and answers only the new method.
-  A card: the number's Luhn
+  A bank account is verified when it is added (unless ``skip_ach_verify`` is
+  true): the World's 2/2 GS02 account is refused there. A card: the number's Luhn
   checksum only ("Card number isn’t valid (bad checksum)"), an expiry of MM/YY,
   MM/YYYY, MMYY or MMYYYY ("Invalid expiration date"), and a security code of 3
   digits, 4 for American Express ("This payment didn't complete because the
@@ -123,8 +125,13 @@ def missing_field(body: dict[str, Any], keys: tuple[str, ...]) -> str | None:
 
 
 def billing_zip_valid(value: Any) -> bool:
-    """A 5- or 9-digit billing ZIP code, a hyphen allowed before the last four."""
-    return re.fullmatch(r"[0-9]{5}(-?[0-9]{4})?", str(value).strip()) is not None
+    """A 5- or 9-digit billing ZIP code, one hyphen or one space allowed before the last four."""
+    return re.fullmatch(r"[0-9]{5}([- ]?[0-9]{4})?", str(value).strip()) is not None
+
+
+def flag(value: Any) -> bool:
+    """A true/false parameter: true, "true" (any case) or "1"; anything else is false."""
+    return value is True or str(value).strip().lower() in {"true", "1"}
 
 
 def card_brand(number: Any) -> str | None:
@@ -328,13 +335,18 @@ class FakePayNearMe:
             missing = missing_field(body, ACH_REQUIRED_FIELDS)
             if missing is not None:
                 return _error(f"Missing required parameter: {missing}")
-            if not routing_number_valid(aba):
+            if not routing_number_valid(aba):  # even when verification is skipped
                 return _error(INVALID_ROUTING_CHECKSUM)
-            if not account_number_valid(number):
-                return _error(INVALID_ACCOUNT_NUMBER)
             if not billing_zip_valid(body["payment_method_billing_zipcode"]):
                 return _error(INVALID_BILLING_ZIP)
             fingerprint, expiry, brand = instrument_fingerprint("ach", aba, number), None, None
+            # Verification runs when a bank account is added, unless skip_ach_verify is true.
+            if not flag(body.get("skip_ach_verify")):
+                if not account_number_valid(number):
+                    return _error(INVALID_ACCOUNT_NUMBER)
+                verified = self.behaviors.get(fingerprint)
+                if verified is not None and verified["outcome"] == "ach_validation_failure":
+                    return _error(verified["response_message"] or INVALID_ACCOUNT_NUMBER)
             account = {"description": "Bank Account", "account_type": "Personal Checking"}
         method_id = self._next_id("31")
         last4 = re.sub(r"\D", "", str(number))[-4:]
