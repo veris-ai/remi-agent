@@ -7,10 +7,11 @@ states; ``option_id`` is only a label the agent may give (``pif``,
 ``payment_plan``, ``discount_<pct>``, as ``get_payment_options`` names them). What
 the agent chooses is done and recorded, PayNearMe's and the World's answers come
 back as given, and the bench grades the money after the call from what the World
-holds. The only errors are for input that cannot be done as given: an unknown
-``method_id``, an amount that is not an amount in dollars, an amount the World's
-records cannot hold, a plan without months or one whose last payment falls after
-the last date there is.
+holds. Besides what PayNearMe says (its refusals in its words, or that it did not
+answer, or that its answer could not be read), the only errors are for input that
+cannot be done as given: an unknown ``method_id``, an amount that is not an amount
+in dollars, an amount the World's records cannot hold, a plan without months or
+one whose last payment falls after the last date there is.
 
 - ``add_payment_method`` tokenizes the consumer's card or bank account on the
   account's PayNearMe order, with the billing details the agent passes (PayNearMe
@@ -18,16 +19,25 @@ the last date there is.
   ZIP; Remi never fills them in from the account record). Card and bank numbers
   and the billing details are declared ``redact`` (never logged), go only to
   PayNearMe, and are never stored or echoed: the result is PayNearMe's
-  ``payment_method_identifier`` and the last four digits.
+  ``payment_method_identifier`` and the last four digits. When PayNearMe answers
+  but its answer cannot be read, the error says that whether it saved the card or
+  bank account is not known.
 - ``take_payment`` charges the amount on PayNearMe and reports PayNearMe's answer
-  as given. The agent's record of it is the ``payments`` row (PayNearMe's payment
-  id, its net amount, status and response); if that row cannot be written the
-  failure is logged loudly and PayNearMe's answer still stands. An approved
-  payment is posted to the account's Fineract loan keyed by PayNearMe's payment
-  id, and once a payment labelled as a discount is posted, the rest of the
-  balance is written off. The call is recorded as settled by a payment labelled
-  as a discount, and as paid once its approved payments reach the balance known
-  before the first of them (with no balance ever known, by one labelled ``pif``).
+  as given. When PayNearMe does not answer, or answers but its answer cannot be
+  read, the error says which, and that whether the payment went through is not
+  known. Once PayNearMe has returned a payment, nothing after it turns the result
+  into an error. The agent's record of it is the ``payments`` row (PayNearMe's
+  payment id, its net amount, status and response). An approved payment is posted
+  to the account's Fineract loan keyed by PayNearMe's payment id, and once a
+  payment labelled as a discount is posted, the rest of the balance is written
+  off; then the balance is read. A row that cannot be written, a posting or
+  write-off that does not complete (tried twice while the ledger is out of reach;
+  ``posted_to_ledger: false``) and a balance that cannot be read (left out of the
+  result) are each logged loudly with PayNearMe's payment id, and PayNearMe's
+  answer still stands. The call is recorded as settled by an approved payment
+  labelled as a discount, and as paid once its approved payments reach the
+  balance known before the first of them (with no balance ever known, by one
+  labelled ``pif``), whatever the ledger then does.
 - ``create_arrangement`` records an agreement: a payment plan of the total and
   months stated, each payment computed by the policy's rule (equal, rounded
   down, the last taking the remainder), with no payment method (no automatic
@@ -54,7 +64,7 @@ from vamos_voice.tools import ToolError
 from .. import policy
 from ..call import RemiCall, new_id
 from ..ledger import LedgerRefused, LedgerUnavailable
-from ..payments import Payment, PaymentsUnavailable, SavedMethod
+from ..payments import Payment, PaymentsUnavailable, SavedMethod, UnreadableAnswer
 from .catalog import REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -170,6 +180,12 @@ async def add_payment_method(session: RemiCall, args: PaymentMethodArgs) -> dict
     except PaymentsUnavailable as err:
         logger.error("PayNearMe unavailable saving a payment method on %s: %s", account.account_id, err)
         raise ToolError("PayNearMe could not be reached: nothing was saved.") from err
+    except UnreadableAnswer as err:
+        logger.error("saving a payment method on %s: %s", account.account_id, err)
+        raise ToolError(
+            "PayNearMe answered, but its answer could not be read: whether it saved the card or bank account is "
+            "not known."
+        ) from err
     session.payment_methods[saved.method_id] = saved
     result: dict[str, Any] = {"method_id": saved.method_id, "method": saved.kind, "last4": saved.last4}
     if saved.brand:
@@ -220,9 +236,20 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
             raise ToolError(
                 "PayNearMe did not answer: whether the payment went through is not known."
             ) from err
+        except UnreadableAnswer as err:
+            logger.error("charging %s on %s: %s", amount, account.account_id, err)
+            raise ToolError(
+                "PayNearMe answered, but its answer could not be read: whether the payment went through is not "
+                "known."
+            ) from err
+        # PayNearMe has answered: from here on nothing turns its answer into an error. The record, the posting
+        # and the balance read each log their own failure.
         await _record_payment(session, payment)
         if payment.approved:
             session.approved_cents += payment.amount_cents
+            outcome = _payment_outcome(session, discount=discount, option_id=args.option_id)
+            if outcome is not None:
+                session.outcomes.add(outcome)
     posted = payment.approved and await _post(session, payment, write_off=discount)
     result: dict[str, Any] = {
         "payment_id": payment.payment_id,
@@ -234,14 +261,11 @@ async def take_payment(session: RemiCall, args: PaymentArgs) -> dict[str, Any]:
         "posted_to_ledger": posted,
     }
     if posted:
-        # The ledger took the posting but may not answer the read: read_debt logs that, and the balance is
-        # then simply not in the result (it is not known now).
-        with contextlib.suppress(ToolError):
-            result["remaining_balance"] = policy.dollars((await session.read_debt()).balance_cents)
-    if payment.approved:
-        outcome = _payment_outcome(session, discount=discount, option_id=args.option_id)
-        if outcome is not None:
-            session.outcomes.add(outcome)
+        # The ledger took the posting but may not answer the read: the balance is then simply not in the result
+        # (it is not known now).
+        balance = await _balance_after(session, payment)
+        if balance is not None:
+            result["remaining_balance"] = policy.dollars(balance)
     return result
 
 
@@ -252,6 +276,19 @@ async def _balance_now(session: RemiCall) -> int | None:
         with contextlib.suppress(ToolError):
             await session.read_debt()
     return session.debt.balance_cents if session.debt is not None else None
+
+
+async def _balance_after(session: RemiCall, payment: Payment) -> int | None:
+    """The balance the ledger holds once the payment is posted; None, never an error, when the read fails (logged
+    with PayNearMe's payment id)."""
+    account_id = session.context.account_id
+    try:
+        return (await session.read_debt()).balance_cents
+    except ToolError as err:  # the ledger could not be reached (read_debt logs that too) or refused the read
+        logger.error("reading %s after posting %s failed: %s", account_id, payment.payment_id, err)
+    except Exception:
+        logger.exception("reading %s after posting %s failed", account_id, payment.payment_id)
+    return None
 
 
 def _payment_outcome(session: RemiCall, *, discount: bool, option_id: str | None) -> str | None:
@@ -298,8 +335,9 @@ async def _record_payment(session: RemiCall, payment: Payment) -> None:
 
 async def _post(session: RemiCall, payment: Payment, *, write_off: bool) -> bool:
     """Post an approved payment to the account's loan, keyed by PayNearMe's payment id, then, for a discount,
-    write off the rest. Tried twice while the ledger is out of reach; False (and logged) when it stayed out of
-    reach or refused: the money was taken and a person must post it."""
+    write off the rest; True once both are done. Tried twice while the ledger is out of reach; False (and logged
+    with the payment id) when it stayed out of reach, refused, or failed in any other way: the money was taken and
+    a person must post it. Never raises: PayNearMe's answer stands whatever happens here."""
     ledger, account_id, today = session.ledger, session.context.account_id, session.clock.today()
     for attempt in (1, 2):
         try:
@@ -326,6 +364,15 @@ async def _post(session: RemiCall, payment: Payment, *, write_off: bool) -> bool
         except LedgerRefused as err:
             logger.error(
                 "the ledger refused posting %s to %s: %s (%s)", payment.payment_id, account_id, err, err.code
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "posting approved PayNearMe payment %s (%d cents) to %s did not complete: reported as not posted; "
+                "a person must check the loan and post it",
+                payment.payment_id,
+                payment.amount_cents,
+                account_id,
             )
             return False
     return False

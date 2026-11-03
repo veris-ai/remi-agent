@@ -40,7 +40,8 @@ from that code (services-sandbox main, 5e14fdfc):
 - a refusal is ``{"status": "error", "errors": [{"description": ...}]}``.
 
 Every request is kept in ``requests`` (operation and body), as the twin's log
-would show it.
+would show it. A test may replace what the twin sends back once it has acted
+(``reshape``): an answer Remi cannot read, say, for a payment the twin did take.
 """
 
 from __future__ import annotations
@@ -240,6 +241,9 @@ class FakePayNearMe:
         self.payments: list[dict[str, Any]] = []
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self.unreachable = False  # every request fails to connect while set
+        #: While set, what the twin sends back once it has acted: called with the operation and the twin's answer,
+        #: it returns the HTTP response sent instead.
+        self.reshape: Callable[[str, dict[str, Any]], httpx.Response] | None = None
         self._ids = 0
 
     @classmethod
@@ -270,7 +274,10 @@ class FakePayNearMe:
         }.get(operation)
         if handler is None:
             return httpx.Response(404, json={"detail": "Not Found"})
-        return httpx.Response(200, json=handler(body))
+        answer = handler(body)
+        if self.reshape is not None:
+            return self.reshape(operation, answer)
+        return httpx.Response(200, json=answer)
 
     def _authentic(self, body: dict[str, Any]) -> bool:
         try:

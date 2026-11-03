@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from datetime import date, timedelta
 from importlib.resources import files
 from typing import Any
 
+import httpx
 import psycopg
 import pytest
 
@@ -431,6 +433,79 @@ async def test_an_approved_payment_the_ledger_cannot_post_is_recorded_and_report
     assert rows(pg_dsn, "payments")[0]["status"] == "approved"
 
 
+def _ok_payment(answer: dict[str, Any], **changed: Any) -> httpx.Response:
+    """The twin's ``ok`` answer to a charge with the payment's fields changed (None: the field left out)."""
+    payment = {k: v for k, v in {**answer["payment"], **changed}.items() if v is not None}
+    return httpx.Response(200, json={**answer, "payment": payment})
+
+
+#: 2xx answers to a charge the twin took that cannot be read, each made from the twin's own answer.
+UNREADABLE_CHARGE_ANSWERS: dict[str, Callable[[dict[str, Any]], httpx.Response]] = {
+    "not JSON": lambda answer: httpx.Response(200, text="<html><body>504 Gateway Time-out</body></html>"),
+    "not a JSON object": lambda answer: httpx.Response(200, json=[answer]),
+    "no envelope status": lambda answer: httpx.Response(200, json={"payment": answer["payment"]}),
+    "no payment": lambda answer: httpx.Response(200, json={"status": "ok"}),
+    "no payment id": lambda answer: _ok_payment(answer, pnm_payment_identifier=None),
+    "no payment status": lambda answer: _ok_payment(answer, payment_status=None),
+    "no net amount": lambda answer: _ok_payment(answer, net_payment_amount=None),
+    "an amount that is not one": lambda answer: _ok_payment(answer, net_payment_amount="1180.00 USD"),
+    "an amount that is not a number": lambda answer: _ok_payment(answer, net_payment_amount="NaN"),
+}
+
+
+@pytest.mark.parametrize("unreadable", sorted(UNREADABLE_CHARGE_ANSWERS))
+async def test_a_charge_paynearme_answers_unreadably_is_reported_as_not_known(
+    pg_dsn, make_session, caplog, unreadable
+) -> None:
+    """PayNearMe took the charge, but its 2xx answer cannot be read: the model hears exactly that (PayNearMe
+    answered; whether the payment went through is not known), never a system problem and never that PayNearMe did
+    not answer. Logged loudly, with no card data."""
+    caplog.set_level(logging.DEBUG)
+    seed_world(pg_dsn)
+    s = await make_session("CARD-09")
+    method_id = await card(s)
+    reshape = UNREADABLE_CHARGE_ANSWERS[unreadable]
+    support.PAYNEARME.reshape = lambda operation, answer: (
+        reshape(answer) if operation == "make_payment" else httpx.Response(200, json=answer)
+    )
+    paid = await s.dispatch("take_payment", {"method_id": method_id, "amount": "1180.00", "option_id": "pif"})
+    assert paid == {
+        "error": "PayNearMe answered, but its answer could not be read: whether the payment went through is not "
+        "known."
+    }
+    assert [p["status"] for p in support.PAYNEARME.payments] == ["approved"], "the twin took it"
+    assert rows(pg_dsn, "payments") == [] and support.LEDGER.writes == []
+    assert s.state.outcomes == set()
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("make_payment" in m and "could not be read" in m for m in loud), loud
+    assert GOOD_CARD[0] not in caplog.text
+
+
+async def test_a_saved_method_paynearme_answers_unreadably_is_reported_as_not_known(
+    pg_dsn, make_session
+) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("CARD-04")
+    support.PAYNEARME.reshape = lambda operation, answer: httpx.Response(200, text="upstream reset")
+    number, month, year, cvc = GOOD_CARD
+    saved = await s.dispatch(
+        "add_payment_method",
+        {
+            "method": "card",
+            "card_number": number,
+            "exp_month": month,
+            "exp_year": year,
+            "cvc": cvc,
+            **CARD_BILLING,
+        },
+    )
+    assert saved == {
+        "error": "PayNearMe answered, but its answer could not be read: whether it saved the card or bank account "
+        "is not known."
+    }
+    assert s.state.payment_methods == {}
+
+
 async def test_a_down_payment_then_the_plan_the_agent_chose(pg_dsn, make_session) -> None:
     """PHONE-02: $105.00 charged on the call, then 10 x $94.50 with no payment method; the loan is not re-aged."""
     seed_world(pg_dsn)
@@ -672,6 +747,69 @@ async def test_the_balance_never_read_leaves_the_agents_pif_label_to_say_it_was_
     paid = await s.dispatch("take_payment", {"method_id": method_id, "amount": "1180.00", "option_id": "pif"})
     assert (paid["status"], paid["posted_to_ledger"]) == ("approved", False)
     assert await disposition_of_the_call(s, pg_dsn) == "paid"
+
+
+@pytest.mark.parametrize(
+    ("task", "amount", "option_id", "failing", "posted", "outcome"),
+    [
+        ("CARD-09", "$1,180.00", "pif", "post_payment", False, "paid"),
+        ("CARD-04", "$1,440.00", "discount_40", "write_off", False, "settled"),
+        ("CARD-09", "$1,180.00", "pif", "the balance read", True, "paid"),
+    ],
+    ids=["posting", "write-off", "balance read"],
+)
+async def test_an_approved_payment_stands_whatever_fails_after_it(
+    pg_dsn, make_session, monkeypatch, caplog, task, amount, option_id, failing, posted, outcome
+) -> None:
+    """PayNearMe approved the charge, then the ledger fails in a way no one planned for (an answer of a shape
+    Fineract never sends): the model still hears PayNearMe's answer, with posted_to_ledger false when the posting
+    did not complete; the payment is recorded, the failure logged with PayNearMe's payment id, and the call's
+    outcome stands."""
+    caplog.set_level(logging.DEBUG)
+    seed_world(pg_dsn)
+    s = await make_session(task)
+    method_id = await card(s)
+    ledger = support.LEDGER
+    if failing == "the balance read":
+        post, read = ledger.post_payment, ledger.debt
+        done: list[Any] = []
+
+        async def posting(*args: Any, **kwargs: Any) -> Any:
+            done.append(await post(*args, **kwargs))
+            return done[-1]
+
+        async def reading(account: str) -> Any:
+            if done:
+                raise KeyError("totalOutstanding")
+            return await read(account)
+
+        monkeypatch.setattr(ledger, "post_payment", posting)
+        monkeypatch.setattr(ledger, "debt", reading)
+    else:
+
+        async def unexpected(*args: Any, **kwargs: Any) -> Any:
+            raise KeyError("resourceId")
+
+        monkeypatch.setattr(ledger, failing, unexpected)
+    paid = await s.dispatch(
+        "take_payment", {"method_id": method_id, "amount": amount.strip("$"), "option_id": option_id}
+    )
+    (payment,) = support.PAYNEARME.payments
+    assert paid == {
+        "payment_id": payment["id"],
+        "status": "approved",
+        "amount": amount,
+        "response_code": "0",
+        "response_message": "Approved",
+        "paid_with": "card ending 1111",
+        "posted_to_ledger": posted,
+    }
+    (row,) = rows(pg_dsn, "payments")
+    assert (row["payment_id"], row["status"]) == (payment["id"], "approved")
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(payment["id"] in m for m in loud), loud
+    assert GOOD_CARD[0] not in caplog.text
+    assert await disposition_of_the_call(s, pg_dsn) == outcome
 
 
 # --- the label is a label ------------------------------------------------------------------------------

@@ -15,7 +15,14 @@ PayNearMe decides approve or decline, and a decline is an answer, not an error.
 Nothing here checks the creditor's policy: PayNearMe charges what it is sent,
 subject only to its own rules (its declines, the up-to order's limit, its error
 envelope, which is raised as ``PayNearMeRefused`` in PayNearMe's own words). An
-unreachable or failing twin is ``PaymentsUnavailable``.
+unreachable or failing twin is ``PaymentsUnavailable``. An answer (HTTP below
+400) that cannot be read is ``UnreadableAnswer``: PayNearMe answered, so whether
+it acted on the request is not known. That is a body that is not a JSON object,
+a ``status`` that is neither ``ok`` nor ``error``, or an ``ok`` answer without
+the payment's ``pnm_payment_identifier``, ``payment_status`` or a
+``net_payment_amount`` that is an amount (``make_payment``), or without the new
+method's ``payment_method_identifier`` and ``number`` (``create_payment_method``).
+It is logged loudly, naming what could not be read and never the answer itself.
 
 Every request carries ``version`` 3.0, the site id, a ``timestamp`` and a
 ``signature``: HMAC-SHA256 with the site's secret over each parameter's name and
@@ -71,6 +78,10 @@ class PayNearMeRefused(ToolError):
 
 class PaymentsUnavailable(RuntimeError):
     """PayNearMe could not be reached, or failed (an HTTP error status)."""
+
+
+class UnreadableAnswer(RuntimeError):
+    """PayNearMe answered, but its answer cannot be read: whether it acted on the request is not known."""
 
 
 @dataclass(frozen=True)
@@ -151,6 +162,22 @@ def _given(params: dict[str, str | None]) -> dict[str, str]:
     return {name: value for name, value in params.items() if value is not None}
 
 
+def _unreadable(operation: str, what: str) -> UnreadableAnswer:
+    """PayNearMe answered ``operation`` but ``what`` cannot be read: logged loudly, never with the answer itself
+    (it may echo what was sent), and returned for the caller to raise."""
+    err = UnreadableAnswer(f"PayNearMe's answer to {operation} could not be read: {what}")
+    logger.error("%s; whether PayNearMe acted on it is not known", err)
+    return err
+
+
+def _field(fields: dict[str, Any], name: str, operation: str, note: str = "") -> str:
+    """A field PayNearMe's answer must carry, as text; ``UnreadableAnswer`` when it is missing or blank."""
+    value = fields.get(name)
+    if value is None or str(value).strip() == "":
+        raise _unreadable(operation, f"{name} is missing{note}")
+    return str(value)
+
+
 class PayNearMe:
     """The World's PayNearMe over HTTP. One per pod; every request with a timeout."""
 
@@ -171,7 +198,9 @@ class PayNearMe:
         await self._http.aclose()
 
     async def _call(self, operation: str, params: dict[str, str], at: datetime) -> dict[str, Any]:
-        """One signed request, timestamped with ``at`` (the World's time); PayNearMe's ``ok`` answer."""
+        """One signed request, timestamped with ``at`` (the World's time); PayNearMe's ``ok`` answer.
+        ``PaymentsUnavailable`` when it cannot be reached or answers an HTTP error, ``PayNearMeRefused`` for its
+        error envelope, ``UnreadableAnswer`` for any other answer."""
         body = {
             "version": API_VERSION,
             "site_identifier": self.site_identifier,
@@ -185,12 +214,19 @@ class PayNearMe:
             raise PaymentsUnavailable(f"PayNearMe could not be reached: {type(err).__name__}") from err
         if resp.status_code >= 400:
             raise PaymentsUnavailable(f"PayNearMe failed ({resp.status_code}) on {operation}")
-        answer = resp.json()
-        if answer.get("status") != "ok":
+        try:
+            answer = resp.json()
+        except ValueError as err:  # not JSON, or not text
+            raise _unreadable(operation, f"it is not JSON (HTTP {resp.status_code})") from err
+        if not isinstance(answer, dict):
+            raise _unreadable(operation, f"it is not a JSON object (HTTP {resp.status_code})")
+        if answer.get("status") == "error":
             errors = answer.get("errors") or [{}]
             detail = "; ".join(str(e.get("description") or "error") for e in errors)
             logger.warning("PayNearMe refused %s: %s", operation, detail)
             raise PayNearMeRefused(detail)
+        if answer.get("status") != "ok":
+            raise _unreadable(operation, "its status is neither ok nor error")
         return answer
 
     async def add_card(
@@ -242,6 +278,8 @@ class PayNearMe:
         return _saved(await self._call("create_payment_method", _given(params), at), "ach")
 
     async def pay(self, *, order: str, method: SavedMethod, amount_cents: int, at: datetime) -> Payment:
+        """Charge the amount to the saved method; PayNearMe's payment, approved or rejected. ``UnreadableAnswer``
+        when PayNearMe answered but its payment cannot be read (it may have charged)."""
         answer = await self._call(
             "make_payment",
             {
@@ -253,11 +291,21 @@ class PayNearMe:
             },
             at,
         )
-        paid = answer["payment"]
+        paid = answer.get("payment")
+        if not isinstance(paid, dict):
+            raise _unreadable("make_payment", "it has no payment")
+        payment_id = _field(paid, "pnm_payment_identifier", "make_payment")
+        status = _field(paid, "payment_status", "make_payment", f" (payment {payment_id})")
+        try:
+            net_cents = to_cents(paid.get("net_payment_amount"))
+        except (ArithmeticError, TypeError, ValueError) as err:
+            raise _unreadable(
+                "make_payment", f"net_payment_amount is not an amount (payment {payment_id}, {status})"
+            ) from err
         return Payment(
-            payment_id=str(paid["pnm_payment_identifier"]),
-            status=str(paid["payment_status"]),
-            amount_cents=to_cents(paid["net_payment_amount"]),
+            payment_id=payment_id,
+            status=status,
+            amount_cents=net_cents,
             response_code=paid.get("response_code"),
             response_message=paid.get("response_message"),
             method_id=method.method_id,
@@ -267,11 +315,18 @@ class PayNearMe:
 
 
 def _saved(answer: dict[str, Any], kind: Kind) -> SavedMethod:
-    """The one method ``create_payment_method`` answers (only the new one is in its answer)."""
-    account = answer["order"]["electronic_payments"]["payment_methods"][0]["accounts"][0]
+    """The one method ``create_payment_method`` answers (only the new one is in its answer); ``UnreadableAnswer``
+    when it cannot be read."""
+    operation = "create_payment_method"
+    try:
+        account = answer["order"]["electronic_payments"]["payment_methods"][0]["accounts"][0]
+    except (KeyError, IndexError, TypeError) as err:
+        raise _unreadable(operation, "it has no payment method") from err
+    if not isinstance(account, dict):
+        raise _unreadable(operation, "it has no payment method")
     return SavedMethod(
-        method_id=str(account["payment_method_identifier"]),
+        method_id=_field(account, "payment_method_identifier", operation),
         kind=kind,
-        last4=str(account["number"]),
+        last4=_field(account, "number", operation),
         brand=account.get("card_brand"),
     )

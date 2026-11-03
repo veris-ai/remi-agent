@@ -76,8 +76,8 @@ registered for re-reads.
 | `revoke_consent` | Revokes the dialed number's artificial-voice consent (a cease or a stop request does not by itself). |
 | `get_payment_options` | The World's `creditor_policy(account_id, call_date)`, verbatim: the creditor and how it is named, the balance, the options (`pif`, `payment_plan`, each `discount_<pct>`) with amounts, requirements and due dates, the agency's offer rules and the creditor's rules. Fixed policy priced from the account: no call state. |
 | `request_approval` | An option id to the World's supervisor; returns only `{"approved", "reason"}`. |
-| `add_payment_method` | Card or bank account to PayNearMe's `create_payment_method` on the account's order, with the billing details the agent passes: PayNearMe requires a card's security code and billing name, address and ZIP (5 or 9 digits), and a bank account's billing name and ZIP; the phone is optional. Remi passes what it is given and never fills a field in from the account record; a missing one comes back as PayNearMe's "Missing required parameter". Returns the `method_id` and last four; every card, bank and billing field redacted. |
-| `take_payment` | `method_id` + `amount` (the agent's, in dollars: a plain or comma-grouped decimal, or a JSON number) + an optional `option_id` label, charged on PayNearMe's `make_payment`; nothing is refused for being off the policy. Returns PayNearMe's answer as given (`status`, `response_code`, `response_message`). The agent's record of it is the `payments` row (if it cannot be written, the failure is logged loudly and PayNearMe's answer still stands); an approved payment is posted to the account's loan keyed by PayNearMe's payment id, and once a payment labelled `discount_<pct>` is posted the rest is written off. A refusal (a negative, zero or too large amount, an up-to order's limit, a wrong signature) is PayNearMe's words. The call is `settled` by a payment labelled `discount_<pct>`, and `paid` once its approved payments reach the balance known before the first of them (with no balance ever known, by one labelled `pif`); a partial payment alone is `no_commitment`. |
+| `add_payment_method` | Card or bank account to PayNearMe's `create_payment_method` on the account's order, with the billing details the agent passes: PayNearMe requires a card's security code and billing name, address and ZIP (5 or 9 digits), and a bank account's billing name and ZIP; the phone is optional. Remi passes what it is given and never fills a field in from the account record; a missing one comes back as PayNearMe's "Missing required parameter". Returns the `method_id` and last four; every card, bank and billing field redacted. When PayNearMe answers but its answer cannot be read, the error says so: whether it saved the card or bank account is not known. |
+| `take_payment` | `method_id` + `amount` (the agent's, in dollars: a plain or comma-grouped decimal, or a JSON number) + an optional `option_id` label, charged on PayNearMe's `make_payment`; nothing is refused for being off the policy. Returns PayNearMe's answer as given (`status`, `response_code`, `response_message`), `posted_to_ledger`, and `remaining_balance` when the ledger answers the read after posting. The agent's record of it is the `payments` row; an approved payment is posted to the account's loan keyed by PayNearMe's payment id, and once a payment labelled `discount_<pct>` is posted the rest is written off. Once PayNearMe has answered with a payment, nothing after it becomes an error: a row that cannot be written, a posting or write-off that does not complete (`posted_to_ledger: false`) and a balance read that fails (no `remaining_balance`) are each logged loudly with PayNearMe's payment id, and PayNearMe's answer still stands. A refusal (a negative, zero or too large amount, an up-to order's limit, a wrong signature) is PayNearMe's words. When PayNearMe does not answer, the error is "PayNearMe did not answer: whether the payment went through is not known."; when it answers but its answer cannot be read, "PayNearMe answered, but its answer could not be read: whether the payment went through is not known." The call is `settled` by an approved payment labelled `discount_<pct>`, and `paid` once its approved payments reach the balance known before the first of them (with no balance ever known, by one labelled `pif`), whatever the ledger then does; a partial payment alone is `no_commitment`. |
 | `create_arrangement` | `kind` (`payment_plan`, `discount`, `full_balance`) + `total` + `first_due_on` (+ `months` for a plan) + an optional `option_id` label, as the agent states them: a plan's payments are equal, rounded down with the remainder last, one in each month, with no payment method (no automatic payments); a discount or the full balance is one payment on a date. Queues the written confirmation. An error only for a total the World's integer columns cannot hold (-$21,474,836.48 to $21,474,836.47) or a plan whose last payment falls after 9999-12-31. |
 | `record_promise` | The `amount` the agent states, on a date, and how they will pay (+ an optional `option_id` label). An error only for an amount the World's integer columns cannot hold. |
 | `schedule_callback` | A callback on the dialed number, recording whether the consumer asked for or agreed to the time. |
@@ -151,7 +151,13 @@ placed account has one `up-to` order of its placed balance
 - PayNearMe decides approve or decline; a decline is an answer
   (`status: rejected`, `response_code`, `response_message`), not an error. A
   refusal (its error envelope) is PayNearMe's own words; an unreachable twin is
-  never hidden.
+  never hidden. An answer that cannot be read (a body that is not a JSON object,
+  a `status` neither `ok` nor `error`, or an `ok` answer without the payment's
+  `pnm_payment_identifier`, `payment_status` or a `net_payment_amount` that is an
+  amount, or without the saved method's `payment_method_identifier` and `number`)
+  is logged loudly, naming what could not be read and never the answer itself,
+  and the agent hears that PayNearMe answered but whether it charged the payment
+  (or saved the card or bank account) is not known.
 - The agent's record of every payment, approved or not, is a `payments` row
   (PayNearMe's payment id and answer). An approved payment is posted to the
   ledger (below).
@@ -175,9 +181,12 @@ measured refusals, `tests/fake_ledger.py`).
   `externalId` = PayNearMe's payment id (so a retry posts once), and the Card or
   ACH payment type. Once a discount's payment is posted, the rest is written off.
 - A plan never re-ages the loan: its schedule is the `arrangements` row only.
-- A refusal (`LedgerRefused`, Fineract's own code) or an unreachable ledger
-  (`LedgerUnavailable`) after an approved payment is reported
-  (`posted_to_ledger: false`) and logged; the payment stands.
+- A refusal (`LedgerRefused`, Fineract's own code), an unreachable ledger
+  (`LedgerUnavailable`, tried twice) or any other failure while posting an
+  approved payment or writing off the rest is reported
+  (`posted_to_ledger: false`) and logged with PayNearMe's payment id; a balance
+  read after posting that fails leaves `remaining_balance` out and is logged the
+  same way. The payment stands, and so does the call's `paid` or `settled`.
 
 ## Config
 
@@ -247,7 +256,9 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
 - `tests/test_payment_options.py`: `get_payment_options` byte for byte for every
   pilot account; the supervisor's answers; payments on PayNearMe recorded and
   posted, a discount's rest written off; declines and PayNearMe's refusals as
-  given; requests signed with the World's clock; card data in no row, log or
+  given; an answer PayNearMe gives that cannot be read reported as such; an
+  approved payment reported, recorded and its outcome kept whatever fails after
+  it; requests signed with the World's clock; card data in no row, log or
   result; plans by the policy's rounding with no payment method and no re-age;
   off-policy money recorded as the agent chose it, not refused; Remi calls only the
   World's `creditor_policy` and `request_approval`;
@@ -264,7 +275,7 @@ uv run --all-extras --no-extra livekit pytest -q vamos_agents/remi
   a plan's payments, dispositions.
 - `tests/test_payments.py`: `PayNearMe` against a double of the twin's vendor API
   (`tests/fake_paynearme.py`): signing, the time it signs with, answers and
-  refusals, an unreachable twin, card data.
+  refusals, an unreachable twin, answers that cannot be read, card data.
 - `tests/test_ledger.py`: `FineractLedger` on the wire (`httpx.MockTransport`):
   the requests it sends, the debt it reads, idempotent posting, refusals vs an
   unreachable ledger.
