@@ -707,8 +707,8 @@ async def test_socket_vendor_starts_with_remis_screen_pop(name: str) -> None:
     assert instructions == call.setup.instructions
     assert instructions.startswith(CASES["remi"].setup().instructions.rstrip())
     pop = instructions.split("# Account on screen", 1)[1]
-    assert "You are calling Marcus Sokolov" in pop and "Call assessment: the call may proceed." in pop
-    for read in ("get_account", "get_dialed_phone", "get_contact_history"):
+    assert "You are calling Marcus Sokolov" in pop and "assessment" not in pop.lower()  # facts, no verdict
+    for read in ("get_account", "get_debt_details", "get_dialed_phone", "get_contact_history"):
         assert f"\n{read}: {{" in pop
     for secret in REMI_SECRETS:
         assert secret not in instructions, f"verification secret {secret!r} reached the instructions"
@@ -722,13 +722,15 @@ async def test_socket_vendor_starts_with_remis_screen_pop(name: str) -> None:
     vendor = [i for i, e in enumerate(events) if e.startswith("vendor:")]
     assert {events[i] for i in reads} >= {"sql:accounts", "sql:phones", "sql:contact_attempts"}
     assert max(reads) < min(vendor) < events.index("agent audio"), events
+    assert events.index("ledger:debt") < min(vendor), "the debt is on screen before any vendor frame"
     assert not any(script.is_request(f) for f in sock.sent), "no priming request of any kind"
     assert not [c for f in sock.sent for c in _forced_tool_choices(f)], "no forced tool choice"
 
-    script.tool_calls("take_payment")  # the gates treat the reads as done: verification is next
+    script.tool_calls("take_payment")  # no gate: the call reaches the tool, which checks only its arguments
     await asyncio.sleep(0.05)
     ((tool, refusal),) = call.session.results  # type: ignore[attr-defined]
-    assert tool == "take_payment" and refusal["error"].startswith("Not verified yet")
+    assert tool == "take_payment" and refusal["error"].startswith("invalid arguments for take_payment")
+    assert call.session.state.missing_reads == [], "the screen pop's reads are on the call's state"
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 
@@ -986,7 +988,8 @@ async def test_cascade_vendor_starts_with_remis_screen_pop(name: str) -> None:
     assert {events[i] for i in reads} >= {"sql:accounts", "sql:phones", "sql:contact_attempts"}
     assert max(reads) < events.index("llm") < events.index("agent audio")
     ((tool_name, refusal),) = call.session.results  # type: ignore[attr-defined]
-    assert tool_name == "take_payment" and refusal["error"].startswith("Not verified yet")
+    assert tool_name == "take_payment" and refusal["error"].startswith("invalid arguments for take_payment")
+    assert call.session.state.missing_reads == [], "the screen pop's reads are on the call's state"
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 

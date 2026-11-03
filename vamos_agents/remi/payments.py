@@ -1,150 +1,241 @@
-"""Payments through the collections system's gateway (WORLD.md, "The payment gateway").
+"""Payments on PayNearMe (World v2 WORLD.md, "Payments: PayNearMe"): tokenize, charge, report.
 
-Stripe does not serve debt collection agencies, so the World takes payments the
-way a real agency does: inside its collections platform, whose integrated
-processor tokenizes the card or bank account and authorizes the charge. Until a
-twin of such a processor exists it lives in the collections Postgres as three
-SQL functions, and ``PaymentGateway`` is Remi's one client for them:
+Stripe does not serve debt collection agencies; PayNearMe does. Each placed
+account has one PayNearMe ``up-to`` order of its placed balance
+(``accounts.pnm_order_identifier``), and ``PayNearMe`` is Remi's one client for
+the vendor's JSON API v3.0 on the World's twin:
 
-- ``gateway_tokenize_card`` / ``gateway_tokenize_ach`` save an instrument on the
-  account and answer its ``method_id`` (the existing one for a card or bank
-  account already saved there);
-- ``gateway_charge`` charges a saved method and writes the ``payments`` row.
-  It does not know the balance: posting an approved charge to the account's
-  loan is the ledger's (``ledger.FineractLedger.post_payment``).
+- ``add_card`` / ``add_bank_account``: ``create_payment_method`` on the order,
+  answering its ``payment_method_identifier`` and last four digits;
+- ``pay``: ``make_payment`` on the order, answering PayNearMe's payment
+  (``pnm_payment_identifier``, ``payment_status``, ``net_payment_amount``,
+  ``response_code``, ``response_message``).
 
-The world decides approve or decline; a decline is a normal result, not an
-error. ``gateway_charge`` first checks the amount against the creditor's menu:
-an off-menu amount raises SQLSTATE 23514 (``policy: ...``) before any payment
-row, raised here as ``menu.PolicyRefused``. An invalid instrument, unknown method or out-of-range amount raises
-SQLSTATE 22023 with a message starting ``gateway:``; nothing is written, and
-the message becomes a ``ToolError`` the model can relay.
+PayNearMe decides approve or decline, and a decline is an answer, not an error.
+Nothing here checks the creditor's policy: PayNearMe charges what it is sent,
+subject only to its own rules (its declines, the up-to order's limit, its error
+envelope, which is raised as ``PayNearMeRefused`` in PayNearMe's own words). An
+unreachable or failing twin is ``PaymentsUnavailable``.
 
-Remi never writes ``payment_methods`` or ``payments`` itself, never touches the
-processor's ``processor_vault`` or ``processor_*`` helpers, and runs no DDL.
+Every request carries ``version`` 3.0, the site id, a ``timestamp`` and a
+``signature``: HMAC-SHA256 with the site's secret over each parameter's name and
+value, sorted by name, PayNearMe's excluded names left out. The twin refuses a
+timestamp more than 300 seconds from its virtual clock, so ``at`` is always the
+call's clock (``CallClock``: the World's time), never wall time.
+
 Card numbers, expiry dates, security codes and bank account numbers pass
-through here only as gateway arguments: never logged, never returned to the
-model, never written anywhere else. ``at`` is always the call's clock.
+through here only as PayNearMe's ``_pii`` parameters: never logged, never kept,
+never returned. The HMAC secret is never in a repr.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from decimal import Decimal
+from typing import Any, Literal
 
-import psycopg
+import httpx
 
 from vamos_voice.tools import ToolError
 
-from .db import Transaction
-from .menu import raise_policy_refusal
-
 logger = logging.getLogger(__name__)
 
+API_VERSION = "3.0"
+API_PATH = "/json-api"
+TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+#: The parameter names PayNearMe leaves out of the signature.
+UNSIGNED = frozenset(
+    {"signature", "call", "action", "controller", "format", "fp", "print_buttons", "datafile", "api",
+     "business_document", "bank_document", "return_url", "afo", "app", "site_id", "iframe", "locale", "x", "y"}
+)  # fmt: skip
+#: How payments taken on a call are marked (``site_channel``).
+SITE_CHANNEL = "agent"
+
 Kind = Literal["card", "ach"]
-DeclineCode = Literal["insufficient_funds", "card_declined", "expired_card"]
-
-GATEWAY_ERROR_PREFIX = "gateway:"
 
 
-class PaymentError(ToolError):
-    """The gateway refused the request (SQLSTATE 22023); the message is the gateway's own words.
-
-    A ``ToolError``, so the framework's dispatch hands it to the model as
-    ``{"error": "The payment gateway refused it: ..."}`` and the call goes on.
-    """
+class PayNearMeRefused(ToolError):
+    """PayNearMe refused the request (its error envelope); the message is PayNearMe's own words."""
 
     def __init__(self, detail: str) -> None:
-        super().__init__(f"The payment gateway refused it: {detail}")
+        super().__init__(f"PayNearMe refused it: {detail}")
+        self.detail = detail
 
 
-@dataclass(frozen=True)
-class CardDetails:
-    number: str = field(repr=False)
-    exp_month: int = field(repr=False)
-    exp_year: int = field(repr=False)
-    cvc: str = field(repr=False)
-
-
-@dataclass(frozen=True)
-class BankDetails:
-    routing_number: str = field(repr=False)
-    account_number: str = field(repr=False)
+class PaymentsUnavailable(RuntimeError):
+    """PayNearMe could not be reached, or failed (an HTTP error status)."""
 
 
 @dataclass(frozen=True)
 class SavedMethod:
-    """A card or bank account the gateway tokenized on the account (a ``payment_methods`` row)."""
+    """A card or bank account PayNearMe tokenized on the account's order: never its number."""
 
-    method_id: str
+    method_id: str  # PayNearMe's payment_method_identifier
     kind: Kind
     last4: str
-    brand: str | None = None
+    brand: str | None
 
 
 @dataclass(frozen=True)
-class Charge:
-    """One ``gateway_charge`` answer: the ``payments`` row it wrote."""
+class Payment:
+    """PayNearMe's answer to a payment, as the agency records it."""
 
-    payment_id: str
-    status: Literal["approved", "declined"]
-    decline_code: DeclineCode | None
-    processor_ref: str
+    payment_id: str  # PayNearMe's pnm_payment_identifier
+    status: str  # approved, rejected
+    amount_cents: int  # net_payment_amount: what goes towards the balance
+    response_code: str | None
+    response_message: str | None
+    method_id: str
+    kind: Kind
+    last4: str
 
     @property
     def approved(self) -> bool:
         return self.status == "approved"
 
 
-class PaymentGateway:
-    """The gateway functions, called inside the tool's own transaction on the collections database."""
+class _Secret:
+    """The HMAC secret, kept out of every repr."""
 
-    def __init__(self, tx: Transaction) -> None:
-        self._tx = tx
+    __slots__ = ("value",)
 
-    async def tokenize_card(
-        self, *, account_id: str, holder_name: str, card: CardDetails, at: datetime
-    ) -> SavedMethod:
-        row = await self._call(
-            "gateway_tokenize_card",
-            account_id=account_id,
-            pan=card.number,
-            exp_month=card.exp_month,
-            exp_year=card.exp_year,
-            cvc=card.cvc,
-            holder_name=holder_name,
-            at=at,
-        )
-        return SavedMethod(row["method_id"], "card", row["last4"].strip(), row["brand"])
+    def __init__(self, value: str) -> None:
+        self.value = value
 
-    async def tokenize_ach(
-        self, *, account_id: str, holder_name: str, bank: BankDetails, at: datetime
-    ) -> SavedMethod:
-        row = await self._call(
-            "gateway_tokenize_ach",
-            account_id=account_id,
-            routing_number=bank.routing_number,
-            account_number=bank.account_number,
-            holder_name=holder_name,
-            at=at,
-        )
-        return SavedMethod(row["method_id"], "ach", row["last4"].strip())
+    def __repr__(self) -> str:
+        return "<secret>"
 
-    async def charge(self, *, method_id: str, amount_cents: int, at: datetime) -> Charge:
-        row = await self._call("gateway_charge", method_id=method_id, amount_cents=amount_cents, at=at)
-        return Charge(row["payment_id"], row["status"], row["decline_code"], row["processor_ref"])
 
-    async def _call(self, function: str, **args: object) -> dict[str, object]:
+def sign(params: dict[str, str], secret: str) -> str:
+    """PayNearMe's request signature: HMAC-SHA256 over ``name + value`` for each signed parameter, sorted."""
+    canonical = "".join(f"{name}{params[name]}" for name in sorted(params) if name not in UNSIGNED)
+    return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+
+
+def dollars(cents: int) -> str:
+    """PayNearMe's amount: major units, two decimals ("1440.00")."""
+    return f"{Decimal(cents) / 100:.2f}"
+
+
+def to_cents(amount: Any) -> int:
+    return int((Decimal(str(amount)) * 100).to_integral_value())
+
+
+def _digits(value: str) -> str:
+    return re.sub(r"\D", "", value)
+
+
+class PayNearMe:
+    """The World's PayNearMe over HTTP. One per pod; every request with a timeout."""
+
+    def __init__(
+        self,
+        base_url: str,
+        site_identifier: str,
+        hmac_secret: str,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        base = base_url.rstrip("/").removesuffix(API_PATH)
+        self._http = httpx.AsyncClient(base_url=base + API_PATH, timeout=TIMEOUT, transport=transport)
+        self.site_identifier = site_identifier
+        self._secret = _Secret(hmac_secret)
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+    async def _call(self, operation: str, params: dict[str, str], at: datetime) -> dict[str, Any]:
+        """One signed request, timestamped with ``at`` (the World's time); PayNearMe's ``ok`` answer."""
+        body = {
+            "version": API_VERSION,
+            "site_identifier": self.site_identifier,
+            "timestamp": str(int(at.timestamp())),
+            **params,
+        }
+        body["signature"] = sign(body, self._secret.value)
         try:
-            return await self._tx.call_gateway(function, args)
-        except psycopg.errors.CheckViolation as err:  # SQLSTATE 23514: the creditor's menu refused the amount
-            raise_policy_refusal(err, function)
-            raise
-        except psycopg.errors.InvalidParameterValue as err:  # SQLSTATE 22023
-            message = err.diag.message_primary or ""
-            if not message.startswith(GATEWAY_ERROR_PREFIX):
-                raise
-            # The gateway's own words: they never echo the card or account number.
-            raise PaymentError(message.removeprefix(GATEWAY_ERROR_PREFIX).strip()) from err
+            resp = await self._http.post(f"/{operation}", json=body)
+        except httpx.HTTPError as err:
+            raise PaymentsUnavailable(f"PayNearMe could not be reached: {type(err).__name__}") from err
+        if resp.status_code >= 400:
+            raise PaymentsUnavailable(f"PayNearMe failed ({resp.status_code}) on {operation}")
+        answer = resp.json()
+        if answer.get("status") != "ok":
+            errors = answer.get("errors") or [{}]
+            detail = "; ".join(str(e.get("description") or "error") for e in errors)
+            logger.warning("PayNearMe refused %s: %s", operation, detail)
+            raise PayNearMeRefused(detail)
+        return answer
+
+    async def add_card(
+        self, *, order: str, number: str, exp_month: int, exp_year: int, cvc: str, holder: str, at: datetime
+    ) -> SavedMethod:
+        answer = await self._call(
+            "create_payment_method",
+            {
+                "pnm_order_identifier": order,
+                "payment_method_type": "card",
+                "payment_method_card_number_pii": _digits(number),
+                "payment_method_card_expiry_pii": f"{exp_month:02d}/{exp_year}",
+                "payment_method_cvv_pii": _digits(cvc),
+                "payment_method_billing_name": holder,
+            },
+            at,
+        )
+        return _saved(answer, "card")
+
+    async def add_bank_account(
+        self, *, order: str, routing: str, account: str, holder: str, at: datetime
+    ) -> SavedMethod:
+        answer = await self._call(
+            "create_payment_method",
+            {
+                "pnm_order_identifier": order,
+                "payment_method_type": "ach",
+                "payment_method_ach_aba_pii": _digits(routing),
+                "payment_method_ach_account_pii": _digits(account),
+                "payment_method_billing_name": holder,
+            },
+            at,
+        )
+        return _saved(answer, "ach")
+
+    async def pay(self, *, order: str, method: SavedMethod, amount_cents: int, at: datetime) -> Payment:
+        answer = await self._call(
+            "make_payment",
+            {
+                "pnm_order_identifier": order,
+                "payment_method_identifier": method.method_id,
+                "payment_amount": dollars(amount_cents),
+                "payment_currency": "USD",
+                "site_channel": SITE_CHANNEL,
+            },
+            at,
+        )
+        paid = answer["payment"]
+        return Payment(
+            payment_id=str(paid["pnm_payment_identifier"]),
+            status=str(paid["payment_status"]),
+            amount_cents=to_cents(paid["net_payment_amount"]),
+            response_code=paid.get("response_code"),
+            response_message=paid.get("response_message"),
+            method_id=method.method_id,
+            kind=method.kind,
+            last4=method.last4,
+        )
+
+
+def _saved(answer: dict[str, Any], kind: Kind) -> SavedMethod:
+    """The one method ``create_payment_method`` answers (only the new one is in its answer)."""
+    account = answer["order"]["electronic_payments"]["payment_methods"][0]["accounts"][0]
+    return SavedMethod(
+        method_id=str(account["payment_method_identifier"]),
+        kind=kind,
+        last4=str(account["number"]),
+        brand=account.get("card_brand"),
+    )

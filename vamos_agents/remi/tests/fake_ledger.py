@@ -1,22 +1,19 @@
-"""An in-memory ledger for Remi's tool tests, keeping the behaviour of the World's Fineract that Remi relies on.
+"""An in-memory ledger for Remi's tool tests, keeping the behaviour of World v2's Fineract that Remi relies on.
 
-Each rule here was measured on the pinned Fineract engine (the benchmark repo
-``tests/test_collections_fineract.py`` runs the same operations live, and
+Each rule here was measured on the pinned Fineract engine (the benchmark repo's
+``tests/test_collections_world_v2.py`` runs the same operations live, and
 ``test_ledger_live.py`` runs ``FineractLedger`` itself against one):
 
-- a transaction dated after the business date is refused
+- a transaction dated after the business date (3 November 2026) is refused
   (``error.msg.loan.transaction.cannot.be.a.future.date``);
 - a second transaction with the same ``externalId`` is refused
   (``validation.msg.loan.transaction.externalId.value.must.be.unique``);
 - a repayment of the whole outstanding balance closes the loan (600); a write-off
-  closes it written off (601);
-- a re-age spreads the outstanding balance into monthly instalments, each rounded
-  half up to the cent, the last absorbing the difference; one a day per loan
-  (``error.msg.loan.reage.reage.transaction.already.present.for.today``) unless
-  the earlier one is undone.
+  closes it written off (601), owing nothing.
 
-It records every write in ``writes`` (the operation and its arguments), as the
-World's ledger log would show them.
+Nothing re-ages a loan: a plan is the agency's ``arrangements`` row only. Every
+write is recorded in ``writes`` (the operation and its arguments), as the World's
+ledger log would show it.
 """
 
 from __future__ import annotations
@@ -25,21 +22,19 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
 
-from vamos_agents.remi import policy
 from vamos_agents.remi.ledger import (
     STATUS_ACTIVE,
     STATUS_CLOSED,
     STATUS_OVERPAID,
     STATUS_WRITTEN_OFF,
     Debt,
-    Instalment,
     Itemization,
     LedgerRefused,
     LedgerUnavailable,
     Posting,
 )
 
-BUSINESS_DATE = date(2027, 2, 10)
+BUSINESS_DATE = date(2026, 11, 3)
 
 
 @dataclass
@@ -47,12 +42,10 @@ class _Loan:
     account_id: str
     loan_id: int
     itemization: Itemization
-    placed_cents: int
+    principal_cents: int
     repayments: list[Posting] = field(default_factory=list)
     status: int = STATUS_ACTIVE
     written_off_cents: int = 0
-    schedule: tuple[Instalment, ...] = ()
-    re_aged_on: date | None = None
     external_ids: set[str] = field(default_factory=set)
 
     @property
@@ -63,11 +56,11 @@ class _Loan:
     def balance_cents(self) -> int:
         if self.status == STATUS_WRITTEN_OFF:
             return 0
-        return max(0, self.placed_cents - self.paid_cents)
+        return max(0, self.principal_cents - self.paid_cents)
 
 
 class FakeLedger:
-    """The World's ledger for one test: accounts are added with ``add_account``."""
+    """World v2's ledger for one test: one loan per placed account."""
 
     def __init__(self, business_date: date = BUSINESS_DATE) -> None:
         self.business_date: date | None = business_date
@@ -77,35 +70,28 @@ class FakeLedger:
         self.unavailable = False  # every call raises LedgerUnavailable while set
         self.closed = False
 
-    def add_account(
-        self,
-        account_id: str,
-        *,
-        charge_off_on: date,
-        charge_off_balance_cents: int,
-        interest_since_charge_off_cents: int = 0,
-        fees_since_charge_off_cents: int = 0,
-        paid_since_charge_off_cents: int = 0,
-        last_payment_on: date | None = None,
-    ) -> None:
-        item = Itemization(
-            charge_off_on,
-            charge_off_balance_cents,
-            interest_since_charge_off_cents,
-            fees_since_charge_off_cents,
-        )
-        loan = _Loan(
-            account_id,
-            len(self.loans) + 1,
-            item,
-            charge_off_balance_cents + interest_since_charge_off_cents + fees_since_charge_off_cents,
-        )
-        if paid_since_charge_off_cents:
-            assert last_payment_on is not None
-            loan.repayments.append(
-                Posting(0, f"seed_{account_id}", paid_since_charge_off_cents, last_payment_on)
+    @classmethod
+    def from_manifest(cls, manifest: dict[str, Any]) -> FakeLedger:
+        """Every loan the World's manifest places (``fineract.loans``)."""
+        ledger = cls(date.fromisoformat(manifest["fineract"]["business_date"]))
+        for loan in manifest["fineract"]["loans"]:
+            item = loan["itemization"]
+            ledger.add_account(
+                loan["external_id"],
+                Itemization(
+                    item["itemized_from"],
+                    date.fromisoformat(item["itemized_on"]),
+                    item["itemized_balance_cents"],
+                    item["interest_since_cents"],
+                    item["fees_since_cents"],
+                ),
+                loan["principal_cents"],
             )
-        self.loans[account_id] = loan
+            assert not loan["repayments"], "World v2 seeds no payment since placement"
+        return ledger
+
+    def add_account(self, account_id: str, itemization: Itemization, principal_cents: int) -> None:
+        self.loans[account_id] = _Loan(account_id, len(self.loans) + 1, itemization, principal_cents)
 
     # --- the Ledger protocol ------------------------------------------------------------------
 
@@ -128,7 +114,6 @@ class FakeLedger:
             paid_cents=loan.paid_cents,
             balance_cents=loan.balance_cents,
             last_payment_on=max((p.on for p in loan.repayments), default=None),
-            schedule=loan.schedule,
         )
 
     async def find_posting(self, account_id: str, payment_id: str) -> Posting | None:
@@ -136,14 +121,7 @@ class FakeLedger:
         return next((p for p in self.loans[account_id].repayments if p.payment_id == payment_id), None)
 
     async def post_payment(
-        self,
-        debt: Debt,
-        *,
-        amount_cents: int,
-        on: date,
-        kind: Literal["card", "ach"],
-        payment_id: str,
-        processor_ref: str,
+        self, debt: Debt, *, amount_cents: int, on: date, kind: Literal["card", "ach"], payment_id: str
     ) -> Posting:
         self._reachable()
         loan = self._loan(debt)
@@ -152,18 +130,9 @@ class FakeLedger:
         posting = Posting(len(self.writes) + 1, payment_id, amount_cents, on)
         loan.repayments.append(posting)
         if loan.balance_cents == 0:
-            loan.status = STATUS_OVERPAID if loan.paid_cents > loan.placed_cents else STATUS_CLOSED
+            loan.status = STATUS_OVERPAID if loan.paid_cents > loan.principal_cents else STATUS_CLOSED
         self.writes.append(
-            (
-                "repayment",
-                {
-                    "amount_cents": amount_cents,
-                    "on": on,
-                    "kind": kind,
-                    "payment_id": payment_id,
-                    "receipt": processor_ref,
-                },
-            )
+            ("repayment", {"amount_cents": amount_cents, "on": on, "kind": kind, "payment_id": payment_id})
         )
         return posting
 
@@ -179,31 +148,6 @@ class FakeLedger:
         self.writes.append(
             ("writeoff", {"on": on, "external_id": external_id, "amount_cents": loan.written_off_cents})
         )
-
-    async def re_age(self, debt: Debt, *, instalments: int, first_due_on: date, external_id: str) -> Debt:
-        self._reachable()
-        loan = self._loan(debt)
-        if loan.re_aged_on == self.business_date:
-            raise LedgerRefused(
-                "error.msg.loan.reage.reage.transaction.already.present.for.today",
-                "Loan reaging can only be done once a day. There has already been a reaging done for today",
-            )
-        self._unique(loan, external_id)
-        amounts = policy.instalment_cents(loan.balance_cents, instalments)
-        loan.schedule = tuple(
-            Instalment(policy.add_months(first_due_on, i), amount, 0) for i, amount in enumerate(amounts)
-        )
-        loan.re_aged_on = self.business_date
-        self.writes.append(
-            ("reAge", {"instalments": instalments, "first_due_on": first_due_on, "external_id": external_id})
-        )
-        return await self.debt(debt.account_id)
-
-    async def undo_re_age(self, debt: Debt) -> None:
-        self._reachable()
-        loan = self._loan(debt)
-        loan.schedule, loan.re_aged_on = (), None
-        self.writes.append(("undoReAge", {}))
 
     # --- helpers ------------------------------------------------------------------------------
 

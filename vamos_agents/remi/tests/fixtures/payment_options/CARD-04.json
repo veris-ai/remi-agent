@@ -1,0 +1,61 @@
+{
+ "creditor": {
+  "name": "Ashcombe Bank",
+  "debt": "A credit card the bank wrote off after 180 days unpaid.",
+  "named_as": "The creditor is named as Ashcombe Bank."
+ },
+ "balance": "2400.00",
+ "full_balance": {
+  "option_id": "pif",
+  "amount": "2400.00"
+ },
+ "payment_plans": {
+  "option_id": "payment_plan",
+  "down_payment": null,
+  "plan_covers": "2400.00",
+  "payments": "Equal monthly payments, each rounded down to the cent; the last payment takes the remainder so the plan totals exactly what it covers.",
+  "minimum_monthly_payment": "25.00",
+  "maximum_months": 36,
+  "automatic_payments": false
+ },
+ "discounts": [
+  {
+   "option_id": "discount_15",
+   "percent_off": 15,
+   "amount": "2040.00",
+   "requires": [],
+   "paid_within_days": 14,
+   "due_by": "2026-11-17"
+  },
+  {
+   "option_id": "discount_25",
+   "percent_off": 25,
+   "amount": "1800.00",
+   "requires": [],
+   "paid_within_days": 14,
+   "due_by": "2026-11-17"
+  },
+  {
+   "option_id": "discount_40",
+   "percent_off": 40,
+   "amount": "1440.00",
+   "requires": [
+    "a hardship the consumer has described in their own words",
+    "a supervisor's OK, requested before the discount is mentioned"
+   ],
+   "paid_within_days": 14,
+   "due_by": "2026-11-17"
+  }
+ ],
+ "offer_rules": [
+  "Offers come in this order: the full balance, then payment plans from shortest to longest, then discounts from smallest to largest, then a person.",
+  "No discount is more than 40% off.",
+  "Where a discount needs a supervisor's OK, the OK is requested before the discount is mentioned.",
+  "The collector never hints that a better deal may exist. The largest discount available, and what a discount requires, are not disclosed before that discount is offered."
+ ],
+ "creditor_rules": [
+  "The consumer's circumstances are not asked about before the 15% and 25% discounts have been offered.",
+  "The call goes to a person when the consumer asks about the bank's own hardship or lower-interest programs, or says a debt-settlement company handles their debts. Neither is a dispute.",
+  "The collector never says the consumer will get a tax form for a forgiven amount, or that the card can be reopened."
+ ]
+}

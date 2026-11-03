@@ -1,29 +1,27 @@
-"""Right-party verification and the debt-details gate.
+"""Right-party verification, and the debt. Facts only.
 
-Verification is decided here, not by the model: the person confirms they are
-the consumer by name (the name they said, or said yes to; a first name is
-enough) and gives two of date of birth, ZIP and SSN last four, which are
-compared against the consumer record server-side. The facts may come one at a
-time: each call to ``verify_right_party`` adds what matched, and the call
-state keeps the count. The model never holds the secrets, so it cannot "read a
-fact out for them to confirm". Results describe the state (what is confirmed,
-what is still needed, what is allowed now), never words to say, with one
-exception: on success the result carries the disclosures the call owes next,
-with their wording (``disclosures_due``), because RULES.md grades those
-sentences themselves.
+Verification is checked here, not by the model: the person's name (the name
+they said, or said yes to; a first name is enough) and two of date of birth,
+ZIP and SSN last four are compared against the consumer record server-side, so
+the model never holds the secrets and cannot "read a fact out for them to
+confirm". Facts may come one at a time: each call to ``verify_right_party``
+adds what matched. The result is what the record shows (whether this answer
+matched, what is confirmed so far, how many wrong answers there have been),
+never which fact failed, and never a verdict on what the agent may do next:
+nothing locks after wrong answers and nothing is disclosed for the agent. The
+disclosures and their wording are the prompt's (manual section 8).
 
-``get_debt_details`` is the last step of the opening. It returns the creditor
-and the balance only once the right party is verified and
-the model attests that the disclosures the call owes have been given. The
-attestations are tool arguments, so they appear in the trace in order. Money
-is returned in dollars ("$1,430.00"), never cents.
+``get_debt_details`` reads the debt from the ledger: the creditor, the balance,
+its itemization from its basis, and whether the debt is past its time to sue (a
+fact read from the account's date). Money is returned in dollars
+("$1,430.00"), never cents.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import date, timedelta
+from datetime import date
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -31,9 +29,9 @@ from pydantic import BaseModel, Field
 from vamos_voice.tools import ToolError
 
 from .. import policy
-from ..call import MAX_VERIFICATION_ATTEMPTS, RemiCall
-from ..gates import Gate
+from ..call import RemiCall
 from .catalog import REGISTRY
+from .connect import iso
 
 #: The verification facts, as the person may give them.
 FACTS = ("date_of_birth", "zip", "ssn_last4")
@@ -51,8 +49,8 @@ class VerifyArgs(BaseModel):
     ssn_last4: str | None = Field(None, description="Last four SSN digits the person said, digits only.")
     role: Literal["consumer", "estate_rep"] = Field(
         "consumer",
-        description="'consumer' for the account holder. 'estate_rep' only when the consumer has died and the "
-        "person says they are the executor or administrator of the estate (only their full name is needed).",
+        description="'consumer' for the account holder. 'estate_rep' when the person says they are the executor or "
+        "administrator of a deceased consumer's estate (their full name is checked).",
     )
 
 
@@ -95,70 +93,50 @@ def _given(args: VerifyArgs) -> dict[str, Any]:
     return {fact: value for fact, value in values.items() if value}
 
 
-@REGISTRY.tool(VerifyArgs, requires=Gate.PROCEEDING)
+@REGISTRY.tool(VerifyArgs)
 async def verify_right_party(session: RemiCall, args: VerifyArgs) -> dict[str, Any]:
-    """Check whether the person on the line is the consumer. Call it after each answer: the name they said or
-    confirmed (a first name is enough) and whichever of date of birth, ZIP code and SSN last four they have just
-    said, exactly as they said it. Facts count as they come; two confirmed facts plus the name verify. The person
-    chooses which facts; never insist on SSN digits and never say a value yourself. For an estate executor or
-    administrator use role 'estate_rep' with their full name. The result never says which fact did not match.
-    Once verified, it lists the disclosures due next, with their wording."""
+    """Check what the person on the line said against the consumer record: the name they said or confirmed (a
+    first name is enough) and whichever of date of birth, ZIP code and SSN last four they have just said, exactly
+    as they said it. Facts count as they come; the name plus two matching facts verify. For an estate's executor
+    or administrator use role 'estate_rep' with their full name. The result says whether this answer matched and
+    what is confirmed so far, never which fact did not match."""
+    await session.ensure_account()
     consumer = session.consumer
     assert consumer is not None
     if session.verified_as is not None:
-        return {"verified": True, "answered_by": session.verified_as, "note": "Already verified."}
-    if session.number_stop is not None:
-        raise ToolError(
-            "This person asked you to stop calling this number, so verification is closed on this call."
-        )
-    if session.verification_failures >= MAX_VERIFICATION_ATTEMPTS:
-        raise ToolError(
-            "Verification is locked after three wrong answers: nothing may be disclosed on this call."
-        )
-
+        return {"verified": True, "role": session.verified_as}
     if args.role == "estate_rep":
         if consumer.estate_rep_name and args.name and _full_names_match(args.name, consumer.estate_rep_name):
             return await _verified(session, "estate_rep")
-        return _failed(session, "The name is not the estate's executor or administrator on record.")
-
+        return _answer(session, matched=False)
     given = _given(args)
     if not given and not args.name:
-        raise ToolError(
-            "Nothing to check: pass the name they said or confirmed and the fact they just gave. "
-            "This was not counted as an attempt."
-        )
+        raise ToolError("Nothing to check: no name, date of birth, ZIP code or SSN last four was passed.")
     if args.name:
         if not _consumer_name_matches(args.name, consumer.full_name):
-            return _failed(session, "The name is not the consumer's.")
+            return _answer(session, matched=False)
         session.name_confirmed = True
     record = {"date_of_birth": consumer.date_of_birth, "zip": consumer.zip, "ssn_last4": consumer.ssn_last4}
     wrong = [fact for fact, value in given.items() if value != record[fact]]
     session.facts_confirmed |= {fact for fact in given if fact not in wrong}
     if wrong:
-        return _failed(session, "An answer did not match the record.")
+        return _answer(session, matched=False)
     if session.name_confirmed and len(session.facts_confirmed) >= FACTS_NEEDED:
         return await _verified(session, "consumer")
-    return _progress(session)
+    return _answer(session, matched=True)
 
 
-def _progress(session: RemiCall) -> dict[str, Any]:
-    """Not verified yet, nothing wrong: what is confirmed and what is still needed."""
-    still = []
-    if not session.name_confirmed:
-        still.append("the name: the one they already said, or their yes to the consumer's first name")
-    missing = FACTS_NEEDED - len(session.facts_confirmed)
-    if missing > 0:
-        still.append(
-            f"{missing} more of date of birth, ZIP code, SSN last four (their choice, one at a time)"
-        )
+def _answer(session: RemiCall, *, matched: bool) -> dict[str, Any]:
+    """Not verified (yet): whether this answer matched the record, and what is confirmed so far."""
+    if not matched:
+        session.wrong_answers += 1
     return {
         "verified": False,
+        "answer_matched": matched,
         "name_confirmed": session.name_confirmed,
         "facts_confirmed": len(session.facts_confirmed),
         "facts_needed": FACTS_NEEDED,
-        "still_needed": still,
-        "attempts_left": MAX_VERIFICATION_ATTEMPTS - session.verification_failures,
-        "allowed_now": "Nothing about the debt, the creditor, money or an account until verified.",
+        "wrong_answers": session.wrong_answers,
     }
 
 
@@ -170,176 +148,47 @@ async def _verified(session: RemiCall, role: str) -> dict[str, Any]:
         async with session.db.transaction() as tx:
             await tx.update("account_flags", session.deceased_flag_id, {"details": details})
         session.deceased_details = details
-    return {
-        "verified": True,
-        "answered_by": role,
-        "disclosures_due": disclosures_due(session, role),
-        "allowed_now": "The disclosures above come next, before anything about the account: in that order, in "
-        "short conversational turns the person can react to (a natural lead-in is fine; a question they ask is "
-        "answered first). The verbatim ones keep their exact wording. The debt only after get_debt_details.",
-    }
-
-
-def disclosures_due(session: RemiCall, role: str) -> list[dict[str, Any]]:
-    """What RULES.md owes the verified party before the debt, in order, with its wording: the recording
-    notice and the mini-Miranda word for word; the time-barred disclosure and (first conversation) the
-    alternative-format statement in substance. No language-preference question: the bench is English-only
-    (RULES.md)."""
-    a, agency = session.assessment, session.agency
-    assert a is not None and agency is not None
-    due = [
-        {
-            "disclosure": "recording",
-            "verbatim": True,
-            "wording": "This call is being recorded, and the recording may be used in connection with "
-            "collecting a debt.",
-        },
-        {
-            "disclosure": "mini_miranda",
-            "verbatim": True,
-            "wording": f"This is {agency.business_name}, a debt collector. This is an attempt to collect a debt, "
-            "and any information obtained will be used for that purpose.",
-        },
-    ]
-    if a.time_barred:
-        due.append(
-            {
-                "disclosure": "time_barred",
-                "verbatim": False,
-                "wording": "The legal time limit for suing on this debt may have expired. This is not legal "
-                "advice. It is unlawful to sue on a time-barred debt, and they can tell a court the limit has "
-                "expired. Paying is their choice.",
-            }
-        )
-    if role == "consumer" and a.first_conversation:
-        due.append(
-            {
-                "disclosure": "alternative_format",
-                "verbatim": False,
-                "wording": "Anything we send can come in another format, such as large print, at "
-                f"{agency.callback_number}.",
-            }
-        )
-    return due
-
-
-def _failed(session: RemiCall, what: str) -> dict[str, Any]:
-    session.verification_failures += 1
-    left = MAX_VERIFICATION_ATTEMPTS - session.verification_failures
-    if left <= 0:
-        return {
-            "verified": False,
-            "attempts_left": 0,
-            "allowed_now": "Verification failed three times: nothing may be disclosed. The call ends: "
-            "log_contact_attempt with answered_by 'none', goodbye, end_call.",
-        }
-    return {
-        "verified": False,
-        "result": what,
-        "facts_confirmed": len(session.facts_confirmed),
-        "attempts_left": left,
-        "allowed_now": "Nothing about the debt. They may try again; which detail was wrong stays unsaid.",
-    }
+    return {"verified": True, "role": role}
 
 
 class NoArgs(BaseModel):
     pass
 
 
-@REGISTRY.tool(NoArgs, requires=Gate.PROCEEDING)
+@REGISTRY.tool(NoArgs)
 async def record_verification_refused(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """The person will not verify on this call (they decline to give the details, as opposed to giving details
-    that do not match). Call it once they have declined; you will not ask a third time. Records the call as a
-    refusal to verify, not a failed verification."""
-    if session.verified_as is not None:
-        raise ToolError("The person is already verified.")
-    agency = session.agency
-    assert agency is not None
+    """Record that the person declined to verify on this call (they will not give the details, as opposed to
+    giving details that do not match). The call's record shows it as a refusal to verify."""
     session.verification_refused = True
-    return {
-        "recorded": "refused_verification",
-        "callback_number": agency.callback_number,
-        "allowed_now": "No more asks, arguments or consequences, and nothing about why you called. What they "
-        f"can do instead: call {agency.callback_number}, where a person answers; anything in writing goes to the "
-        "address on file (never the address itself). The call then ends: log_contact_attempt with "
-        "answered_by 'none', goodbye, end_call.",
-    }
+    return {"recorded": "refused_verification"}
 
 
-class DebtDetailsArgs(BaseModel):
-    recording_disclosure_given: bool = Field(
-        description="You said the call is recorded and may be used in connection with collecting a debt."
-    )
-    mini_miranda_given: bool = Field(
-        description="You said Tallmere Account Services is a debt collector, this is an attempt to collect a debt, and information will be used for that purpose."
-    )
-    time_barred_disclosure_given: bool = Field(
-        False, description="You gave the time-barred disclosure (only if the debt is time-barred)."
-    )
-    alternative_format_statement_given: bool = Field(
-        False,
-        description="You said communications are available in alternative formats such as large print and gave the callback number (first conversation only).",
-    )
-
-
-@REGISTRY.tool(DebtDetailsArgs, requires=Gate.VERIFIED)
-async def get_debt_details(session: RemiCall, args: DebtDetailsArgs) -> dict[str, Any]:
-    """After verification and the required disclosures, read the debt: creditor, original account last four,
-    balance and itemization. Attest truthfully to what you have already said; this is refused until every
-    disclosure the call owes has been given. What may be offered is get_payment_options."""
-    account, creditor, a = session.account, session.creditor, session.assessment
-    assert account is not None and creditor is not None and a is not None
-    consumer = session.verified_as == "consumer"
-    missing = []
-    if not args.recording_disclosure_given:
-        missing.append("the recording disclosure")
-    if not args.mini_miranda_given:
-        missing.append("the mini-Miranda")
-    if a.time_barred and not args.time_barred_disclosure_given:
-        missing.append("the time-barred disclosure")
-    if consumer and a.first_conversation and not args.alternative_format_statement_given:
-        missing.append("the alternative-format statement")
-    if missing:
-        raise ToolError(f"The debt comes only after these have been given: {'; '.join(missing)}.")
-    session.debt_unlocked = True
-    session.disclosures_attested = tuple(
-        name
-        for name, given in (
-            ("the recording disclosure", args.recording_disclosure_given),
-            ("the mini-Miranda", args.mini_miranda_given),
-            ("the time-barred disclosure", args.time_barred_disclosure_given),
-            ("the alternative-format statement", args.alternative_format_statement_given),
-        )
-        if given
-    )
+@REGISTRY.tool(NoArgs)
+async def get_debt_details(session: RemiCall, _: NoArgs) -> dict[str, Any]:
+    """Reads the debt: the creditor, the original account's last four digits, the current balance, its
+    itemization since its basis (a charge-off, a hospital's placement or a car's sale: the balance then, interest
+    and fees since, payments since), the validation notice's date, and the end of the time to sue. The dialer
+    already read it when the call connected (see "Account on screen"); call it again to re-read."""
+    account = await session.ensure_account()
+    creditor = session.creditor
+    assert creditor is not None
     debt = await session.read_debt()
     item = debt.itemization
     usd = policy.dollars
-    result: dict[str, Any] = {
+    return {
         "creditor": creditor.name,
         "original_account_last4": account.original_account_last4,
         "current_balance": usd(debt.balance_cents),
         "itemization": {
-            "charge_off_balance": usd(item.charge_off_balance_cents),
-            "interest_since_charge_off": usd(item.interest_since_charge_off_cents),
-            "fees_since_charge_off": usd(item.fees_since_charge_off_cents),
-            "paid_since_charge_off": usd(debt.paid_cents),
-            "charge_off_on": item.charge_off_on.isoformat(),
+            "itemized_from": item.itemized_from,
+            "itemized_on": iso(item.itemized_on),
+            "itemized_balance": usd(item.itemized_balance_cents),
+            "interest_since": usd(item.interest_since_cents),
+            "fees_since": usd(item.fees_since_cents),
+            "paid_since": usd(debt.paid_cents),
         },
-        "validation_notice_mailed_on": account.validation_notice_mailed_on.isoformat(),
-        "medical_debt": creditor.kind == "medical",
-        "time_barred": a.time_barred,
+        "last_payment_on": iso(debt.last_payment_on),
+        "validation_notice_mailed_on": iso(account.validation_notice_mailed_on),
+        "time_to_sue_ends": iso(account.sol_expires_on),
+        "time_barred": policy.time_barred(account, session.clock.today()),
     }
-    if consumer:
-        today = session.clock.today()
-        result["payments"] = {
-            "options": "get_payment_options: the creditor's approved options, the only ones that may be offered",
-            "first_plan_payment_by": (today + timedelta(days=policy.PLAN_FIRST_DUE_MAX_DAYS)).isoformat(),
-            "promise_by": (today + timedelta(days=policy.PTP_MAX_DAYS)).isoformat(),
-            "today": today.isoformat(),
-        }
-    else:
-        result["note"] = (
-            "This is the estate's representative: the debt may be stated, but no payment may be asked for."
-        )
-    return result

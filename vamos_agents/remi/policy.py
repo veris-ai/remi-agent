@@ -1,40 +1,29 @@
-"""RULES.md's numeric and calendar rules, as pure functions Remi's tools enforce.
+"""The calendar and arithmetic Remi records with, as pure functions. Nothing here decides for the agent.
 
-The world enforces little of the collections policy (WORLD.md, "What the world
-does not enforce"): Postgres accepts a callback at 11 p.m. or a promise a month
-out. Remi refuses those itself, here, so a model that misjudges a date gets a
-tool error it can act on instead of writing a violation into the world. What a
-consumer may pay (amounts, plans, settlements) is not here: it is the
-creditor's menu, answered by the World's decision engine (``menu``).
+The bench measures the agent (World v2 WORLD.md, "Nothing refuses the agent"): no
+rule here refuses, blocks or steers what the agent does, and no result carries a
+verdict. What is here is how Remi writes down what the agent did: a confirmation
+letter's due date in business days, a plan's payments by World v2's rounding, an
+amount in dollars, whether a debt is past its time to sue (a fact read from a
+date), and the one disposition a call's record carries.
 
-Every function takes the World's date or time explicitly (from ``CallClock``);
-nothing here reads a clock. This module is Remi's own reading of RULES.md and
-must not import the benchmark's grader.
+Every function takes the World's date explicitly (from ``CallClock``); nothing
+here reads a clock. This module must not import the benchmark's grader.
 """
 
 from __future__ import annotations
 
 from calendar import monthrange
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from datetime import date, timedelta
+from decimal import Decimal
 from functools import cache
+from typing import Any
 
-from .context import EASTERN
-from .world import CLOSED_STATUSES, Account, ContactAttempt, Phone
+from .world import Account
 
-# --- house rules and the law, in the order RULES.md states them ---------------
-PLAN_FIRST_DUE_MAX_DAYS = 30
-PTP_MAX_DAYS = 14
-CALL_WINDOW_START = time(8, 0)  # at or after
-CALL_WINDOW_END = time(21, 0)  # strictly before
-CAP_ATTEMPTS = 3
-CAP_WINDOW = timedelta(days=7)
-TIME_BARRED_NOTICE_MIN_DAYS = 14
-TIME_BARRED_REQUEUE_DAYS = 30
 CONFIRMATION_LETTER_BUSINESS_DAYS = 5
 
-# One call, one disposition: the first of these the call produced (WORLD.md).
+# One call, one disposition: the first of these the call produced.
 DISPOSITION_PRECEDENCE = (
     "bankruptcy",
     "attorney",
@@ -42,8 +31,6 @@ DISPOSITION_PRECEDENCE = (
     "dispute",
     "settled",
     "paid",
-    "settlement_plan",
-    "hardship_plan",
     "plan",
     "ptp",
     "transferred",
@@ -55,7 +42,7 @@ DISPOSITION_PRECEDENCE = (
 )
 DISPOSITIONS = frozenset(
     {
-        "should_not_call",
+        "not_verified",
         "failed_verification",
         "refused_verification",
         "unverified_stop",
@@ -68,91 +55,15 @@ DISPOSITIONS = frozenset(
 )
 
 
-# --- time of day and contact frequency ----------------------------------------------
-
-
-def in_calling_window(at: datetime) -> bool:
-    """NYC § 5-77(b)(1)(i): from 8:00 a.m. up to, not including, 9:00 p.m. Eastern."""
-    local = at.astimezone(EASTERN).time()
-    return CALL_WINDOW_START <= local < CALL_WINDOW_END
-
-
-def counted_attempts(history: list[ContactAttempt], now: datetime) -> int:
-    """Attempts in the trailing 7 days that count toward the NYC cap: outbound
-    calls, voicemails, texts and emails that reached someone. Mail,
-    consumer-initiated contact and calls that never connected do not count."""
-    since = now - CAP_WINDOW
-    return sum(
-        1
-        for a in history
-        if since < a.at <= now
-        and a.direction == "outbound"
-        and a.medium != "letter"
-        and a.answered_by != "no_answer"
-    )
-
-
-def responded_in_window(history: list[ContactAttempt], now: datetime) -> bool:
-    since = now - CAP_WINDOW
-    return any(since < a.at <= now and a.consumer_responded for a in history)
-
-
-def first_conversation(history: list[ContactAttempt]) -> bool:
-    """No earlier attempt reached the consumer: the alternative-format statement is due."""
-    return not any(a.answered_by == "consumer" for a in history)
-
-
-# --- time-barred debt ------------------------------------------------------------------
+# --- facts read from dates ---------------------------------------------------------------
 
 
 def time_barred(account: Account, today: date) -> bool:
-    return account.sol_expires_on < today
+    """Past its time to sue: the account has one on file and it ended before today."""
+    return account.sol_expires_on is not None and account.sol_expires_on < today
 
 
-def time_barred_notice_ok(account: Account, today: date) -> bool:
-    """The time-barred notice was mailed at least 14 days before today."""
-    mailed = account.time_barred_notice_mailed_on
-    return mailed is not None and (today - mailed).days >= TIME_BARRED_NOTICE_MIN_DAYS
-
-
-def time_barred_notice_requeue(account: Account, today: date) -> bool:
-    """After a call on a time-barred account, queue the notice again unless one
-    went out in the last 30 days (NYC § 5-77(i)(4))."""
-    mailed = account.time_barred_notice_mailed_on
-    return time_barred(account, today) and (
-        mailed is None or (today - mailed).days > TIME_BARRED_REQUEUE_DAYS
-    )
-
-
-# --- at connect: should this call have been placed? ---------------------------------
-
-
-def should_not_call_reasons(
-    account: Account, phone: Phone, history: list[ContactAttempt], now: datetime
-) -> tuple[str, ...]:
-    """Every reason the dialer should not have placed this call (RULES.md, At connect, step 1)."""
-    reasons: list[str] = []
-    if account.status in CLOSED_STATUSES:
-        reasons.append(f"account_status_{account.status}")
-    if phone.consent_revoked_at is not None or not phone.artificial_voice_consent:
-        reasons.append("consent_revoked")
-    if phone.status != "valid":
-        reasons.append(f"phone_{phone.status}")
-    if phone.source == "employer":
-        reasons.append("employer_phone")
-    if counted_attempts(history, now) >= CAP_ATTEMPTS:
-        reasons.append("cap_reached")
-    if responded_in_window(history, now):
-        reasons.append("responded_this_week")
-    today = now.astimezone(EASTERN).date()
-    if time_barred(account, today) and not time_barred_notice_ok(account, today):
-        reasons.append("time_barred_notice_not_mailed_14_days")
-    if not in_calling_window(now):
-        reasons.append("outside_calling_window")
-    return tuple(reasons)
-
-
-# --- business days -------------------------------------------------------------------
+# --- business days -----------------------------------------------------------------------
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
@@ -201,11 +112,11 @@ def add_business_days(start: date, days: int) -> date:
 
 
 def confirmation_letter_due_by(created_on: date) -> date:
-    """23 NYCRR 1.5: an arrangement's confirmation goes out within 5 business days."""
+    """23 NYCRR 1.5: an agreement's written confirmation goes out within 5 business days."""
     return add_business_days(created_on, CONFIRMATION_LETTER_BUSINESS_DAYS)
 
 
-# --- money ---------------------------------------------------------------------------
+# --- money -----------------------------------------------------------------------------
 
 
 def dollars(cents: int) -> str:
@@ -215,6 +126,11 @@ def dollars(cents: int) -> str:
     return f"{sign}${whole:,}.{part:02d}"
 
 
+def cents(amount: Any) -> int:
+    """A dollar string from the World's policy ("945.00") in cents."""
+    return int((Decimal(str(amount)) * 100).to_integral_value())
+
+
 def add_months(start: date, months: int) -> date:
     month = start.month - 1 + months
     year = start.year + month // 12
@@ -222,45 +138,19 @@ def add_months(start: date, months: int) -> date:
     return date(year, month, min(start.day, monthrange(year, month)[1]))
 
 
-def instalment_cents(total_cents: int, count: int) -> list[int]:
-    """Equal instalments the way the ledger spreads a balance (RULES.md): each is the total divided by the
-    count, rounded half up to the cent, and the last absorbs the difference ($265.00 in 6: five of $44.17
-    and one of $44.15)."""
-    each = int((Decimal(total_cents) / count).quantize(Decimal(1), rounding=ROUND_HALF_UP))
-    return [each] * (count - 1) + [total_cents - each * (count - 1)]
+def monthly_due_dates(first_due_on: date, count: int) -> list[date]:
+    """One payment in each calendar month from the first's, on its day (or the month's last day)."""
+    return [add_months(first_due_on, i) for i in range(count)]
 
 
-# --- refusals: why an offer is outside the house rules, or None --------------------------
-
-
-@dataclass(frozen=True)
-class Refusal:
-    """A rule the requested terms break, with what Remi should do instead."""
-
-    code: str
-    detail: str
-
-
-def first_due_refusal(first_due_on: date, today: date) -> Refusal | None:
-    if not today < first_due_on <= today + timedelta(days=PLAN_FIRST_DUE_MAX_DAYS):
-        return Refusal(
-            "first_payment_outside_30_days",
-            f"the first payment must fall after today and on or before {today + timedelta(days=PLAN_FIRST_DUE_MAX_DAYS)}",
-        )
-    return None
-
-
-def ptp_refusal(due_on: date, today: date) -> Refusal | None:
-    """A promise is an exact amount on an exact date at most 14 days out."""
-    if not today <= due_on <= today + timedelta(days=PTP_MAX_DAYS):
-        return Refusal(
-            "promise_beyond_14_days",
-            f"a promise must fall between {today} and {today + timedelta(days=PTP_MAX_DAYS)}",
-        )
-    return None
+def plan_instalment_cents(total_cents: int, months: int) -> list[int]:
+    """World v2's plan payments: equal, each rounded down to the cent, the last taking the remainder, so the
+    plan totals exactly what it covers ($576.00 in 7: six of $82.28 and one of $82.32)."""
+    each = total_cents // months
+    return [each] * (months - 1) + [total_cents - each * (months - 1)]
 
 
 def disposition(outcomes: set[str], *, transferred: bool) -> str:
-    """The first disposition, in WORLD.md's precedence, that the call produced."""
+    """The first disposition, in precedence, that the call produced."""
     present = outcomes | ({"transferred"} if transferred else set())
     return next((d for d in DISPOSITION_PRECEDENCE if d in present), "no_commitment")

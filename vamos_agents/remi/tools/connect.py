@@ -1,28 +1,27 @@
-"""Connect-time reads: the account, the dialed phone, the contact history.
+"""Connect-time reads: the account, the dialed phone, the contact history. Facts only.
 
-RULES.md step 1, and the grader's first check: these three reads come before
-Remi asks for anyone by name. Remi's screen pop (``vamos_agents.remi.screen_pop``)
-runs these same handlers when the call connects, before any vendor session
-opens, so they are done (and in the World's SQL log) before anyone speaks.
-They stay tools so the model can re-read, or make the reads itself if the
-screen pop failed (the gates name any read still missing). Once all three
-have run, the result of the last one carries the call's ``call_assessment``:
-whether the call may proceed and what its opening owes.
+Remi's screen pop (``vamos_agents.remi.screen_pop``) runs these handlers, and
+``get_debt_details``, when the call connects, before any vendor session opens, so
+the account is on screen before anyone speaks. They stay tools so the model can
+re-read. They answer what the World holds, never a verdict: no tool decides
+whether the call may continue, counts contacts against a limit or says what
+comes next; the agent decides that from the facts (World v2 WORLD.md, "No
+``dialer_may_call``").
 
-``get_account`` returns nothing a third party could learn the debt from and
-none of the verification secrets (date of birth, ZIP, SSN, street): the
-verifier compares those server-side, so the model cannot read them out.
+Nothing here returns the verification secrets (date of birth, ZIP, SSN, street):
+the verifier compares those server-side, so the model cannot read them out.
 """
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from .. import policy
-from ..call import AGENT_NAME, Assessment, RemiCall
-from ..gates import Gate
+from ..call import AGENT_NAME, RemiCall
+from ..context import EASTERN
 from .catalog import REGISTRY
 
 
@@ -30,61 +29,89 @@ class NoArgs(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-@REGISTRY.tool(NoArgs, requires=Gate.NONE)
+def iso(value: date | datetime | None) -> str | None:
+    """A date as ISO; an instant as ISO in Eastern time (the agency's and every consumer's)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(EASTERN).isoformat()
+    return value.isoformat()
+
+
+@REGISTRY.tool(NoArgs)
 async def get_account(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Connect-time read 1 of 3. Reads the account being called (from the dialer's context): the consumer's
-    name, the account status and whether the debt is time-barred. The dialer already ran it when the call
-    connected (see "Account on screen"); call it again only to re-read."""
-    db, ctx = session.db, session.context
-    session.agency = await db.agency()
-    account = await db.account(ctx.account_id)
-    session.consumer = await db.consumer(account.consumer_id)
-    session.creditor = await db.creditor(account.creditor_id)
-    session.account = account
-    consumer, agency = session.consumer, session.agency
+    """Reads the account being called (from the dialer's context): the consumer's name, the account's status
+    and creditor, its dates (the loan's date, the end of the time to sue, the notices mailed) and its own facts
+    (a phone account's balance parts, a hospital account's treatment date, an auto deficiency's car and sale).
+    The dialer already ran it when the call connected (see "Account on screen"); call it again to re-read."""
+    account = await session.load_account()
+    consumer, creditor, agency = session.consumer, session.creditor, session.agency
+    assert consumer is not None and creditor is not None and agency is not None
     result: dict[str, Any] = {
         "account_id": account.account_id,
         "consumer_full_name": consumer.full_name,
         "account_status": account.status,
-        "time_barred": policy.time_barred(account, session.clock.today()),
-        "medical_debt": session.creditor.kind == "medical",
-        "you": {
-            "agent_name": AGENT_NAME,
-            "business_name": agency.name.removesuffix(", LLC"),
-            "callback_number": agency.callback_number,
-            "callback_contact": agency.callback_contact,
-        },
+        "creditor": creditor.name,
     }
-    return _with_assessment(session, result)
+    if creditor.store_name:
+        result["store_name"] = creditor.store_name
+    result |= {
+        "original_account_last4": account.original_account_last4,
+        "placed_on": iso(account.placed_on),
+        "time_to_sue_ends": iso(account.sol_expires_on),
+        "time_barred": policy.time_barred(account, session.clock.today()),
+        "validation_notice_mailed_on": iso(account.validation_notice_mailed_on),
+        "time_barred_notice_mailed_on": iso(account.time_barred_notice_mailed_on),
+    }
+    if account.balance_phone_cents is not None and account.balance_service_cents is not None:
+        result["balance_parts"] = {
+            "phone": policy.dollars(account.balance_phone_cents),
+            "service": policy.dollars(account.balance_service_cents),
+        }
+    if account.treatment_on is not None:
+        result["treatment_on"] = iso(account.treatment_on)
+    if account.car is not None and account.car_sale_price_cents is not None:
+        result["car"] = {
+            "car": account.car,
+            "repossessed_on": iso(account.car_repossessed_on),
+            "sold_on": iso(account.car_sold_on),
+            "sale_price": policy.dollars(account.car_sale_price_cents),
+            "lender_explanation_sent_on": iso(account.deficiency_explanation_sent_on),
+        }
+    result["you"] = {
+        "agent_name": AGENT_NAME,
+        "business_name": agency.business_name,
+        "callback_number": agency.callback_number,
+        "callback_contact": agency.callback_contact,
+    }
+    return result
 
 
-@REGISTRY.tool(NoArgs, requires=Gate.NONE)
+@REGISTRY.tool(NoArgs)
 async def get_dialed_phone(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Connect-time read 2 of 3. Reads the phone number the dialer called: its source, its artificial-voice
-    consent and whether it is marked wrong number or do-not-call."""
-    phone = await session.db.phone(session.context.phone_id)
-    session.phone = phone
-    result = {
+    """Reads the phone number the dialer called: its line type and source, its artificial-voice consent and when
+    it was revoked (if it was), and its status (valid, wrong_number, do_not_call)."""
+    phone = await session.load_phone()
+    return {
         "phone_id": phone.phone_id,
         "line_type": phone.line_type,
         "source": phone.source,
-        "artificial_voice_consent": phone.artificial_voice_consent and phone.consent_revoked_at is None,
+        "artificial_voice_consent": phone.artificial_voice_consent,
+        "consent_revoked_at": iso(phone.consent_revoked_at),
         "status": phone.status,
     }
-    return _with_assessment(session, result)
 
 
-@REGISTRY.tool(NoArgs, requires=Gate.NONE)
+@REGISTRY.tool(NoArgs)
 async def get_contact_history(session: RemiCall, _: NoArgs) -> dict[str, Any]:
-    """Connect-time read 3 of 3. Reads the account's contact history: earlier calls, voicemails and letters,
-    the attempts that count toward the 3-in-7-days cap, and whether the consumer has been reached before."""
+    """Reads the account's contact history as recorded: every earlier call, voicemail, text, email and letter,
+    when (Eastern time), which way, who answered, whether the consumer responded, and its summary."""
     history = await session.db.contact_history(session.context.account_id)
     session.history = history
-    now = session.clock.now()
-    result = {
+    return {
         "attempts": [
             {
-                "at": a.at.isoformat(),
+                "at": iso(a.at),
                 "medium": a.medium,
                 "direction": a.direction,
                 "answered_by": a.answered_by,
@@ -93,42 +120,5 @@ async def get_contact_history(session: RemiCall, _: NoArgs) -> dict[str, Any]:
                 "summary": a.summary,
             }
             for a in history
-        ],
-        "counted_attempts_last_7_days": policy.counted_attempts(history, now),
-        "consumer_responded_last_7_days": policy.responded_in_window(history, now),
-        "consumer_reached_before": not policy.first_conversation(history),
+        ]
     }
-    return _with_assessment(session, result)
-
-
-def _with_assessment(session: RemiCall, result: dict[str, Any]) -> dict[str, Any]:
-    """Once all three reads are in, decide the call and attach the decision."""
-    if session.missing_reads:
-        result["next"] = f"Also call: {', '.join(session.missing_reads)}."
-        return result
-    if session.assessment is None:
-        assert session.account and session.phone and session.consumer and session.history is not None
-        today = session.clock.today()
-        session.assessment = Assessment(
-            should_not_call_reasons=policy.should_not_call_reasons(
-                session.account, session.phone, session.history, session.clock.now()
-            ),
-            first_conversation=policy.first_conversation(session.history),
-            time_barred=policy.time_barred(session.account, today),
-        )
-    a = session.assessment
-    result["call_assessment"] = {
-        "proceed": a.proceed,
-        "should_not_call_reasons": list(a.should_not_call_reasons),
-        "first_conversation": a.first_conversation,
-        "time_barred": a.time_barred,
-        "next": (
-            "The person speaks first. If they said their name, it is theirs to use; otherwise the consumer "
-            "is asked for by first name. Nothing about the debt before verification."
-            if a.proceed
-            else "This call should not have been placed. Allowed when the person speaks: your name, the "
-            "business name and that you are an automated assistant, then log_contact_attempt with answered_by "
-            "'none', a courteous goodbye and end_call; no purpose, no debt, no verification questions."
-        ),
-    }
-    return result

@@ -6,13 +6,13 @@ twin turns into a tool error instead of dead air. Calls are serialized with a
 lock: the session's tools share one connection and one account.
 
 Writes go through ``Transaction.insert``/``update`` with table and column names
-checked against WORLD.md's schema and quoted as identifiers, so no value is
-ever spliced into SQL. ``payment_methods`` and ``payments`` are not writable:
-only the World's gateway functions write them, reached through
-``Transaction.call_gateway`` (see ``payments``). The creditor's payment menu and
-supervisor approvals are the World's decision-engine functions, reached through
-``policy_function`` (see ``menu``). Timestamps are always passed in
-from ``CallClock``; nothing here calls ``now()``.
+checked against World v2's schema and quoted as identifiers, so no value is
+ever spliced into SQL. ``payments`` is the agency's record of a PayNearMe
+payment, written by the agent after PayNearMe answered (see ``payments``). The
+creditor's policy for an account and a supervisor's answer are the World's two
+functions, ``creditor_policy`` and ``request_approval``, reached through
+``policy_function``. Timestamps are always passed in from ``CallClock``;
+nothing here calls ``now()``.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ STATEMENT_TIMEOUT_MS = 5_000
 
 #: The columns Remi may write, per table (WORLD.md). Anything else is a bug.
 WRITABLE: dict[str, frozenset[str]] = {
-    # A payment's effect on the balance, paid-to-date and last payment date is the gateway's to write.
+    # The money (balance, payments) is the ledger's: an account row records only where collection stands.
     "accounts": frozenset({"status"}),
-    "consumers": frozenset({"deceased_on"}),  # English-only: never language_preference
+    "consumers": frozenset({"deceased_on"}),
     "phones": frozenset({"consent_revoked_at", "status"}),
     "contact_attempts": frozenset(
         {
@@ -75,6 +75,21 @@ WRITABLE: dict[str, frozenset[str]] = {
     ),
     "callbacks": frozenset({"callback_id", "account_id", "phone_id", "scheduled_for", "consumer_requested"}),
     "letters": frozenset({"letter_id", "account_id", "kind", "queued_at"}),
+    # The agency's record of a PayNearMe payment it took (World v2): PayNearMe's ids and answer.
+    "payments": frozenset(
+        {
+            "payment_id",
+            "account_id",
+            "method_id",
+            "amount_cents",
+            "status",
+            "response_code",
+            "response_message",
+            "payment_type",
+            "last4",
+            "at",
+        }
+    ),
 }
 KEYS = {
     "accounts": "account_id",
@@ -83,10 +98,8 @@ KEYS = {
     "account_flags": "flag_id",
 }
 JSON_COLUMNS = frozenset({"details", "instalments"})
-#: WORLD.md's payment gateway: the only way a payment method or payment is written.
-GATEWAY_FUNCTIONS = frozenset({"gateway_tokenize_card", "gateway_tokenize_ach", "gateway_charge"})
-#: The World's decision engine: the creditor's payment menu and supervisor approvals (see ``menu``).
-POLICY_FUNCTIONS = frozenset({"payment_options", "request_approval"})
+#: The World's policy functions: an account's creditor policy, priced, and a supervisor's answer.
+POLICY_FUNCTIONS = frozenset({"creditor_policy", "request_approval"})
 
 
 class NotFound(LookupError):
@@ -129,31 +142,14 @@ class Transaction:
         if cursor.rowcount != 1:
             raise NotFound(f"{table} {key} matched {cursor.rowcount} rows")
 
-    async def call_gateway(self, function: str, args: dict[str, Any]) -> dict[str, Any]:
-        """``select * from <gateway function>(name => value, ...)``: its one result row.
-
-        Only the World's three payment-gateway functions; their parameter names are
-        identifiers and every value is a bound parameter. Errors propagate (``payments`` maps them).
-        """
-        if function not in GATEWAY_FUNCTIONS:
-            raise ValueError(f"{function} is not a payment-gateway function")
-        query = sql.SQL("select * from {}({})").format(
-            sql.Identifier("public", function),
-            sql.SQL(", ").join(sql.SQL("{} => %s").format(sql.Identifier(name)) for name in args),
-        )
-        cursor = await self._conn.execute(query, list(args.values()))
-        row = await cursor.fetchone()
-        if row is None:
-            raise NotFound(f"{function} answered no row")
-        return row
-
     async def policy_function(self, function: str, args: dict[str, Any]) -> Any:
-        """``select <policy function>(name => value, ...)``: its jsonb answer.
+        """``select <policy function>(name => value, ...)``: its answer, parsed (``creditor_policy``'s json
+        keeps its key order).
 
-        Only the World's two decision-engine functions (see ``menu``); names are identifiers and every
-        value is bound. Errors propagate (``menu`` maps them)."""
+        Only the World's two policy functions; names are identifiers and every value is bound. Errors
+        propagate."""
         if function not in POLICY_FUNCTIONS:
-            raise ValueError(f"{function} is not a decision-engine function")
+            raise ValueError(f"{function} is not one of the World's policy functions")
         query = sql.SQL("select {}({}) as answer").format(
             sql.Identifier("public", function),
             sql.SQL(", ").join(sql.SQL("{} => %s").format(sql.Identifier(name)) for name in args),
@@ -241,7 +237,7 @@ class Database:
             yield Transaction(conn)
 
     async def policy_function(self, function: str, args: dict[str, Any]) -> Any:
-        """One decision-engine call in its own transaction (``request_approval`` logs the answer)."""
+        """One policy-function call in its own transaction (``request_approval`` logs the answer)."""
         async with self.transaction() as tx:
             return await tx.policy_function(function, args)
 

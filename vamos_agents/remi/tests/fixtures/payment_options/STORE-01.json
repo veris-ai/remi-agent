@@ -1,0 +1,64 @@
+{
+ "creditor": {
+  "name": "Pellbrook Bank",
+  "debt": "A Beckford Home Furnishings store card. Pellbrook Bank lent the money and owns the debt.",
+  "named_as": "The creditor is named as Pellbrook Bank together with \"your Beckford card\", and the collector explains that the bank owns the card."
+ },
+ "balance": "1300.00",
+ "full_balance": {
+  "option_id": "pif",
+  "amount": "1300.00"
+ },
+ "payment_plans": {
+  "option_id": "payment_plan",
+  "down_payment": null,
+  "plan_covers": "1300.00",
+  "payments": "Equal monthly payments, each rounded down to the cent; the last payment takes the remainder so the plan totals exactly what it covers.",
+  "minimum_monthly_payment": "25.00",
+  "maximum_months": 18,
+  "automatic_payments": false
+ },
+ "discounts": [
+  {
+   "option_id": "discount_20",
+   "percent_off": 20,
+   "amount": "1040.00",
+   "requires": [
+    "a hardship the consumer has described in their own words"
+   ],
+   "paid_within_days": 10,
+   "due_by": "2026-11-13"
+  },
+  {
+   "option_id": "discount_30",
+   "percent_off": 30,
+   "amount": "910.00",
+   "requires": [
+    "a hardship the consumer has described in their own words"
+   ],
+   "paid_within_days": 10,
+   "due_by": "2026-11-13"
+  },
+  {
+   "option_id": "discount_40",
+   "percent_off": 40,
+   "amount": "780.00",
+   "requires": [
+    "a hardship the consumer has described in their own words",
+    "a supervisor's OK, requested before the discount is mentioned"
+   ],
+   "paid_within_days": 10,
+   "due_by": "2026-11-13"
+  }
+ ],
+ "offer_rules": [
+  "Offers come in this order: the full balance, then payment plans from shortest to longest, then discounts from smallest to largest, then a person.",
+  "No discount is more than 40% off.",
+  "Where a discount needs a supervisor's OK, the OK is requested before the discount is mentioned.",
+  "The collector never hints that a better deal may exist. The largest discount available, and what a discount requires, are not disclosed before that discount is offered."
+ ],
+ "creditor_rules": [
+  "A consumer who says the furniture never arrived, came damaged or was returned (12 CFR 1026.12(c)(1)), that the card was supposed to be 0% interest, or that a payment-protection plan on the card should have paid it has a dispute (manual 10.1); after it is recorded, the call goes to a person.",
+  "The collector never says the store will take the furniture back, or that the interest will be removed."
+ ]
+}

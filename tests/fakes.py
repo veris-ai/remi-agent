@@ -64,18 +64,36 @@ def _remi(db: Any = None) -> AgentSpec:
     from vamos_agents.remi.world import Agency
 
     context = CallContext("TAS-420101", "ph_420101_1", REMI_CALL_TIME)
-    agent = RemiAgent(context, connect_db=_no_db, connect_ledger=_no_db)
+    agent = RemiAgent(context, connect_db=_no_db, connect_ledger=_no_db, connect_payments=_no_db)
     agent.agency = Agency("Tallmere Account Services, LLC", "2091843-DCA", "+12125550100", "Dana Whitlock")
     agent.db = db
-    agent.ledger = _NoLedger()
+    agent.ledger = FakeRemiLedger(db.events if isinstance(db, FakeRemiDb) else None)
+    agent.payments = _NoPayments()
     return agent
 
 
-class _NoLedger:
-    """Parity calls never reach the debt, so nothing here is ever asked of the ledger."""
+class FakeRemiLedger:
+    """The account's money for the screen pop's debt read (no Fineract); recorded as ``ledger:debt``."""
+
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.events = events
+
+    async def debt(self, account_id: str) -> Any:
+        from vamos_agents.remi.ledger import STATUS_ACTIVE, Debt, Itemization
+
+        if self.events is not None:
+            self.events.append("ledger:debt")
+        item = Itemization("charge_off", date(2025, 3, 1), 41_000, 0, 0)
+        return Debt(
+            account_id, 1, STATUS_ACTIVE, item, paid_cents=0, balance_cents=41_000, last_payment_on=None
+        )
+
+
+class _NoPayments:
+    """Parity calls never take a payment, so nothing here is ever asked of PayNearMe."""
 
     def __getattr__(self, name: str) -> Any:
-        raise AssertionError(f"parity tests never read the ledger ({name})")
+        raise AssertionError(f"parity tests never take a payment ({name})")
 
 
 async def _no_db() -> Any:
@@ -100,8 +118,11 @@ class FakeRemiDb:
 
         self.events.append("sql:accounts")
         return Account(
-            account_id, "con_1", "cred_1", "9921", date(2025, 3, 1), date(2030, 11, 1), date(2025, 3, 5), None,
-            "active",
+            account_id=account_id, consumer_id="con_1", creditor_id="cred_1", original_account_last4="9921",
+            placed_on=date(2025, 3, 1), sol_expires_on=date(2030, 11, 1), validation_notice_mailed_on=date(2025, 3, 5),
+            time_barred_notice_mailed_on=None, placed_balance_cents=41_000, pnm_order_identifier="920000000001",
+            balance_phone_cents=None, balance_service_cents=None, treatment_on=None, car=None, car_repossessed_on=None,
+            car_sold_on=None, car_sale_price_cents=None, deficiency_explanation_sent_on=None, status="active",
         )  # fmt: skip
 
     async def consumer(self, consumer_id: str) -> Any:
@@ -110,14 +131,14 @@ class FakeRemiDb:
         self.events.append("sql:consumers")
         return Consumer(
             consumer_id, "Marcus", "Sokolov", date(1961, 7, 14), "4417", "88 Halsey St", "Brooklyn",
-            "11238", None, None, None, None,
+            "11238", None, None, None,
         )  # fmt: skip
 
     async def creditor(self, creditor_id: str) -> Any:
         from vamos_agents.remi.world import Creditor
 
         self.events.append("sql:creditors")
-        return Creditor(creditor_id, "Ashcombe Bank", "bank", None, False)
+        return Creditor(creditor_id, "Ashcombe Bank", "bank_card", None, None, False, "pol_card")
 
     async def phone(self, phone_id: str) -> Any:
         from vamos_agents.remi.world import Phone

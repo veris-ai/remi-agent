@@ -1,188 +1,197 @@
-"""``PaymentGateway`` against the World's real gateway functions (vendored ``collections_world.sql``).
+"""Remi's PayNearMe client on the wire: signed as the twin checks it, with the World's time, answers reported as given.
 
-Remi connects as the app login, which owns nothing, so the gateway's write
-guards bind exactly as they would for a candidate that does not own the World:
-these tests prove every payment method and payment Remi leaves came from the
-gateway functions.
+World v2 takes payments on PayNearMe (WORLD.md, "Payments: PayNearMe"): every request is
+``POST /json-api/<operation>`` with ``version`` 3.0, the site id, a ``timestamp`` within 300 seconds of the
+twin's virtual clock and an HMAC-SHA256 ``signature`` over the sorted parameters. A decline is PayNearMe's
+answer, not an error; a refusal (its error envelope) is PayNearMe's words; an unreachable twin is
+``PaymentsUnavailable``. Card and bank numbers go to PayNearMe and nowhere else.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 
-import psycopg
+import httpx
 import pytest
 
-from vamos_agents.remi.db import Database
-from vamos_agents.remi.menu import PolicyRefused
-from vamos_agents.remi.payments import BankDetails, CardDetails, PaymentError, PaymentGateway, SavedMethod
-
-from .support import (
-    AMEX_CARD,
-    DECLINED_CARD,
-    DECLINING_BANK,
-    EXPIRED_CARD,
-    GOOD_BANK,
-    GOOD_CARD,
-    INSUFFICIENT_FUNDS_CARD,
-    all_text,
-    app_dsn,
-    rows,
-    seed_world,
+from vamos_agents.remi.payments import (
+    Payment,
+    PaymentsUnavailable,
+    PayNearMe,
+    PayNearMeRefused,
+    SavedMethod,
+    sign,
 )
 
-pytestmark = pytest.mark.postgres
+from .fake_paynearme import HMAC_SECRET, SITE_IDENTIFIER, FakePayNearMe, signature
+from .support import MANIFEST
 
-AT = datetime.fromisoformat("2027-02-10T09:04:12-05:00")
-ACCOUNT = "TAS-420101"
-HOLDER = "Aaliyah Alvarez"
-
-
-@pytest.fixture
-async def db(pg_dsn: str) -> AsyncIterator[Database]:
-    seed_world(pg_dsn)
-    database = await Database.connect(app_dsn(pg_dsn))
-    yield database
-    await database.close()
+AT = datetime.fromisoformat("2026-11-03T11:20:00-05:00")
+ORDER = MANIFEST["paynearme"]["orders"][0]["pnm_order_identifier"]  # TAS-261101's, $2,400.00 up to
 
 
-async def tokenize_card(db: Database, number: str, exp=(12, 2030), cvc: str = "123") -> SavedMethod:
-    async with db.transaction() as tx:
-        return await PaymentGateway(tx).tokenize_card(
-            account_id=ACCOUNT, holder_name=HOLDER, card=CardDetails(number, *exp, cvc), at=AT
-        )
+def twin_and_client(
+    base: str = "https://twin.example", secret: str = HMAC_SECRET
+) -> tuple[FakePayNearMe, PayNearMe]:
+    twin = FakePayNearMe.from_manifest(MANIFEST)
+    twin.now = int(AT.timestamp())
+    return twin, PayNearMe(base, SITE_IDENTIFIER, secret, transport=twin.transport())
 
 
-async def tokenize_ach(db: Database, bank: tuple[str, str]) -> SavedMethod:
-    async with db.transaction() as tx:
-        return await PaymentGateway(tx).tokenize_ach(
-            account_id=ACCOUNT, holder_name=HOLDER, bank=BankDetails(*bank), at=AT
-        )
-
-
-async def charge(db: Database, method_id: str, amount_cents: int = 18500):  # the full balance: on the menu
-    async with db.transaction() as tx:
-        return await PaymentGateway(tx).charge(method_id=method_id, amount_cents=amount_cents, at=AT)
-
-
-async def test_approved_card_is_saved_and_charged_and_the_account_is_left_to_the_ledger(db, pg_dsn) -> None:
-    saved = await tokenize_card(db, GOOD_CARD, exp=(12, 30))
-    assert (saved.kind, saved.last4, saved.brand) == ("card", "4242", "visa")
-    assert saved.method_id.startswith("pm_")
-    assert (await tokenize_card(db, GOOD_CARD)).method_id == saved.method_id  # same card, same method
-
-    result = await charge(db, saved.method_id, 18500)
-    assert (result.status, result.decline_code, result.approved) == ("approved", None, True)
-    assert result.payment_id.startswith("pay_") and result.processor_ref.startswith("rp_")
-
-    (method,) = rows(pg_dsn, "payment_methods")
-    assert (method["exp_month"], method["exp_year"], method["holder_name"]) == (12, 2030, HOLDER)
-    assert method["created_at"] == AT
-    (payment,) = rows(pg_dsn, "payments")
-    assert (payment["payment_id"], payment["method_id"], payment["amount_cents"], payment["at"]) == (
-        result.payment_id,
-        saved.method_id,
-        18500,
-        AT,
+async def test_a_request_is_version_3_signed_and_timestamped_with_the_time_given() -> None:
+    twin, client = twin_and_client()
+    later = AT + timedelta(seconds=37)
+    saved = await client.add_card(
+        order=ORDER,
+        number="4111111111111111",
+        exp_month=8,
+        exp_year=2028,
+        cvc="123",
+        holder="Marcus Bell",
+        at=later,
     )
-    # A processor does not know the agency's balance: posting the charge is the ledger's (ledger.py).
-    assert rows(pg_dsn, "accounts")[0]["status"] == "active"
+    assert saved == SavedMethod(saved.method_id, "card", "1111", "Visa")
+    operation, body = twin.requests[0]
+    assert operation == "create_payment_method"
+    assert (body["version"], body["site_identifier"], body["timestamp"]) == (
+        "3.0",
+        SITE_IDENTIFIER,
+        str(int(later.timestamp())),
+    )
+    assert body["signature"] == signature(body, HMAC_SECRET) == sign(body, HMAC_SECRET)
+    assert (body["pnm_order_identifier"], body["payment_method_type"]) == (ORDER, "card")
+    assert (body["payment_method_card_expiry_pii"], body["payment_method_billing_name"]) == (
+        "08/2028",
+        "Marcus Bell",
+    )
+    assert all(isinstance(v, str) for v in body.values()), "every parameter signs as the string it is sent as"
+    await client.close()
 
 
-async def test_an_amount_off_the_creditors_menu_is_refused_before_any_payment(db, pg_dsn) -> None:
-    """gateway_charge checks the creditor's menu first (SQLSTATE 23514, "policy: ..."): nothing is written."""
-    saved = await tokenize_card(db, GOOD_CARD)
-    with pytest.raises(PolicyRefused, match="not an amount on the menu"):
-        await charge(db, saved.method_id, 5000)
-    assert rows(pg_dsn, "payments") == []
+async def test_a_bank_account_is_tokenized_with_its_routing_number() -> None:
+    twin, client = twin_and_client()
+    saved = await client.add_bank_account(
+        order=ORDER, routing="110000000", account="000123456789", holder="Marcus Bell", at=AT
+    )
+    assert saved == SavedMethod(saved.method_id, "ach", "6789", None)
+    _, body = twin.requests[0]
+    assert (body["payment_method_type"], body["payment_method_ach_aba_pii"], body["payment_method_ach_account_pii"]) == (
+        "ach", "110000000", "000123456789",
+    )  # fmt: skip
+    await client.close()
+
+
+async def test_a_payment_is_paynearmes_answer() -> None:
+    twin, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="123", holder="M B", at=AT
+    )
+    paid = await client.pay(order=ORDER, method=card, amount_cents=144_000, at=AT)
+    assert paid == Payment(
+        twin.payments[0]["id"], "approved", 144_000, "0", "Approved", card.method_id, "card", "1111"
+    )
+    _, body = twin.requests[-1]
+    assert (body["payment_amount"], body["payment_currency"], body["site_channel"]) == (
+        "1440.00",
+        "USD",
+        "agent",
+    )
+    await client.close()
+
+
+async def test_a_decline_is_an_answer_not_an_error() -> None:
+    _, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number="4000000000009995", exp_month=11, exp_year=2029, cvc="123", holder="M B", at=AT
+    )
+    paid = await client.pay(order=ORDER, method=card, amount_cents=240_000, at=AT)
+    assert (paid.status, paid.response_code, paid.amount_cents) == ("rejected", "51", 240_000)
+    assert paid.response_message == "There are insufficient funds on this card to complete this payment."
+    await client.close()
+
+
+async def test_a_refusal_is_paynearmes_own_words() -> None:
+    _, client = twin_and_client()
+    with pytest.raises(PayNearMeRefused, match=r"^PayNearMe refused it: Order not found$"):
+        await client.add_card(
+            order="000000000000",
+            number="4111111111111111",
+            exp_month=8,
+            exp_year=2028,
+            cvc="1",
+            holder="M B",
+            at=AT,
+        )
+    _, wrong_secret = twin_and_client(secret="not-the-secret")
+    with pytest.raises(PayNearMeRefused, match="Authentication failed"):
+        await wrong_secret.add_card(
+            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+        )
+    with pytest.raises(
+        PayNearMeRefused, match="Authentication failed"
+    ):  # signed with wall time, say: 301 s off
+        await client.add_card(
+            order=ORDER,
+            number="4111111111111111",
+            exp_month=8,
+            exp_year=2028,
+            cvc="1",
+            holder="M B",
+            at=AT + timedelta(seconds=301),
+        )
+    await client.close()
+    await wrong_secret.close()
+
+
+async def test_an_unreachable_or_failing_twin_is_unavailable() -> None:
+    twin, client = twin_and_client()
+    twin.unreachable = True
+    with pytest.raises(PaymentsUnavailable, match="could not be reached"):
+        await client.add_card(
+            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+        )
+    await client.close()
+    failing = PayNearMe(
+        "https://twin.example",
+        SITE_IDENTIFIER,
+        HMAC_SECRET,
+        transport=httpx.MockTransport(lambda r: httpx.Response(502, text="bad gateway")),
+    )
+    with pytest.raises(PaymentsUnavailable, match="502"):
+        await failing.add_card(
+            order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+        )
+    await failing.close()
 
 
 @pytest.mark.parametrize(
-    ("number", "decline_code"),
-    [
-        (INSUFFICIENT_FUNDS_CARD, "insufficient_funds"),
-        (DECLINED_CARD, "card_declined"),
-        (EXPIRED_CARD, "expired_card"),
-    ],
+    "base", ["https://twin.example", "https://twin.example/", "https://twin.example/json-api"]
 )
-async def test_each_declining_card(db, pg_dsn, number: str, decline_code: str) -> None:
-    saved = await tokenize_card(db, number)
-    result = await charge(db, saved.method_id, 18500)
-    assert (result.status, result.decline_code, result.approved) == ("declined", decline_code, False)
-    (payment,) = rows(pg_dsn, "payments")
-    assert (payment["status"], payment["decline_code"]) == ("declined", decline_code)
-    assert rows(pg_dsn, "accounts")[0]["status"] == "active"
+async def test_the_base_may_end_in_json_api_or_not(base: str) -> None:
+    seen: list[str] = []
+    twin = FakePayNearMe.from_manifest(MANIFEST)
+    twin.now = int(AT.timestamp())
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return twin.handle(request)
+
+    client = PayNearMe(base, SITE_IDENTIFIER, HMAC_SECRET, transport=httpx.MockTransport(handle))
+    await client.add_card(
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="1", holder="M B", at=AT
+    )
+    assert seen == ["https://twin.example/json-api/create_payment_method"]
+    await client.close()
 
 
-async def test_ach_approves_and_declines(db, pg_dsn) -> None:
-    good = await tokenize_ach(db, GOOD_BANK)
-    bad = await tokenize_ach(db, DECLINING_BANK)
-    assert (good.kind, good.last4, good.brand) == ("ach", "6789", None)
-    assert bad.last4 == "2227"
-    assert (await charge(db, bad.method_id, 18500)).decline_code == "insufficient_funds"
-    assert (await charge(db, good.method_id, 18500)).approved
-    assert [
-        (p["status"], p["decline_code"]) for p in rows(pg_dsn, "payments", "true order by at, status")
-    ] == [
-        ("approved", None),
-        ("declined", "insufficient_funds"),
-    ]
-
-
-@pytest.mark.parametrize(
-    ("tokenize", "message"),
-    [
-        (lambda db: tokenize_card(db, "4242424242424241"), "fails the Luhn check"),
-        (lambda db: tokenize_card(db, GOOD_CARD, exp=(1, 2027)), "the card expired at the end of 01/2027"),
-        (lambda db: tokenize_card(db, GOOD_CARD, cvc="12"), "the security code must be 3 digits"),
-        (lambda db: tokenize_card(db, AMEX_CARD, cvc="123"), "the security code must be 4 digits"),
-        (lambda db: tokenize_ach(db, ("110000001", "000123456789")), "fails the ABA checksum"),
-        (lambda db: tokenize_ach(db, ("110000000", "12")), "4 to 17 digits"),
-    ],
-)
-async def test_invalid_instruments_are_refused_in_the_gateways_words(db, pg_dsn, tokenize, message) -> None:
-    with pytest.raises(PaymentError) as refused:
-        await tokenize(db)
-    assert str(refused.value).startswith("The payment gateway refused it: ")
-    assert message in str(refused.value) and "gateway:" not in str(refused.value)
-    for secret in (GOOD_CARD, "4242424242424241", AMEX_CARD, "000123456789"):
-        assert secret not in str(refused.value)
-    assert rows(pg_dsn, "payment_methods") == []
-
-
-async def test_charge_errors_write_nothing(db, pg_dsn) -> None:
-    saved = await tokenize_card(db, GOOD_CARD)
-    with pytest.raises(PaymentError, match="the amount must be more than zero"):
-        await charge(db, saved.method_id, 0)
-    with pytest.raises(PaymentError, match="no payment method pm_nope"):
-        await charge(db, "pm_nope")
-    assert rows(pg_dsn, "payments") == []
-
-
-async def test_card_data_is_never_stored_and_never_in_a_repr(db, pg_dsn) -> None:
-    await tokenize_card(db, AMEX_CARD, exp=(3, 2031), cvc="8642")
-    await tokenize_ach(db, GOOD_BANK)
-    stored = all_text(pg_dsn)  # every table, the processor's vault included (hashes only)
-    for secret in (AMEX_CARD, "8642", GOOD_BANK[1]):
-        assert secret not in stored
-    details = repr(CardDetails(AMEX_CARD, 3, 2031, "8642")) + repr(BankDetails(*GOOD_BANK))
-    assert AMEX_CARD not in details and "8642" not in details and GOOD_BANK[1] not in details
-
-
-async def test_the_app_login_cannot_bypass_the_gateway(db, pg_dsn) -> None:
-    """The test setup binds the guards, so every row the other tests see came from the gateway."""
-    saved = await tokenize_card(db, GOOD_CARD)
-    with pytest.raises(psycopg.errors.InsufficientPrivilege, match="written only by the gateway"):
-        async with db.transaction() as tx:
-            await tx._conn.execute(
-                "insert into payments (payment_id, account_id, method_id, amount_cents, status, processor_ref, at) "
-                "values ('pay_x', %s, %s, 100, 'approved', 'rp_x', %s)",
-                (ACCOUNT, saved.method_id, AT),
-            )
-    with pytest.raises(psycopg.errors.InsufficientPrivilege):
-        async with db.transaction() as tx:
-            await tx._conn.execute("select * from processor_vault")
-    with pytest.raises(ValueError, match="not a payment-gateway function"):
-        async with db.transaction() as tx:
-            await tx.call_gateway("processor_outcome_for", {"outcome_key": "x"})
+async def test_card_details_are_never_logged_or_kept(caplog) -> None:
+    caplog.set_level(logging.DEBUG)
+    _, client = twin_and_client()
+    card = await client.add_card(
+        order=ORDER, number="4111111111111111", exp_month=8, exp_year=2028, cvc="987", holder="M B", at=AT
+    )
+    await client.pay(order=ORDER, method=card, amount_cents=100, at=AT)
+    for text in (caplog.text, repr(card), repr(client.__dict__)):
+        assert "4111111111111111" not in text and "987" not in text and HMAC_SECRET not in text
+    await client.close()

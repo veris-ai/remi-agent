@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Iterator
-from datetime import datetime
 
 import pytest
 
@@ -9,11 +8,14 @@ from vamos_agents.remi.agent import RemiAgent
 from vamos_agents.remi.call import RemiCall
 from vamos_agents.remi.context import CallContext
 from vamos_agents.remi.db import Database
+from vamos_agents.remi.payments import PayNearMe
 from vamos_voice.context import CallClock
 from vamos_voice.session import CallSession
 
 from . import support
-from .support import CALL_TIME, PostgresUnavailable, app_dsn, start_postgres, stop_postgres
+from .support import PostgresUnavailable, app_dsn, start_postgres, stop_postgres
+
+PAYNEARME_BASE = "https://paynearme.twin.example"
 
 
 @pytest.fixture(scope="session")
@@ -43,27 +45,37 @@ def ticks() -> ManualClock:
 
 @pytest.fixture
 def context() -> CallContext:
-    return CallContext(
-        account_id="TAS-420101", phone_id="ph_420101_1", call_time=datetime.fromisoformat(CALL_TIME)
-    )
+    return support.context("CARD-04")
+
+
+def paynearme_client() -> PayNearMe:
+    """Remi's PayNearMe client, wired to the test's twin (``support.PAYNEARME``) with the twin's credentials."""
+    twin = support.PAYNEARME
+    return PayNearMe(PAYNEARME_BASE, twin.site_identifier, twin.hmac_secret, transport=twin.transport())
 
 
 @pytest.fixture
-async def make_session(
-    pg_dsn: str, context: CallContext, ticks: ManualClock
-) -> AsyncIterator[Callable[..., CallSession]]:
-    """Build the framework's CallSession around a RemiCall on the seeded world (seed first with
-    ``support.seed_world``): the exact dispatch path a real call takes."""
+async def make_session(pg_dsn: str, ticks: ManualClock) -> AsyncIterator[Callable[..., CallSession]]:
+    """Build the framework's CallSession around a RemiCall on a pilot task's hand-off (seed first with
+    ``support.seed_world``): the exact dispatch path a real call takes. The twin's virtual clock is the
+    call's time, as the World freezes it."""
     opened: list[Database] = []
+    clients: list[PayNearMe] = []
 
-    async def build(call_context: CallContext | None = None) -> CallSession:
-        db = await Database.connect(app_dsn(pg_dsn))  # as the app login: the gateway's guards bind
+    async def build(task: str = "CARD-04") -> CallSession:
+        db = await Database.connect(app_dsn(pg_dsn))  # as the app login, which owns nothing
         opened.append(db)
-        ctx = call_context or context
+        ctx = support.context(task)
+        support.PAYNEARME.now = int(ctx.call_time.timestamp())
+        payments = paynearme_client()
+        clients.append(payments)
         clock = CallClock(ctx.call_time, monotonic=ticks)
         clock.start()
-        return CallSession(RemiCall(ctx, clock, db, support.LEDGER), RemiAgent.tools, RemiAgent.gates)
+        call = RemiCall(ctx, clock, db, support.LEDGER, payments)
+        return CallSession(call, RemiAgent.tools, RemiAgent.gates)
 
     yield build
     for db in opened:
         await db.close()
+    for client in clients:
+        await client.close()
