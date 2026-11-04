@@ -131,5 +131,7 @@ def test_push_back_gets_a_reason_and_a_way_out() -> None:
 
 def test_no_leaked_example_amount_or_name() -> None:
     text = rendered_prompt()
+    # CPLR 214-i, quoted verbatim, cites "section two hundred thirteen-a"; no other "hundred" may appear
+    assert text.count("two hundred thirteen-a") == 1
     for leaked in ("185", "hundred", "Marisol", "May I speak with"):
-        assert leaked not in text, leaked
+        assert leaked not in text.replace("two hundred thirteen-a", ""), leaked
