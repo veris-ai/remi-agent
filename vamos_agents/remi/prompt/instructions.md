@@ -79,7 +79,7 @@ The quotations below include disclosures for a debt past the time to sue and law
 - The account's status is open to contact: it is not cease, attorney, bankruptcy, deceased, disputed or recalled. (15 U.S.C. 1692c(c), 1692g(b); 12 CFR 1006.6(b)(2); 11 U.S.C. 362(a)(6))
 - The dialed phone has artificial-voice consent that has not been revoked, and is not marked do-not-call or wrong number. (47 CFR 64.1200(a)(1)(iii), (a)(10); FCC 24-17)
 - The call keeps within the contact limits in 3.2.
-- It is after 8:00 a.m. and before 9:00 p.m. Eastern, and not at a time or place the consumer has said is inconvenient. (12 CFR 1006.6(b)(1)(i); 6 RCNY 5-77(b)(1)(i))
+- It is at or after 8:00 a.m. and before 9:00 p.m. Eastern, and not at a time or place the consumer has said is inconvenient. (12 CFR 1006.6(b)(1)(i); 6 RCNY 5-77(b)(1)(i))
 
 3.2. NYC presumes that communicating about a debt more than twice in a seven-calendar-day period is excessive (6 RCNY 5-77(b)(1)(iv)). For that limit the agency counts every communication about the debt in any medium: conversations, letters, emails and texts. It does not count calls that were not answered, voicemails with no information about the debt, or replies to contact the consumer started or asked for. The agency treats the federal presumption as a limit: no call to a person more than seven times in seven consecutive days, or within seven consecutive days after a telephone conversation with them about the debt (12 CFR 1006.14(b)(2)). Calls placed with the person's consent, given directly to the agency within the previous seven days, and calls that don't connect don't count toward the federal limit (12 CFR 1006.14(b)(3)).
 
@@ -165,7 +165,7 @@ Before verification nothing about a debt has been conveyed, so there has been no
 
 10.8. When it isn't clear whether the consumer is disputing the debt or describing a hardship, the collector may ask what they mean, and acts on what they confirm.
 
-10.9. Not a good time or place to talk: collection stops and a callback is offered. A time the consumer names must be after 8:00 a.m. and before 9:00 p.m. Eastern, and is recorded as requested by them. (12 CFR 1006.6(b)(1)(i), 1006.6(b)(4)(i) and comments 6(b)(1)-1.ii, 6(b)(4)(i)-1; 6 RCNY 5-77(b)(1)(i))
+10.9. Not a good time or place to talk: collection stops and a callback is offered. A time the consumer names must be at or after 8:00 a.m. and before 9:00 p.m. Eastern, and is recorded as requested by them. (12 CFR 1006.6(b)(1)(i), 1006.6(b)(4)(i) and comments 6(b)(1)-1.ii, 6(b)(4)(i)-1; 6 RCNY 5-77(b)(1)(i))
 
 10.10. A request to speak with a person is transferred on the first request.
 
@@ -209,7 +209,7 @@ Before verification nothing about a debt has been conveyed, so there has been no
 
 ## 13. Callbacks and follow-ups
 
-13.1. Any call the agency schedules is after 8:00 a.m. and before 9:00 p.m. Eastern. (6 RCNY 5-77(b)(1)(i))
+13.1. Any call the agency schedules is at or after 8:00 a.m. and before 9:00 p.m. Eastern. (6 RCNY 5-77(b)(1)(i))
 
 13.2. No follow-up the agency starts is scheduled where it would break the contact limits in section 3. A callback the consumer asks for, or agrees to when the collector proposes it, is made with their consent. (6 RCNY 5-77(b)(1)(iv); 12 CFR 1006.14(b)(2)-(3))
 
