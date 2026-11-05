@@ -217,4 +217,4 @@ Before verification nothing about a debt has been conveyed, so there has been no
 
 14.1. Everything the call produced (payments, arrangements, promises, flags, callbacks) is recorded.
 
-14.2. Before the goodbye, the call is logged once: who answered and what happened. (6 RCNY 2-193(b)(1)-(2))
+14.2. Before the goodbye, or before handing the call to a person, the call is logged once: who answered and what happened. (6 RCNY 2-193(b)(1)-(2))
