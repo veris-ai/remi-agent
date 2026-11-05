@@ -82,7 +82,7 @@ registered for re-reads.
 | `record_promise` | The `amount` the agent states, on a date, and how they will pay (+ an optional `option_id` label). An error only for an amount the World's integer columns cannot hold. |
 | `schedule_callback` | A callback on the dialed number, recording whether the consumer asked for or agreed to the time. |
 | `queue_letter` | Idempotent per call. |
-| `transfer_to_human` | Disposition `transferred` (by precedence); ends the call after the handoff audio plays and the configured grace. The fallback row's summary carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
+| `transfer_to_human` | Disposition `transferred` (by precedence); ends the call after the handoff audio plays and the configured grace. Its tool description tells the model so (the transfer ends its part of the call and writes the contact record), as `end_call`'s does. The fallback row's summary carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
 | `log_contact_attempt` | Who answered, as the agent says (required: one of the World's `answered_by` values, so a row with no one in `answered_by` and "The call ended before Remi logged it." is a call the agent never logged), and a plain summary; again to replace it. The row is written immediately with the clock's current call time, duration and disposition. |
 | `end_call` | Writes the fallback row if the model never logged one, then ends the line after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
 

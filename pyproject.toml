@@ -1,6 +1,6 @@
 [project]
 name = "vamos-agents"
-version = "0.3.2"
+version = "0.3.3"
 description = "Every VAmoS voice agent: the vamos_voice framework plus one pack per agent (Remi, debt collection)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

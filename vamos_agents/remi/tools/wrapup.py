@@ -86,7 +86,8 @@ class TransferArgs(BaseModel):
 
 @REGISTRY.tool(TransferArgs)
 async def transfer_to_human(session: RemiCall, args: TransferArgs) -> dict[str, Any]:
-    """Transfers the call to a person."""
+    """Transfers the call to a person. This ends your part of the call: the line is handed over once your last
+    words have played, and the call's contact record is written (with your log, if you logged the call)."""
     session.transferred = True
     session.hang_up_grace_s = session.transfer_grace_s
     session.ended = True
