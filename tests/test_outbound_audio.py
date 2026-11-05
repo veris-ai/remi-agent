@@ -13,12 +13,13 @@ caller heard, so ``interrupted()`` drops nothing unless asked
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from vamos_voice.call_start import CallStart, callee_first
 from vamos_voice.providers import base
-from vamos_voice.providers.base import PLAYBACK_LEAD_S, OutboundAudio
+from vamos_voice.providers.base import PLAYBACK_LEAD_S, CallRuntime, OutboundAudio
 
 from .fakes import FakeLine
 
@@ -182,3 +183,26 @@ async def test_drain_never_waits_longer_than_max_drain(monkeypatch: pytest.Monke
     await out.drain()
     assert loop.time() - began < 0.4
     await out.close()
+
+
+async def test_call_hang_up_applies_the_agent_grace_after_playout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Audio:
+        async def drain(self) -> None:
+            events.append("drained")
+
+    class Line:
+        async def close(self) -> None:
+            events.append("closed")
+
+    async def sleep(seconds: float) -> None:
+        events.append(f"grace {seconds}")
+
+    monkeypatch.setattr(base.asyncio, "sleep", sleep)
+    session = SimpleNamespace(state=SimpleNamespace(hang_up_grace_s=2.5))
+    call = CallRuntime(Line(), session, None, None, None, Audio())  # type: ignore[arg-type]
+    await call.hang_up()
+    assert events == ["drained", "grace 2.5", "closed"]

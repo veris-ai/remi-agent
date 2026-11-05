@@ -229,9 +229,10 @@ def test_binary_framing_is_unchanged() -> None:
 
 
 @pytest.mark.skipif(importlib.util.find_spec("pipecat") is None, reason="pipecat extra not installed")
-async def test_pipecat_serializer_json_framing() -> None:
+async def test_pipecat_serializer_json_framing(monkeypatch: pytest.MonkeyPatch) -> None:
     from pipecat.frames.frames import CancelFrame, CancelWorkerFrame, EndFrame, OutputAudioRawFrame
 
+    from vamos_voice.providers.pipecat import serializer
     from vamos_voice.providers.pipecat.serializer import LineSerializer
 
     agent_ends = LineSerializer(Framing.JSON)
@@ -240,6 +241,16 @@ async def test_pipecat_serializer_json_framing() -> None:
     inbound = await agent_ends.deserialize(envelope(HELLO))
     assert inbound.audio == HELLO and inbound.sample_rate == 24_000
     assert await agent_ends.serialize(EndFrame()) == '{"type": "end"}', "the agent hangs up in-band"
+
+    waited: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(serializer.asyncio, "sleep", sleep)
+    transfer = LineSerializer(Framing.JSON, hang_up_grace_s=lambda: 2.5)
+    assert await transfer.serialize(EndFrame()) == '{"type": "end"}'
+    assert waited == [2.5], "the transfer grace starts after Pipecat has written the preceding audio"
 
     gone: list[str] = []
     caller_ends = LineSerializer(Framing.JSON, on_caller_end=lambda: gone.append("caller gone"))

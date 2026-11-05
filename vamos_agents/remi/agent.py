@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import Self
@@ -45,6 +46,8 @@ DB_CONNECT_DELAY_S = 3.0
 LEDGER_ENV = ("FINERACT_API_BASE", "FINERACT_USER", "FINERACT_PASSWORD", "FINERACT_TENANT")
 #: PayNearMe's address (the platform's) and the site's credentials (the bench candidate's env, World v2 WORLD.md).
 PAYMENTS_ENV = ("PAYNEARME_API_BASE", "PAYNEARME_SITE_IDENTIFIER", "PAYNEARME_HMAC_SECRET")
+TRANSFER_GRACE_ENV = "VAMOS_REMI_TRANSFER_GRACE_S"
+DEFAULT_TRANSFER_GRACE_S = 3.0
 
 #: Outbound: whoever answers speaks first.
 CALLEE_FIRST = callee_first()
@@ -91,11 +94,13 @@ class RemiAgent(AgentSpec):
         connect_db: Callable[[], Awaitable[Database]],
         connect_ledger: Callable[[], Awaitable[Ledger]],
         connect_payments: Callable[[], Awaitable[PayNearMe]],
+        transfer_grace_s: float = DEFAULT_TRANSFER_GRACE_S,
     ) -> None:
         self.context = context
         self._connect_db = connect_db
         self._connect_ledger = connect_ledger
         self._connect_payments = connect_payments
+        self.transfer_grace_s = transfer_grace_s
         self.db: Database | None = None
         self.ledger: Ledger | None = None
         self.payments: PayNearMe | None = None
@@ -107,6 +112,12 @@ class RemiAgent(AgentSpec):
         dsn = env["DATABASE_URL"]
         ledger_env = {key: env[key] for key in LEDGER_ENV}
         base, site, secret = (env[key] for key in PAYMENTS_ENV)
+        try:
+            transfer_grace_s = float(env.get(TRANSFER_GRACE_ENV, DEFAULT_TRANSFER_GRACE_S))
+        except ValueError as err:
+            raise ValueError(f"{TRANSFER_GRACE_ENV} must be a non-negative number of seconds") from err
+        if not math.isfinite(transfer_grace_s) or transfer_grace_s < 0:
+            raise ValueError(f"{TRANSFER_GRACE_ENV} must be a non-negative number of seconds")
 
         async def connect_payments() -> PayNearMe:
             return PayNearMe(base, site, secret)
@@ -116,6 +127,7 @@ class RemiAgent(AgentSpec):
             connect_db=lambda: Database.connect(dsn),
             connect_ledger=lambda: open_ledger(ledger_env),
             connect_payments=connect_payments,
+            transfer_grace_s=transfer_grace_s,
         )
 
     def call_time(self) -> datetime:
@@ -149,7 +161,7 @@ class RemiAgent(AgentSpec):
     def open_call(self, clock: CallClock) -> RemiCall:
         if self.db is None or self.ledger is None or self.payments is None:
             raise RuntimeError("RemiAgent.connect() must run before a call")
-        return RemiCall(self.context, clock, self.db, self.ledger, self.payments)
+        return RemiCall(self.context, clock, self.db, self.ledger, self.payments, self.transfer_grace_s)
 
     async def screen_pop(self, call: RemiCall) -> ScreenPop:
         return await screen_pop(call)

@@ -164,7 +164,11 @@ class PipecatProvider(VoiceProvider):
                 audio_out_enabled=True,
                 audio_in_sample_rate=CHANNEL_RATE_HZ,
                 audio_out_sample_rate=CHANNEL_RATE_HZ,
-                serializer=LineSerializer(call.line.framing, on_caller_end=call.line.caller_gone),
+                serializer=LineSerializer(
+                    call.line.framing,
+                    on_caller_end=call.line.caller_gone,
+                    hang_up_grace_s=lambda: getattr(call.session.state, "hang_up_grace_s", 0.0),
+                ),
             ),
         )
         llm = self.build_llm(call.setup)

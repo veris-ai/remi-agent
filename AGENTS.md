@@ -622,6 +622,7 @@ Agents:
 | `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | remi | Fineract's Basic pair and tenant (bench-wide candidate-env, set by the benchmark's `publish world`). Required. |
 | `PAYNEARME_API_BASE` | remi | The PayNearMe twin's base URL (the platform's agent env): payments are taken there. Required. |
 | `PAYNEARME_SITE_IDENTIFIER`, `PAYNEARME_HMAC_SECRET` | remi | The twin's site id and HMAC secret (bench candidate-env): every request is signed with them, timestamped with the World's time. Required. |
+| `VAMOS_REMI_TRANSFER_GRACE_S` | remi | Seconds to keep the line open after transfer handoff audio finishes. Optional; default `3`. |
 
 Any missing required variable stops the process at startup (exit 2) with a message naming it.
 

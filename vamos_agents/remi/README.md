@@ -32,7 +32,7 @@ push) are in the root [AGENTS.md](../../AGENTS.md). This file covers Remi only.
 | `instructions(clock)` | `prompt/instructions.md`, rendered with the call's date and the agency row | `prompt/` |
 | `tools` | 22 tools (below) | `tools/` |
 | `gates` | none: Remi's `Gates` refuses nothing | `gates.py` |
-| per-call state | `RemiCall`: the reads, what verification established, what the agent recorded; the call's one `contact_attempts` row, written once when the call ends (`end_call`, or `finalize()` the moment the caller hangs up) | `call.py` |
+| per-call state | `RemiCall`: the reads, what verification established, what the agent recorded; the call's one `contact_attempts` row, written when the model logs it or as an end-of-call fallback | `call.py` |
 | world clients | `Database` (psycopg 3, timeouts, whitelisted columns) from `DATABASE_URL`, with the World's `creditor_policy` and `request_approval`; `FineractLedger` (async httpx, timeouts) from `FINERACT_API_BASE` and its credentials, for the money; `PayNearMe` (async httpx, signed requests) from `PAYNEARME_API_BASE` and the site's credentials, for payments | `db.py`, `ledger.py`, `payments.py` |
 | records | how Remi writes what the agent did: business days, a plan's payments, dollars, one disposition per call | `policy.py` |
 
@@ -82,20 +82,20 @@ registered for re-reads.
 | `record_promise` | The `amount` the agent states, on a date, and how they will pay (+ an optional `option_id` label). An error only for an amount the World's integer columns cannot hold. |
 | `schedule_callback` | A callback on the dialed number, recording whether the consumer asked for or agreed to the time. |
 | `queue_letter` | Idempotent per call. |
-| `transfer_to_human` | Disposition `transferred` (by precedence); the row's summary always carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
-| `log_contact_attempt` | Who answered, as the agent says (required: one of the World's `answered_by` values, so a row with no one in `answered_by` and "The call ended before Remi logged it." is a call the agent never logged), and a plain summary; again to replace it. The row is written when the call ends: time, duration and disposition from the call and the clock, and a summary that leads with what the call recorded, then the agent's notes. |
-| `end_call` | Writes the contact row (with the agent's log, if it logged), then the line closes after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
+| `transfer_to_human` | Disposition `transferred` (by precedence); ends the call after the handoff audio plays and the configured grace. The fallback row's summary carries "Transferred to a person.", the form the bench reads a transfer from when a candidate has no trace. |
+| `log_contact_attempt` | Who answered, as the agent says (required: one of the World's `answered_by` values, so a row with no one in `answered_by` and "The call ended before Remi logged it." is a call the agent never logged), and a plain summary; again to replace it. The row is written immediately with the clock's current call time, duration and disposition. |
+| `end_call` | Writes the fallback row if the model never logged one, then ends the line after the last words play (`json` framing: `{"type": "end"}` first, so the bench records a normal end, not a disconnect). |
 
 ### The contact row on every ending
 
-Every call leaves exactly one `contact_attempts` row, written once, under a lock:
+Every call leaves exactly one `contact_attempts` row, serialized under a lock:
 
-- the agent ends it: `end_call` writes the row before the line closes;
+- `log_contact_attempt` writes the row at the time the model logs it; another call replaces that same row;
+- `end_call` or `transfer_to_human` writes the fallback before hang-up if the model never logged;
 - the caller hangs up or the socket drops first: the framework's
   `CallSession.caller_gone` finalizes at once (not after the vendor's own
   teardown, which can take seconds), after any tool call already running, and
-  refuses new ones; `RemiCall.finalize` writes the row from the model's log, or
-  from the call alone if it never logged;
+  refuses new ones; `RemiCall.finalize` writes a fallback only if the model never logged;
 - the provider fails, or the pod is stopped mid-call: the server finalizes the
   call before it closes Remi's database.
 
@@ -198,6 +198,7 @@ measured refusals, `tests/fake_ledger.py`).
 | `FINERACT_USER`, `FINERACT_PASSWORD`, `FINERACT_TENANT` | bench candidate-env | Fineract's Basic pair and tenant header (the World's published `mifos`/`password`/`default`). Required; no defaults in code. |
 | `PAYNEARME_API_BASE` | platform (world) | The PayNearMe twin's base URL; `/json-api` is beneath it. Required. |
 | `PAYNEARME_SITE_IDENTIFIER`, `PAYNEARME_HMAC_SECRET` | bench candidate-env | The twin's site id and HMAC secret. Required; no defaults in code. |
+| `VAMOS_REMI_TRANSFER_GRACE_S` | optional | Seconds to keep the line open after transfer handoff audio finishes; default `3`. |
 
 Plus the framework's and the vendor's variables (AGENTS.md section 11).
 

@@ -13,6 +13,7 @@ finalizes without waiting for the pipeline to wind down.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from pipecat.frames.frames import (
@@ -32,16 +33,28 @@ from vamos_voice.framing import Framing
 class LineSerializer(FrameSerializer):
     """Audio in and out in the line's framing; the hang-up as the framing's end message; nothing else crosses."""
 
-    def __init__(self, framing: Framing, on_caller_end: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        framing: Framing,
+        on_caller_end: Callable[[], None] | None = None,
+        hang_up_grace_s: Callable[[], float] | None = None,
+    ) -> None:
         super().__init__()
         self.framing = framing
         self.caller_ended = False
         self._on_caller_end = on_caller_end
+        self._hang_up_grace_s = hang_up_grace_s
 
     async def serialize(self, frame: Frame) -> bytes | str | None:
         if isinstance(frame, OutputAudioRawFrame):
             return self.framing.encode_audio(frame.audio)
         if isinstance(frame, EndFrame | CancelFrame) and not self.caller_ended:
+            if (
+                isinstance(frame, EndFrame)
+                and self._hang_up_grace_s is not None
+                and (grace_s := self._hang_up_grace_s()) > 0
+            ):
+                await asyncio.sleep(grace_s)
             return self.framing.end_message()
         return None
 

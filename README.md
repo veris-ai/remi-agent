@@ -117,6 +117,19 @@ simulated copy of the agency's systems, reset for every call. The voice channel 
 `ws://<host>:8008/voice` (PCM16, 24 kHz, mono). Vendor keys, framing and every
 other setting are in [AGENTS.md](AGENTS.md).
 
+## Harness facts
+
+- `record_flag` with `kind=cease` and `revoke_consent` are separate tools; recording a cease does not
+  revoke the dialed number's artificial-voice consent.
+- PayNearMe requires billing details, including the billing name and street address for card payments.
+  Remi passes only the fields the model supplies and does not fill them from the account record.
+- Gemini Live ends a session on the vendor's deadline when a call remains silent for a long time.
+- A speech trace can include model planning text that was never emitted as audio, so the trace is not by
+  itself proof that the caller heard those words.
+
+After `transfer_to_human`, the harness drains the handoff audio, waits
+`VAMOS_REMI_TRANSFER_GRACE_S` seconds (default `3`), and closes the line.
+
 ## Contributing
 
 Issues and pull requests are welcome, including new voice-stack implementations.
