@@ -4,8 +4,8 @@ The bench measures the agent (World v2 WORLD.md, "Nothing refuses the agent"):
 nothing here keeps the agent to an order or decides whether it may act. The
 state holds what the call read (the account, the dialed phone, the contact
 history, the debt), what verification established, and what the agent
-recorded, and writes the call's one ``contact_attempts`` row when the call ends,
-from what the agent logged.
+recorded, and writes the call's one ``contact_attempts`` row when the agent logs
+it (or, as a fallback, when an unlogged call ends).
 
 Every tool handler receives this object. The framework's ``CallSession``
 dispatches to them, redacts card fields in logs, and turns errors into
@@ -57,7 +57,7 @@ def new_id(prefix: str) -> str:
 
 @dataclass(frozen=True)
 class ContactNote:
-    """What log_contact_attempt recorded for the call's one contact row (the row is written at the end)."""
+    """What log_contact_attempt recorded for the call's one contact row."""
 
     answered_by: str  # as the agent logged it: one of the World's values, never empty
     notes: str
@@ -73,6 +73,7 @@ class RemiCall:
     db: Database
     ledger: Ledger
     payments: PayNearMe
+    transfer_grace_s: float = 3.0
 
     # The reads.
     agency: Agency | None = None
@@ -106,10 +107,13 @@ class RemiCall:
     balance_before_payments_cents: int | None = None
     #: Charges run one at a time (two at once would race on PayNearMe's order); none is ever refused.
     charge_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    #: log_contact_attempt's note; the row itself is written once, when the call ends.
+    #: log_contact_attempt's note; None means the model never logged the call.
     contact_note: ContactNote | None = None
-    #: The written row's disposition, once it is written (end_call, or finalize).
+    #: The one written row and its disposition.
+    contact_attempt_id: str | None = None
     contact_disposition: str | None = None
+    #: A transfer ends through the normal provider hang-up path after this post-playout grace.
+    hang_up_grace_s: float = 0.0
     ended: bool = False
     _contact_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
@@ -232,6 +236,21 @@ class RemiCall:
                 return "not_verified"
         return policy.disposition(self.outcomes, transferred=self.transferred)
 
+    def fallback_disposition(self) -> str:
+        """The unlogged call's disposition, from facts its tools actually recorded."""
+        if self.deceased_flag_id is not None:
+            return "deceased"
+        recorded = policy.disposition(self.outcomes, transferred=self.transferred)
+        if recorded != "no_commitment":
+            return recorded
+        if self.number_stop == "unverified":
+            return "unverified_stop"
+        if self.verification_refused and not self.wrong_answers:
+            return "refused_verification"
+        if self.wrong_answers:
+            return "failed_verification"
+        return "not_verified" if self.verified_as is None else "no_commitment"
+
     def recorded_facts(self, answered_by: str | None, disposition: str) -> str:
         """The factual head of the call's summary: what the call recorded, then who the agent said answered."""
         facts = [
@@ -246,59 +265,99 @@ class RemiCall:
 
     @property
     def contact_logged(self) -> bool:
-        """log_contact_attempt has run (the row is written when the call ends)."""
+        """log_contact_attempt has written the call's row."""
         return self.contact_note is not None
 
-    async def write_contact_record(self) -> str:
-        """The call's one contact_attempts row (NYC § 2-193); once.
-
-        Written when the call ends (end_call, or ``finalize`` when the other side hangs up first), from what
-        the agent logged and what the call recorded, so an outcome after log_contact_attempt still counts."""
+    async def log_contact_record(self, note: ContactNote) -> str:
+        """Write the model's contact record now; a repeated log replaces that same row."""
         async with self._contact_lock:
-            if self.contact_disposition is not None:
+            return await self._store_contact_record(note)
+
+    async def write_contact_record(self) -> str:
+        """Write the fallback row once, only when the model never logged the call; a logged row gets the call's
+        whole duration."""
+        async with self._contact_lock:
+            if self.contact_attempt_id is not None:
+                assert self.contact_disposition is not None
+                await self._record_duration()
                 return self.contact_disposition
-            phone = await self.ensure_phone()
+            return await self._store_contact_record(None)
+
+    async def _record_duration(self) -> None:
+        """Bring a logged row's duration up to the whole call (it was logged before the call ended)."""
+        async with self.db.transaction() as tx:
+            await tx.update("contact_attempts", self.contact_attempt_id,
+                            {"duration_s": max(1, round(self.clock.elapsed.total_seconds()))})
+
+    async def complete_contact_record(self) -> str:
+        """Ensure the ending call has one row; add a transfer to a row the model logged earlier."""
+        async with self._contact_lock:
+            if self.contact_attempt_id is None:
+                return await self._store_contact_record(None)
+            assert self.contact_disposition is not None
             note = self.contact_note
-            answered_by = note.answered_by if note else None
-            mark_wrong = not self.phone_marked_wrong and (
-                answered_by == "wrong_number" or (note is not None and note.number_is_wrong)
-            )
-            disposition = self.disposition_for(answered_by)
-            facts = self.recorded_facts(answered_by, disposition)
-            summary = (
-                f"{facts} Remi's notes: {note.notes}"
-                if note
-                else f"{facts} The call ended before Remi logged it."
-            )
+            await self._record_duration()
+            if not self.transferred or note is None:
+                return self.contact_disposition
+            disposition = self.disposition_for(note.answered_by)
+            summary = f"{self.recorded_facts(note.answered_by, disposition)} Remi's notes: {note.notes}"
             async with self.db.transaction() as tx:
-                await tx.insert(
+                await tx.update(
                     "contact_attempts",
-                    {
-                        "attempt_id": new_id("att"),
-                        "account_id": self.context.account_id,
-                        "phone_id": phone.phone_id,
-                        "at": self.context.call_time,
-                        "medium": "voicemail" if answered_by == "voicemail" else "call",
-                        "direction": "outbound",
-                        "answered_by": answered_by,
-                        "consumer_responded": answered_by == "consumer",
-                        "duration_s": max(1, round(self.clock.elapsed.total_seconds())),
-                        "disposition": disposition,
-                        "summary": summary,
-                        "agent_name": AGENT_NAME,
-                    },
+                    self.contact_attempt_id,
+                    {"disposition": disposition, "summary": summary},
                 )
-                if mark_wrong:
-                    await tx.update("phones", phone.phone_id, {"status": "wrong_number"})
-            self.phone_marked_wrong = self.phone_marked_wrong or mark_wrong
             self.contact_disposition = disposition
             return disposition
+
+    async def _store_contact_record(self, note: ContactNote | None) -> str:
+        """Insert or replace the call's single row. The caller holds ``_contact_lock``."""
+        phone = await self.ensure_phone()
+        answered_by = note.answered_by if note else None
+        mark_wrong = not self.phone_marked_wrong and (
+            answered_by == "wrong_number" or (note is not None and note.number_is_wrong)
+        )
+        disposition = self.disposition_for(answered_by) if note else self.fallback_disposition()
+        facts = self.recorded_facts(answered_by, disposition)
+        summary = (
+            f"{facts} Remi's notes: {note.notes}"
+            if note
+            else f"{facts} The call ended before Remi logged it."
+        )
+        attempt_id = self.contact_attempt_id or new_id("att")
+        row = {
+            "attempt_id": attempt_id,
+            "account_id": self.context.account_id,
+            "phone_id": phone.phone_id,
+            "at": self.context.call_time,  # the call's own time; the ledger event carries the moment it was logged
+            "medium": "voicemail" if answered_by == "voicemail" else "call",
+            "direction": "outbound",
+            "answered_by": answered_by,
+            "consumer_responded": answered_by == "consumer",
+            "duration_s": max(1, round(self.clock.elapsed.total_seconds())),
+            "disposition": disposition,
+            "summary": summary,
+            "agent_name": AGENT_NAME,
+        }
+        async with self.db.transaction() as tx:
+            if self.contact_attempt_id is None:
+                await tx.insert("contact_attempts", row)
+            else:
+                await tx.update(
+                    "contact_attempts", attempt_id, {k: v for k, v in row.items() if k != "attempt_id"}
+                )
+            if mark_wrong:
+                await tx.update("phones", phone.phone_id, {"status": "wrong_number"})
+        self.phone_marked_wrong = self.phone_marked_wrong or mark_wrong
+        self.contact_note = note
+        self.contact_attempt_id = attempt_id
+        self.contact_disposition = disposition
+        return disposition
 
     async def finalize(self) -> None:
         """The voice connection closed (or the caller hung up). Every call leaves exactly one
         contact-attempt row (NYC § 2-193): write it now if end_call has not."""
-        if self.contact_disposition is not None:
+        if self.contact_attempt_id is not None:
             return
         disposition = await self.write_contact_record()
-        if self.contact_note is None:
-            logger.warning("call closed without log_contact_attempt; logged it as %s", disposition)
+        logger.warning("call closed without log_contact_attempt; logged it as %s", disposition)

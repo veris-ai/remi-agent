@@ -23,6 +23,7 @@ from vamos_agents.remi import RemiAgent
 from vamos_agents.remi.context import CallContext
 from vamos_agents.remi.db import Database
 from vamos_agents.remi.payments import PayNearMe
+from vamos_voice.context import AgentContext
 from vamos_voice.framing import Framing
 from vamos_voice.providers.base import CallRuntime, VoiceProvider
 from vamos_voice.server import ConfigError, build_app_from_env, create_app
@@ -190,6 +191,26 @@ def test_startup_fails_loudly_on_missing_config() -> None:
         build_app_from_env(base)
     with pytest.raises(ConfigError, match="OPENAI_API_KEY"):
         build_app_from_env({**base, "VAMOS_VENDOR": "openai_realtime"})
+
+
+def test_transfer_grace_is_configurable_from_the_environment() -> None:
+    env = {
+        "DATABASE_URL": "postgresql://example",
+        "FINERACT_API_BASE": "https://fineract.example",
+        "FINERACT_USER": "u",
+        "FINERACT_PASSWORD": "p",
+        "FINERACT_TENANT": "default",
+        "PAYNEARME_API_BASE": "https://paynearme.example",
+        "PAYNEARME_SITE_IDENTIFIER": "S1",
+        "PAYNEARME_HMAC_SECRET": "secret",
+    }
+    context = AgentContext.from_json(CONTEXT_JSON)
+    assert RemiAgent.from_env(env, context).transfer_grace_s == 3.0
+    assert (
+        RemiAgent.from_env({**env, "VAMOS_REMI_TRANSFER_GRACE_S": "1.75"}, context).transfer_grace_s == 1.75
+    )
+    with pytest.raises(ValueError, match="VAMOS_REMI_TRANSFER_GRACE_S"):
+        RemiAgent.from_env({**env, "VAMOS_REMI_TRANSFER_GRACE_S": "-1"}, context)
 
 
 def _audio(pcm: bytes) -> str:

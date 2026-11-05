@@ -386,11 +386,14 @@ class CallRuntime:
     hung_up: bool = field(default=False, init=False)
 
     async def hang_up(self) -> None:
-        """Let the last words play, then close the caller's line."""
+        """Let the last words play, apply any agent-requested grace, then close the caller's line."""
         if self.hung_up:
             return
         self.hung_up = True
         await self.outbound.drain()
+        grace_s = getattr(self.session.state, "hang_up_grace_s", 0.0)
+        if grace_s > 0:
+            await asyncio.sleep(grace_s)
         await self.line.close()
 
 

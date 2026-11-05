@@ -426,8 +426,7 @@ async def create_arrangement(session: RemiCall, args: ArrangementArgs) -> dict[s
             },
         )
         await session.queue_letters(tx, "plan_confirmation")
-    if row_kind == "plan":
-        session.outcomes.add("plan")
+    session.outcomes.add({"plan": "plan", "settlement_lump": "settled", "pay_in_full": "ptp"}[row_kind])
     return {
         "recorded": row_kind,
         "arrangement_id": arrangement_id,

@@ -95,6 +95,7 @@ KEYS = {
     "accounts": "account_id",
     "consumers": "consumer_id",
     "phones": "phone_id",
+    "contact_attempts": "attempt_id",
     "account_flags": "flag_id",
 }
 JSON_COLUMNS = frozenset({"details", "instalments"})

@@ -1,10 +1,9 @@
 """Closing the call: callbacks, letters, transfers, the contact log, hanging up.
 
 Every call ends with exactly one contact-attempt row (NYC § 2-193).
-``log_contact_attempt`` records the agent's part of it, who answered and a
-plain-language summary; the row itself is written once, when the call ends: by
-``end_call``, or by ``RemiCall.finalize`` the moment the other side hangs up (or
-the socket drops) first, so an outcome recorded after the log still counts. Who
+``log_contact_attempt`` writes who answered and a plain-language summary at the
+time the model calls it. ``RemiCall.finalize`` writes the fallback only when the
+model never logged the call. Who
 answered is what the agent logged, always one of the World's values: the bench
 grades it, so a wrong claim is the agent's. A row with no one in ``answered_by``
 ("The call ended before Remi logged it.") is a call the agent never logged. The row's duration comes from ``CallClock`` and its disposition from what
@@ -89,6 +88,9 @@ class TransferArgs(BaseModel):
 async def transfer_to_human(session: RemiCall, args: TransferArgs) -> dict[str, Any]:
     """Transfers the call to a person."""
     session.transferred = True
+    session.hang_up_grace_s = session.transfer_grace_s
+    session.ended = True
+    await session.complete_contact_record()
     return {"transferred": True, "reason": args.reason}
 
 
@@ -116,7 +118,8 @@ async def log_contact_attempt(session: RemiCall, args: ContactLogArgs) -> dict[s
     """Logs this call's one contact record: who answered and what happened. The record is written when the call
     ends, with the time, duration and disposition filled in from everything recorded on the call. Calling it
     again replaces your log."""
-    session.contact_note = ContactNote(args.answered_by, args.summary.strip(), args.number_is_wrong)
+    note = ContactNote(args.answered_by, args.summary.strip(), args.number_is_wrong)
+    await session.log_contact_record(note)
     return {"logged": True}
 
 
@@ -128,6 +131,6 @@ class NoArgs(BaseModel):
 async def end_call(session: RemiCall, _: NoArgs) -> dict[str, Any]:
     """Hangs up once your last words have played. Writes the call's contact record (with your log, if you
     logged the call)."""
-    await session.write_contact_record()
     session.ended = True
+    await session.complete_contact_record()
     return {"ended": True}

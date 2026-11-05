@@ -202,7 +202,6 @@ async def test_no_tool_waits_for_verification_or_stops_after_a_dispute(pg_dsn, m
             "schedule_callback",
             {"scheduled_for": "2026-11-03T23:30:00-05:00", "consumer_asked_or_agreed": False},
         ),
-        ("transfer_to_human", {"reason": "other"}),
         ("end_call", {}),
     ):
         result = await s.dispatch(name, args)
@@ -382,29 +381,53 @@ async def test_the_contact_record_is_what_the_agent_logged(pg_dsn, make_session,
     """The agent's own account of who answered stands, verified or not: a wrong claim is the agent's."""
     seed_world(pg_dsn)
     s = await make_session("CARD-04")
-    await s.dispatch("transfer_to_human", {"reason": "consumer_asked_for_person"})
+    s.state.transferred = True
+    ticks.t += 95
     logged = await s.dispatch(
         "log_contact_attempt", {"answered_by": "consumer", "summary": "Asked for a person; transferred."}
     )
     assert logged == {"logged": True}
-    ticks.t += 95
-    assert await s.dispatch("end_call", {}) == {"ended": True}
     (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
-    assert (attempt["answered_by"], attempt["consumer_responded"], attempt["duration_s"]) == (
+    assert attempt["at"] == s.state.context.call_time and attempt["duration_s"] == 95, "the row lands when the model logs it"
+    attempt_id = attempt["attempt_id"]
+    ticks.t += 30
+    assert await s.dispatch("end_call", {}) == {"ended": True}
+    await s.finalize()
+    (attempt,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert (attempt["attempt_id"], attempt["answered_by"], attempt["consumer_responded"]) == (
+        attempt_id,
         "consumer",
         True,
-        95,
+    )
+    assert attempt["duration_s"] == 125 and attempt["at"] == s.state.context.call_time, (
+        "logged at 95 s, the call ended at 125 s: the row keeps the call's time and gets its whole duration"
     )
     assert (attempt["disposition"], attempt["medium"], attempt["phone_id"]) == (
         "transferred",
         "call",
         "ph_261101_1",
     )
-    assert attempt["at"] == support.context("CARD-04").call_time
     assert attempt["summary"] == (
         "Disposition: transferred. Answered by: the consumer. Transferred to a person. "
         "Remi's notes: Asked for a person; transferred."
     )
+
+
+async def test_logging_again_replaces_the_same_contact_row(pg_dsn, make_session, ticks) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("STORE-01")
+    await s.dispatch(
+        "log_contact_attempt", {"answered_by": "third_party", "summary": "A family member answered."}
+    )
+    (first,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    ticks.t += 12
+    await s.dispatch(
+        "log_contact_attempt", {"answered_by": "no_answer", "summary": "Corrected: nobody answered."}
+    )
+    (replaced,) = rows(pg_dsn, "contact_attempts", "agent_name = 'Remi'")
+    assert replaced["attempt_id"] == first["attempt_id"]
+    assert (replaced["answered_by"], replaced["duration_s"]) == ("no_answer", 12)
+    assert replaced["summary"].endswith("Remi's notes: Corrected: nobody answered.")
 
 
 async def test_who_answered_is_required_so_a_logged_call_always_names_who(pg_dsn, make_session) -> None:
@@ -443,6 +466,44 @@ async def test_a_call_ended_without_a_log_leaves_answered_by_null_and_says_so(pg
         pg_dsn, "contact_attempts", f"agent_name = 'Remi' and account_id = '{account_id('STORE-04')}'"
     )
     assert [a["disposition"] for a in later] == ["refused_verification"]
+
+
+async def test_an_unlogged_calls_fallback_uses_what_its_tools_recorded(pg_dsn, make_session) -> None:
+    seed_world(pg_dsn)
+    cases = [
+        ("HOSP-01", "log_dispute", {"words": "This is not my bill."}, "dispute"),
+        ("LAW-17", "record_flag", {"kind": "cease"}, "cease"),
+        (
+            "AUTO-03",
+            "create_arrangement",
+            {"kind": "discount", "total": "9000.00", "first_due_on": "2026-11-10"},
+            "settled",
+        ),
+        (
+            "PHONE-02",
+            "create_arrangement",
+            {"kind": "payment_plan", "total": "945.00", "months": 10, "first_due_on": "2026-12-01"},
+            "plan",
+        ),
+    ]
+    for task, tool, args, expected in cases:
+        s = await make_session(task)
+        assert "error" not in await s.dispatch(tool, args)
+        await s.finalize()
+        (attempt,) = rows(
+            pg_dsn, "contact_attempts", f"agent_name = 'Remi' and account_id = '{account_id(task)}'"
+        )
+        assert (attempt["answered_by"], attempt["disposition"]) == (None, expected), task
+
+
+async def test_transfer_ends_the_call_with_its_configured_grace(make_session, pg_dsn) -> None:
+    seed_world(pg_dsn)
+    s = await make_session("AUTO-03")
+    s.state.transfer_grace_s = 1.25
+    result = await s.dispatch("transfer_to_human", {"reason": "consumer_asked_for_person"})
+    assert result == {"transferred": True, "reason": "consumer_asked_for_person"}
+    assert s.ended and s.state.hang_up_grace_s == 1.25
+    assert await s.dispatch("end_call", {}) == {"error": "The call has ended."}
 
 
 async def test_dispositions_follow_what_the_call_recorded(pg_dsn, make_session) -> None:
