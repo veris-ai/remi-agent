@@ -73,6 +73,7 @@ Every row is the same Remi. `VENDOR` is the image build argument.
 | `huggingface` | Hugging Face Inference: Whisper, a router chat model, Kokoro | `openai/gpt-oss-120b` (via Groq) |
 | `gradium` | gradbot: Gradium streaming STT and TTS around an OpenAI-compatible LLM | `gpt-4.1-mini` |
 | `fluxions` | Fluxions voice-agent API: ASR, a vLLM-served chat model and VUI TTS in one realtime socket | the vendor's hosted model (not in the October 2026 run) |
+| `phonic` | Phonic speech-to-speech over its own websocket (`intelligence_level: high`) | `phonic-1.1` |
 | `silent` | A null agent that never speaks: the benchmark's zero baseline | none |
 
 The model column shows what the benchmark ran; most are set by an environment
