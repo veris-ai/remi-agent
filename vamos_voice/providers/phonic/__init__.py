@@ -85,7 +85,11 @@ AUDIO_ITEM = "turn"
 
 
 class PhonicToolFormat:
-    """Inline ``custom_websocket`` tools: the OpenAI function shape under ``tool_schema``."""
+    """Inline ``custom_websocket`` tools: the OpenAI function shape under ``tool_schema``.
+
+    Phonic refuses an inline tool without ``strict: true`` ("Invalid input" per tool). The
+    parameters go unchanged: Phonic accepts optional properties under the flag.
+    """
 
     def convert(self, tools: list[ToolSpec]) -> list[dict[str, Any]]:
         return [
@@ -96,7 +100,12 @@ class PhonicToolFormat:
                 "tool_call_output_timeout_ms": TOOL_OUTPUT_TIMEOUT_MS,
                 "tool_schema": {
                     "type": "function",
-                    "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                        "strict": True,
+                    },
                 },
             }
             for t in tools

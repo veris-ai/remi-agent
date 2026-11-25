@@ -74,6 +74,8 @@ def test_config_matches_the_energy_candidate_where_remi_allows() -> None:
         assert tool["type"] == "custom_websocket"
         assert tool["execution_mode"] == "sync" and tool["uninterruptible"] is True
         assert tool["tool_call_output_timeout_ms"] == 30_000
+        # Phonic's InlineWebSocketTool schema: OpenAIFunction.strict is required and must be true.
+        assert tool["tool_schema"]["function"]["strict"] is True
     assert "ph-key" not in json.dumps(config)
 
 
