@@ -40,6 +40,7 @@ elevenlabs = [
 fluxions = [
     "httpx>=0.28,<0.29",  # GET /config (the soul cap) and /voices at warm-up
 ]
+phonic = []
 # In-pod cascades (vamos_voice/providers/cascade.py): Silero VAD for barge-in runs on onnxruntime.
 mistral = [
     "mistralai[realtime]>=2.10,<3",

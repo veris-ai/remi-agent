@@ -199,6 +199,8 @@ class ScriptedSession:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.ended = False
+        #: No agent state: ``CallRuntime.hang_up`` reads ``state.hang_up_grace_s`` and finds none.
+        self.state = None
 
     async def dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((name, args))

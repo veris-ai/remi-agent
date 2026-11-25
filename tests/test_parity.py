@@ -66,6 +66,7 @@ def test_every_vendor_folder_is_covered_here() -> None:
         "deepgram",
         "elevenlabs",
         "fluxions",
+        "phonic",
         "mistral",
         "huggingface",
         "grok_cascade",
@@ -92,6 +93,7 @@ STANDARD_KEYS = {
     "deepgram": ("DEEPGRAM_API_KEY",),
     "elevenlabs": ("ELEVENLABS_API_KEY",),
     "fluxions": ("FLUXIONS_API_KEY",),
+    "phonic": ("PHONIC_API_KEY",),
     "mistral": ("MISTRAL_API_KEY",),
     "huggingface": ("HF_TOKEN",),
     "grok_cascade": ("XAI_API_KEY",),  # plus OPENAI_API_KEY for its default LLM (checked in from_env)
@@ -120,6 +122,7 @@ def test_provider_metadata(name: str) -> None:
         "deepgram-voice-agent",
         "elevenlabs-convai",
         "fluxions-realtime",
+        "phonic",
         "gradbot",
         "vapi",
         "cartesia",
@@ -617,6 +620,63 @@ def fluxions_call(sock: FakeVendorSocket) -> dict[str, Any]:
     return {"provider": provider}
 
 
+class PhonicScript:
+    """Server events in Phonic's speech-to-speech protocol: JSON frames, base64 PCM16 audio."""
+
+    expected_vad = (None, None)  # Phonic's own turn taking: no VAD setting is sent
+
+    def __init__(self, sock: FakeVendorSocket) -> None:
+        self.sock, self.n = sock, 0
+
+    def ready(self) -> None:
+        self.sock.push({"type": "ready_to_start_conversation"})
+        self.sock.push({"type": "conversation_created", "conversation_id": "conv_1"})
+
+    def tool_calls(self, *names: str) -> None:
+        for i, name in enumerate(names):
+            self.n += 1
+            self.sock.push(
+                {"type": "tool_call", "tool_call_id": f"tc_{self.n}_{i}", "tool_name": name, "parameters": {}}
+            )
+
+    def audio(self) -> None:
+        self.sock.push({"type": "audio_chunk", "audio": base64.b64encode(AGENT_AUDIO).decode(), "text": "Hi"})
+
+    def callee_spoke(self) -> None:
+        self.sock.push({"type": "input_text", "language": "en", "text": "Hello?"})
+
+    @staticmethod
+    def setup(frame: dict[str, Any]) -> dict[str, Any]:
+        assert "welcome_message" not in frame and not frame.get("generate_welcome_message")
+        assert frame["input_format"] == frame["output_format"] == "pcm_24000"
+        assert not [k for k in frame if k.startswith("vad_")], "turn taking stays Phonic's own"
+        inline = [t for t in frame["tools"] if t["type"] == "custom_websocket"]
+        assert all(t["execution_mode"] == "sync" and t["uninterruptible"] for t in inline)
+        return {
+            "instructions": frame["system_prompt"],
+            "tools": _flat_tools([t["tool_schema"]["function"] for t in inline]),
+            "silence_ms": None,
+            "prefix_ms": None,
+            "transcribes_caller": True,  # input_text always streams
+        }
+
+    is_setup = staticmethod(lambda f: f.get("type") == "config")
+    is_request = staticmethod(lambda f: f.get("type") in ("generate_reply", "say"))
+    is_caller_audio = staticmethod(lambda f: f.get("type") == "audio_chunk")
+
+    @staticmethod
+    def check_opening(frame: dict[str, Any], case: AgentCase) -> None:
+        assert frame == {"type": "generate_reply", "system_message": case.policy.opening_instruction}
+
+
+def phonic_call(sock: FakeVendorSocket) -> dict[str, Any]:
+    from vamos_voice.providers.phonic import PhonicProvider
+
+    provider = PhonicProvider("ph-test", "phonic-1.1", "sabrina")
+    provider.connect = sock.connector()
+    return {"provider": provider}
+
+
 SOCKET_VENDORS = {
     "openai_realtime": (openai_call, OpenAIScript),
     "gemini_live": (gemini_call, GeminiScript),
@@ -625,6 +685,7 @@ SOCKET_VENDORS = {
     "deepgram": (deepgram_call, DeepgramScript),
     "elevenlabs": (elevenlabs_call, ElevenLabsScript),
     "fluxions": (fluxions_call, FluxionsScript),
+    "phonic": (phonic_call, PhonicScript),
 }
 
 
